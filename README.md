@@ -1,667 +1,171 @@
 <p align="center">
-  <img src="docs/images/banner.en.jpg" width="900" alt="MovieClaw: the next-gen AI media server">
+  <img src="docs/images/banner.en.jpg" width="900" alt="MovieClaw Windows Desktop">
 </p>
 
 <p align="center">
-  One server replaces your entire media stack.<br>
-  A web app and a native iPhone app included, with an AI agent that actually gets things done.<br>
-  Everything stays on your own hardware. Free for personal and household use.
+  <b>MovieClaw Windows Desktop</b> — 基于 <a href="https://github.com/movieclaw/MovieClaw">MovieClaw</a> 的 Windows 桌面客户端<br>
+  Tauri + WebView2 + mpv 混合架构 · 本地硬解 · 进度同步 · 自动更新
 </p>
 
 <p align="center">
-  <b>English</b> | <a href="README.zh-CN.md">简体中文</a>
+  <a href="#quick-start">快速开始</a> ·
+  <a href="#directory-structure">目录结构</a> ·
+  <a href="#desktop-client">桌面客户端</a> ·
+  <a href="#deployment">部署</a> ·
+  <a href="#ci--cd">CI/CD</a>
 </p>
 
-<p align="center">
-  <a href="#quick-start">Quick Start</a> ·
-  <a href="https://demo.movieclaw.io">Live Demo</a> ·
-  <a href="#just-say-the-word-it-handles-the-rest">AI Agent</a> ·
-  <a href="#boundaries">Boundaries</a> ·
-  <a href="#control-it-from-anywhere">CLI</a> ·
-  <a href="https://movieclaw.io/en/docs">Docs</a> ·
-  <a href="docs/design/">Design Docs</a> ·
-  <a href="#community">Community</a> ·
-  <a href="https://github.com/movieclaw/movieclaw/issues">Feedback</a>
-</p>
-
-<p align="center">
-  <a href="https://github.com/movieclaw/movieclaw/releases"><img alt="Release" src="https://img.shields.io/github/v/release/movieclaw/movieclaw?label=release"></a>
-  <a href="https://hub.docker.com/r/movieclaw/movieclaw"><img alt="Docker Pulls" src="https://img.shields.io/docker/pulls/movieclaw/movieclaw"></a>
-  <a href="https://hub.docker.com/r/movieclaw/movieclaw/tags"><img alt="Image Version" src="https://img.shields.io/docker/v/movieclaw/movieclaw/latest?label=docker%20image"></a>
-  <img alt="Last Commit" src="https://img.shields.io/github/last-commit/movieclaw/movieclaw">
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/movieclaw/movieclaw"></a>
-  <a href="https://t.me/movieclawio"><img alt="Telegram" src="https://img.shields.io/badge/Telegram-%40movieclawio-26A5E4?logo=telegram&logoColor=white"></a>
-</p>
-
-<p align="center">
-  <img src="docs/images/subscriptions.jpg" width="900" alt="The Subscriptions page in the MovieClaw web app: newly added titles in the carousel, with Just Added below">
-</p>
-
-<p align="center">
-  Want to look around first? Open the <a href="https://demo.movieclaw.io">live demo</a>: the sign-in page lists four demo accounts, one click each.
-  It's read-only and resets every day. (The interface and logs are currently in Chinese.)
-</p>
-
-## One install. That's all you need.
-
-It used to take six or seven services, six or seven configs, and a lot of effort to keep
-them all agreeing about the same library. Now it's just MovieClaw:
-
-| The job | The usual stack | MovieClaw |
-| --- | --- | --- |
-| Playback, poster wall, watch progress | Jellyfin / Emby / Plex | Built in |
-| Disc rips and 4K HDR on an iPhone | A third-party player like Infuse | A native app of its own, and Infuse still connects |
-| Metadata | Whatever the server ships, plus tinyMediaManager for the hard cases | Built in, with TMDB and Douban as dual sources |
-| Subscriptions and automatic downloads | Sonarr + Radarr | Built in |
-| Indexers and tracker sites | Prowlarr / Jackett | Built in |
-| Subtitles | Bazarr | Built in, with PGS-to-SRT conversion and AI translation when none exist |
-| Family requests and permissions | Overseerr / Jellyseerr | Built-in member management |
-| Running all of the above from a single sentence | Nothing does this | Built-in AI agent, and outside agents can plug in too |
-| Total | 6 containers, 6 configs | 1 container, 1 `data` directory |
-
-All-in-one has its trade-offs, and they're laid out honestly in [Boundaries](#boundaries).
-
-## Native apps, with playback that rivals Infuse
-
-Watch right in your browser, or in the native iPhone app. Built on its own playback
-engine: FFmpeg unpacks, Apple plays.
-
-<p align="center">
-  <img src="docs/images/player.jpg" width="900" alt="Landscape playback on iPhone: Liquid Glass controls, audio and subtitle tracks, AirPlay, and live download speed">
-  <br>
-  <sub>Frame from the public trailer for Avatar: Fire and Ash, shown only to demonstrate playback. All rights belong to their owners. Rights holders can email service@movieclaw.io to have it removed.</sub>
-</p>
-
-- Dolby Vision and Dolby Atmos; 4K HDR and Blu-ray disc rips play directly.
-- Hardware decoding first, software decoding as the fallback, and transcoding only as a last resort.
-- 4K over cellular starts in a second or two; when your connection can't keep up with the bitrate, it suggests dropping a quality tier.
-- Progress syncs across the web app, the iPhone app, and Infuse, so you pick up wherever you left off.
-- **Clips**: swipe vertically through highlights pulled from your own movies and shows.
-
-**Getting the app**: download `MovieClaw-iOS-unsigned.ipa` from
-[Releases](https://github.com/movieclaw/movieclaw/releases) and sideload it with AltStore,
-SideStore, or Sideloadly using your own Apple ID (iOS 26 or later; sideloaded builds can't
-receive push notifications). A public TestFlight is
-coming. Trackers and download clients are configured in the web app.
-
-The web app is liquid glass: the sidebar, inputs, and floating buttons refract whatever
-background image you choose, with a touch of chromatic aberration at the edges. Swap the
-background under **Settings → Appearance**, and it stays consistent on every device
-connected to the same instance.
-
-
-## Just say the word. It handles the rest.
-
-MovieClaw puts an autonomous, general-purpose AI agent inside your media server.
-Organizing your library, making subtitles, handling all those quirky one-off requests:
-all you have to do is ask.
-
-- "Any ideas for something light to watch with the kids tonight?" It searches your library, picks three by runtime and rating, and shows them as poster cards.
-- "Elephants Dream doesn't have Spanish subtitles. Can you make some?" It finds subtitles in another language, translates them to match the film's tone, syncs the timing, and saves a sidecar SRT.
-- "If Charge ever comes out in 4K, swap it in for me." It sets up an upgrade rule. When a better release appears it's downloaded and swapped in, and the old file goes to the recycle bin first.
-- "Who watched the most this week?" It pulls this week's watch history and totals it up per family member.
-
-You can talk to it from WeChat too, by text or voice; Telegram and Discord work as well,
-and Feishu groups can join as a push-only outlet. It checks with you before deleting
-anything, and every tool it calls is right there for you to see. The rules are spelled
-out under [Boundaries](#boundaries).
-
-The agent needs an LLM connected under **Settings → Model Providers** (any OpenAI-compatible
-endpoint). Skip it and everything else still works. Teach it "skills" in plain Markdown:
-drop a directory with a `SKILL.md` into `data/agent-skills/` (a `description` in the
-frontmatter, instructions in the body, scripts welcome) and the agent loads it on its own
-whenever a web-session task matches. Changes take effect immediately, no restart. A skill
-sharing a name with a built-in one overrides it (the log says so). Details in
-[`docs/design/agent-skills.md`](docs/design/agent-skills.md).
-
-### Fast, accurate release parsing
-
-Release names aren't guessed at with regexes. A small NER model, distilled from a large
-language model, parses one in about 3 ms on a plain CPU, and resolution, source, codec,
-subtitles, audio, and release group each get their own field:
-
-```text
-三体.Three-Body.2023.S01E05.2160p.WEB-DL.H265.AAC.国语中字-OurTV
-↓
-Series · Season 1 Episode 5 · 2160p · H.265 · WEB-DL · AAC
-Subtitles: Chinese    Audio: Mandarin    Release group: OurTV
-```
-
-Even shorthand like "国语中字" (Mandarin audio, Chinese subs), which only exists on
-Chinese trackers, splits cleanly into separate subtitle and audio fields. When it isn't
-sure, it doesn't guess: ambiguous items land in a *pending identification* queue with a
-plain-language reason ("3 equally plausible matches; not choosing for you"), and one
-confirmation resolves the whole group.
-
-### Any agent can run every feature
-
-<p align="center">
-  <img src="docs/images/agent.en.jpg" width="900" alt="Architecture: you use the web and iOS apps, while agents like ChatGPT, Claude, and Cursor use MCP or the mclaw CLI, all through one shared API covering subscriptions, upgrades, downloads, organizing, identification, subtitles, members, and stats">
-</p>
-
-Every feature is available through the `mclaw` CLI and MCP. Connect ChatGPT, Claude,
-WorkBuddy, Cursor, or Claude Code, and they can subscribe, run quality upgrades, and
-organize your library: anything you can do in the web app. The command tree is generated
-straight from the server's API, so ship a feature on the backend and every agent can use it.
-
-- **MCP, on your terms**: create an MCP endpoint and pick exactly what it can do. Every endpoint gets its own token, revocable anytime.
-- **The CLI runs anywhere**: a single static binary. See [Control It from Anywhere](#control-it-from-anywhere).
-- **Your models**: plug in OpenAI, any OpenAI-compatible provider, or your own vLLM.
-
-### One pipeline, from subscription to library
-
-Subscribe to a show, and everything after that (search, download, identify, fetch
-metadata, import, notify) runs on its own. No more keeping settings in sync across a
-handful of services.
-
-- Quality upgrades: describe your target quality as a rule and MovieClaw swaps in better releases as they appear. Replaced files go to a delayed-deletion recycle queue, and if you'd rather keep the 1080p REMUX *and* the 4K, turn on side-by-side versions.
-- Health check: dry-runs every step of the chain (trackers, download client, library) so you can spot where it would get stuck.
-- Just joined a private tracker and need to protect your ratio? Turn on site protection: subscriptions steer around that site while manual search still works, so you can build up your ratio before opening it up.
-
-## This is what a personal media library should feel like
-
-<table>
-  <tr>
-    <td width="50%" valign="top">
-      <img src="docs/images/scene-1.jpg" alt="Continue Watching in the web app, and the same movie on iPhone ready to resume at 10:44">
-      <p><b>8:30 AM, on the train</b>: pick up last night's movie on your phone. In the browser, in the native iPhone app, or in players like Infuse, your progress comes with you.</p>
-    </td>
-    <td width="50%" valign="top">
-      <img src="docs/images/scene-2.jpg" alt="The Subscriptions screen on iPhone, with Coffee Run just added">
-      <p><b>6:20 PM, heading home</b>: new episode out? Nothing to do. Once you subscribe, new releases are downloaded and added to your library, and you get a note on WeChat or Telegram.</p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="top">
-      <img src="docs/images/scene-3.en.jpg" alt="The Activity screen on iPhone with four devices playing, and each member's permissions below">
-      <p><b>8:30 PM, living room</b>: everyone watches their own thing. Everyone gets an account, the kids only see cartoons rated for them, and nobody's in anyone's way.</p>
-    </td>
-    <td width="50%" valign="top">
-      <img src="docs/images/scene-4.en.jpg" alt="Asking MovieClaw in a chat app to pick a cartoon and subscribe (illustration)">
-      <p><b>11:10 PM, in bed</b>: ask in a chat tonight, watch it tomorrow. It finds the title and subscribes; by morning it's on your poster wall. <sub>(Chat window is an illustration.)</sub></p>
-    </td>
-  </tr>
-</table>
-
-Screenshots are from the public [live demo](https://demo.movieclaw.io), featuring open
-movies released by the Blender Foundation and others (CC BY).
-
-## The little things, already taken care of
-
-### Library
-
-- You open the app to a poster wall. Synopses, ratings, cast, and episode stills are all stored locally, so you can browse completely offline.
-- It never demands renaming: point it at your existing directories and it works with them as-is. Letting MovieClaw organize your files is a separate opt-in, off by default.
-- Scraping is a matter of taste, so it's configurable: language, artwork, naming templates, NFO files, episode stills, all under **Settings → Scraping & Organizing**. Don't like an auto-picked poster? Replace it and lock it in.
-- An **"Other"** library takes home videos and recordings: nothing gets identified or renamed, a sidecar NFO is honored when present, and thumbnails are grabbed from the video itself.
-- A **"Photos"** library lays your images out as a masonry wall grouped by month, ordered by EXIF capture time. The wall only ever loads thumbnails.
-
-### Playback
-
-- Add the server address to Infuse or VidHub and you're in: MovieClaw looks exactly like a Jellyfin server to third-party players, and watch progress syncs back.
-- Play straight in the browser too. Direct play whenever possible; transcoding only kicks in for codecs the browser can't handle, and it tells you the cost first.
-- No hardware transcoding on your box? Hand it to a Mac: the remote transcoder is a menu-bar app for Apple Silicon that encodes through VideoToolbox.
-
-### Family & permissions
-
-- Everyone gets their own account, with per-person switches for which libraries they see, whether they can subscribe, and whether they can download directly. Watch progress and favorites are kept separate.
-
-### Maintenance
-
-- Updates and rollbacks are buttons in the web UI. Routine upgrades download only a few megabytes, a broken update rolls itself back, and your data is never touched.
-- Errors are written for humans, for the person who deploys things but doesn't write code. (Log and UI messages are currently in Chinese.)
-
-## Boundaries
-
-### What it won't do
-
-- Downloading stays with qBittorrent or Transmission — MovieClaw doesn't replace your download client.
-- Hardware transcoding either exists on your machine or it doesn't; MovieClaw can't invent it. Software transcoding eats CPU, and the UI says so plainly before you turn it on.
-- Remote access is yours to arrange (Tailscale, WireGuard, a reverse proxy). MovieClaw never touches your traffic.
-- It ships no media content, ever. Tracker accounts are your own; the bundled site configs just save you setup time.
-
-### What stays yours
-
-- Your file names and directory layout are never touched unless you explicitly turn on organizing — and you can hand the library back to Jellyfin or Emby at any time.
-- Runtime state lives in a single `data/` directory. Back that up, delete the container: nothing is lost.
-- No telemetry, no phoning home, no cloud account. Your watch history never leaves the machine.
-
-### Guardrails on the AI assistant
-
-A media library, a file organizer, and an assistant that can execute commands, all in one
-product — the risk is real. The self-hosting community already has horror stories of
-auto-organizers wiping libraries: "everything deleted, not one source file left." So the
-constraints here are enforced in code, not politely requested in a prompt:
-
-- Credentials never reach bash. The assistant operates the product only through dedicated tools; no token appears in the environment of any `bash` subprocess.
-- Dangerous operations require explicit confirmation. Deleting media files goes further still: the assistant must first list the exact items with a read-only command, read them back to you, and get your explicit yes in that same exchange. A hand-wavy "clean things up" is not consent.
-- Deletion means delayed recycling, not an instant `rm`. Copies that are still seeding are left alone.
-- Every tool call is visible in the conversation and traceable after the fact — if something goes wrong, you can see exactly which step did it.
+---
 
 ## Quick Start
 
-Got one of these? You're good to go:
+### 桌面客户端（Windows x64）
 
-- **A NAS**: Synology, QNAP, Unraid, and more, using their built-in Docker apps.
-- **A Mac mini**: runs great on Apple Silicon, and doubles as a transcoding box.
-- **A mini PC, an old computer, or a cloud server**: Linux or Windows, x86 or ARM, all from the same image.
+1. 从 [Releases](https://github.com/sexyfeifan/MovieClaw-Windows/releases) 下载 `MovieClaw-Desktop-*-Setup-x64.exe`
+2. 运行安装包，启动后输入 MovieClaw 服务器地址
+3. 浏览海报墙 → 点击播放 → mpv 本地硬解播放
 
-One prerequisite: Docker (Synology's built-in Container Manager counts; other NAS brands
-have their own Docker packages). The official image
-[`movieclaw/movieclaw`](https://hub.docker.com/r/movieclaw/movieclaw) runs everything in
-a single container — no separate database, no Redis, and a TMDB key is already baked in,
-so there's nothing to apply for. One tag covers both x86_64 and ARM64.
+**系统要求**: Windows 10/11 x64, WebView2 Runtime, mpv
 
-**Step 1**: Create a new folder, create a `docker-compose.yml` inside it, and paste:
-
-```yaml
-services:
-  movieclaw:
-    image: movieclaw/movieclaw:latest
-    container_name: movieclaw
-    init: true
-    ports:
-      # Left side is the host port — if it's taken, change the left side
-      # (e.g. "8096:3000") and keep the right side at 3000
-      - "3000:3000"
-      # Optional: LAN auto-discovery for players (Jellyfin protocol). Uncomment
-      # to enable; leave it off if Jellyfin / Emby already runs on this host —
-      # the port clash would stop the container from starting
-      # - "7359:7359/udp"
-    volumes:
-      - ./data:/app/data              # Runtime data — backing up this folder is all you need
-                                      # (includes the hidden file .secret_key; make sure your
-                                      # backup tool doesn't skip dotfiles)
-      - /volume1/media:/media         # ← change to your media directory
-      - /volume1/downloads:/downloads # ← change to your download client's save directory
-      # Multiple media disks / download directories? Add one line each — no limit:
-      # - /volume2/movies:/movies
-    environment:
-      - TZ=Asia/Shanghai              # ← change to your timezone
-      # For NVIDIA hardware transcoding, enable these two together with
-      # `runtime: nvidia` below:
-      # - NVIDIA_VISIBLE_DEVICES=all
-      # - NVIDIA_DRIVER_CAPABILITIES=all
-    # Want hardware transcoding with an Intel / AMD iGPU? First run `ls /dev/dri` on the
-    # host to confirm it exists (ARM boxes and CPU-only hosts usually don't have it).
-    # Enable the two lines below without it, and the container gets recreated and then
-    # fails to start, leaving nothing but "no such file or directory".
-    # devices:
-    #   - /dev/dri:/dev/dri
-    # Using an NVIDIA dGPU? It does **not** go through /dev/dri — don't mount that when
-    # you have no iGPU (the container won't start). Install the NVIDIA Container Toolkit
-    # on the host first, then enable this line:
-    # runtime: nvidia
-    # When in doubt, leave them alone: the first-start log will tell you outright whether
-    # hardware decoding is available and what's missing.
-    restart: unless-stopped
-```
-
-**Step 2**: Point the `volumes` entries at real paths on your machine. There's one rule
-to remember: **left of the colon** is a directory on your machine; **right of the colon**
-is what MovieClaw sees inside the container — and it's the right-hand path you'll type
-into the web UI later. Do mount your download client's save directory, or MovieClaw can't
-see finished downloads and can't file them into your library.
-
-> **The left-hand directory must already exist on the machine.** Docker doesn't error on
-> a bad path — it quietly creates an empty folder for you, the container starts fine, the
-> logs look clean, and your library sits empty. Synology users, watch the volume number
-> and the capitalization (`/volume1` vs. `/volume2`, `media` vs. `Media`). `ls` the
-> directory before you paste, or double-check it in your file manager.
-
-**Step 3**: From that folder, bring it up (NAS GUI users: Container Manager →
-**Project → Create**, pointed at the folder):
+### 服务端部署
 
 ```bash
-docker compose up -d
+# Docker 一键部署（推荐）
+docker-compose up -d
+
+# 或使用 CLI
+python -m movieclaw_api.main
 ```
 
-First start takes about ten seconds on a fast machine, a minute or two on a slower NAS.
-Meanwhile the page just shows "connecting to the service…" — that's normal. You'll know
-it's actually up when `docker logs movieclaw` prints `前端反代 已就绪` ("frontend proxy
-ready"). If the
-command instead fails with
-`failed to bind host port 0.0.0.0:3000/tcp: address already in use`, port 3000 is
-taken — see the [FAQ](#faq).
+---
 
-**Step 4**: Open `http://<host-ip>:3000`, follow the wizard to create the admin account,
-then:
+## Directory Structure
 
-1. **Add a library**: **Library → Add Library**. The root path is the **in-container**
-   path — the right-hand side of the colon from Step 2: `/media` in the example above,
-   **not** `/volume1/media`. Scanning starts immediately; existing files get identified
-   and scraped, and anything ambiguous waits in *pending identification* for your
-   confirmation.
-   Enter a wrong path and the page still says "scanning" — but it finishes with 0 files
-   and the results read "root path does not exist, skipped". That line means the path is
-   wrong.
-2. **Connect your download client**: **Settings → Download Clients**, for qBittorrent /
-   Transmission. If the client and MovieClaw see different paths, set up the path mapping
-   here.
-3. **Connect your sites**: **Settings → Resource Sites** — paste cookies / API keys, or
-   let the browser extension sync them automatically.
-4. Optional: **Settings → Model Providers** to hook up an LLM (then pick a default model under **Settings → AI**)
-   and unlock the assistant; **Settings → Auto-import** to add "source directory → target library" rules, so
-   downloads from any source flow into the library too.
-
-> Just want one command to try it out?
-> `docker run -d --name movieclaw --init -p 3000:3000 --restart unless-stopped -e TZ=Asia/Shanghai -v "$(pwd)/data:/app/data" -v /volume1/media:/media -v /volume1/downloads:/downloads movieclaw/movieclaw:latest`
-> The mount rules are exactly the same as above. For LAN auto-discovery by players, add `-p 7359:7359/udp`.
-
-### Everyday upgrades skip the image pull
-
-From then on, day-to-day upgrades happen in **Settings → Updates & Maintenance**:
-MovieClaw pulls a few-megabyte artifact package from GitHub Releases (mirrors
-configurable), applies it on the `data` volume, and the result survives container
-recreation. If an update misbehaves, roll back on the same page — and a genuinely broken
-one rolls itself back automatically.
-
-`docker compose pull && docker compose up -d` is only needed when the release notes
-explicitly say an update carries dependency changes and requires a new image. That's rare.
-(How it works: [in-app-update.md](docs/design/in-app-update.md).)
-
-## Bring Your Own Player
-
-MovieClaw speaks Jellyfin's playback API, so third-party players connect to it **as if it
-were a Jellyfin server** — just add the address. Support by client below; "verified on
-device" means someone actually connected and played on real hardware:
-
-| Client | Status | Notes |
-| --- | --- | --- |
-| Web player | Built in | Direct play first; transcodes only what the browser can't handle, and tells you the cost before it starts |
-| Infuse / VidHub | **Verified on device** | Connects as a Jellyfin server: browsing, direct play, progress sync — zero changes on the player side |
-| Fileball / SenPlayer | Same API | Rides the same Jellyfin-compatible path, but hasn't been individually verified on device |
-| Emby / Jellyfin official apps | Not applicable | They connect to their own servers; MovieClaw can notify an Emby/Jellyfin instance to refresh after imports |
-| LAN auto-discovery | Partial | Requires mapping `7359/udp`. On a bridged network broadcasts may not reach the container, and when they do you need to set **Settings → Network → External URL** to a LAN address (e.g. `http://192.168.1.10:3000`); host networking or entering the address in the player is the reliable route |
-| Remote hardware transcoding | macOS Apple Silicon | Menu-bar app encoding through VideoToolbox (an always-on Mac mini is plenty). The protocol is open — other platforms can implement it |
-
-Details in [jellyfin-compat.md](docs/design/jellyfin-compat.md),
-[web-player.md](docs/design/web-player.md), and
-[remote-transcode.md](docs/design/remote-transcode.md).
-
-## Control It from Anywhere
-
-`mclaw`, MovieClaw's command-line client, is a single static binary — no Python, no Node,
-no package manager. Install it on any machine, and that machine can drive your library:
-search titles, create subscriptions, monitor jobs, organize files.
-
-**On the server itself there's nothing to install** — the image already ships it:
-
-```sh
-docker exec -it movieclaw mclaw status   # container name as in your compose file
+```
+MovieClaw-Windows/
+├── src/movieclaw_api/          # 🖥️ 服务端 — Python FastAPI 后端
+├── apps/
+│   ├── web/                    # 🌐 服务端 — Next.js Web UI
+│   ├── desktop/                # 🪟 客户端 — Windows 桌面应用（本仓库核心）
+│   │   ├── src-tauri/          #   Rust/Tauri 壳 + mpv 控制
+│   │   ├── ui/                 #   注入脚本 + 连接页
+│   │   └── scripts/            #   打包脚本 + NSIS 安装包
+│   ├── apple/                  # 📱 客户端 — iOS/macOS（上游）
+│   └── extension/              # 🧩 浏览器扩展（上游）
+├── docker/                     # 🐳 Docker 部署配置
+├── alembic/                    # 🗄️ 数据库迁移
+├── tests/                      # ✅ 测试套件
+├── .github/workflows/          # 🤖 CI/CD + 上游监控
+└── docs/                       # 📖 文档
 ```
 
-**Everywhere else, it's one command.** The installer detects OS and architecture on its
-own (x86 and ARM, on both Linux and macOS), verifies checksums, and installs into the
-default PATH — so cron, systemd, and Dock-launched apps can find it too:
+### 服务端 vs 客户端
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/movieclaw/movieclaw/main/scripts/install-cli.sh | sh
+| 组件 | 位置 | 技术栈 | 用途 |
+|---|---|---|---|
+| **API 后端** | `src/movieclaw_api/` | Python FastAPI | 媒体库管理、播放会话、转码决策 |
+| **Web UI** | `apps/web/` | Next.js + React | 浏览器端海报墙、详情页 |
+| **Windows 桌面** | `apps/desktop/` | Tauri 2 + WebView2 + mpv | 原生桌面体验，mpv 本地硬解 |
+| **iOS** | `apps/apple/` | Swift | iPhone/iPad 客户端 |
+
+> **客户端只需 `apps/desktop/`**，但运行需要服务端提供 API。两者通过 HTTP REST API 通信。
+
+---
+
+## Desktop Client
+
+### 架构
+
+```
+┌──────────────────────────────────────┐
+│  Tauri Shell (Rust)                  │
+│  ├── WebView2 (服务端 Web UI)        │
+│  │   └── inject.js (播放桥)          │
+│  ├── mpv sidecar (本地硬解播放)      │
+│  │   └── JSON IPC named pipe         │
+│  └── System Tray                     │
+└──────────────────────────────────────┘
+         ↕ HTTP REST API
+┌──────────────────────────────────────┐
+│  MovieClaw Server                    │
+│  ├── /api/v1/playback/sessions       │
+│  ├── /api/v1/playback/progress       │
+│  └── /api/v1/...                     │
+└──────────────────────────────────────┘
 ```
 
-<details>
-<summary><b>On Windows, use this instead</b></summary>
+### 核心功能
 
-PowerShell won't pipe into `sh`, so Windows gets its own one-liner — it installs the same
-thing (amd64 and ARM64 both covered):
+- **播放桥**: 拦截 Next.js 路由 → 创建播放会话 → 启动 mpv
+- **本地硬解**: `universal: true` → tier 0 直连播放 → mpv `--hwdec=auto-safe`
+- **进度同步**: 每 10s 上报 `/playback/progress`，支持 start/progress/stop 事件
+- **音量控制**: 浮动控件 + 快捷键 (↑↓ / M)，通过 mpv IPC 控制
+- **自动更新**: 启动时静默检查 GitHub Releases，托盘菜单手动检查
+- **单实例**: `tauri-plugin-single-instance` 防止重复启动
+- **系统托盘**: 显示主窗口 / 更改服务器 / 检查更新 / 退出
 
-```powershell
-irm https://raw.githubusercontent.com/movieclaw/movieclaw/main/scripts/install-cli.ps1 | iex
-```
+### 解码策略
 
-</details>
+| 场景 | 行为 |
+|---|---|
+| 视频编码/容器兼容 | **tier 0 直连播放** — mpv 本地硬解 |
+| 视频编码/容器不兼容 | **服务器转码** — mpv 解码转码流 |
 
-Then run `mclaw login` to pair. With no arguments it scans the local network first;
-across subnets or over a VPN, pass the address yourself
-(`mclaw login --server http://192.168.1.10:3000`). The command displays a pairing code —
-verify and approve it in the web UI under **Settings → Devices**. The
-token is handed straight back to the process, never printed, so it never ends up in your
-clipboard or shell history.
+---
 
-Where nobody can click "approve" in a browser (NAS cron jobs, CI, headless containers),
-use **Create token manually** on the same Devices page and inject the two lines it gives
-you — `MOVIECLAW_SERVER` and `MOVIECLAW_TOKEN` — as environment variables. Credentials
-never touch disk.
+## Deployment
 
-### Built for agents, too
-
-The command tree is generated from the server's OpenAPI spec: add an endpoint to the
-backend and the CLI picks up the matching command automatically — no guesswork. Outside a terminal
-(pipes, agents), it emits JSON by default, so there are no human-formatted tables to
-parse; destructive operations demand an explicit `--yes`. Any assistant that can run a
-shell can drive MovieClaw with it — the built-in AI assistant goes through exactly this
-path.
-
-```sh
-mclaw status                           # server and auth status
-mclaw search titles "Three-Body"       # search titles
-mclaw subscriptions list               # list subscriptions
-mclaw jobs list                        # list background jobs
-mclaw library organize-files 1 --yes   # organize existing file names in library 1 per the naming template
-mclaw subscriptions --help             # every domain has --help, listing its commands and flags
-```
-
-Before handing a token to an external agent, read the
-[assistant guardrails](#boundaries): a token carries the same privileges as the person
-who approved it, and revoking one is a single click on the Devices page.
-
-## FAQ
-
-<details>
-<summary><b>I forgot the admin password</b></summary>
-
-Run one command on the machine hosting MovieClaw. **Nothing else is touched** — sites,
-download clients, libraries, and subscriptions all stay put; only the password changes:
+### 开发环境
 
 ```bash
-# Docker deployment (container name as in your compose file)
-docker exec -it movieclaw python -m movieclaw_api.reset_password
+# 1. 启动服务端
+cd /path/to/MovieClaw-Windows
+docker-compose up -d
 
-# Source deployment: cd to the project root first (the parent of data/)
-python -m movieclaw_api.reset_password
+# 2. 启动桌面客户端（开发模式）
+cd apps/desktop
+pnpm tauri dev
 ```
 
-Type the new password twice at the prompt; no restart needed. Forgot the username as
-well? Add `--show` to see it first. To force other signed-in devices out too, follow up
-with `docker restart movieclaw`.
-
-Why there's no "forgot password" link in the web UI: with self-hosting, there's no
-trusted third party to vouch that you own the account, and real email recovery would
-force every deployer to set up SMTP first. Instead, ownership is proven by something
-stronger: **whoever can reach this machine's `data/` directory owns the server.**
-Jellyfin, Vaultwarden, and Gitea make the same call.
-
-Family **members** who forget their passwords don't need any of this — an admin resets
-them with one click under **Settings → Members**.
-</details>
-
-<details>
-<summary><b>Port 3000 is taken by another service</b></summary>
-
-Change the **left** side of the `ports` colon — e.g. `"8096:3000"` — and browse to
-`http://<host-ip>:8096`. The container-side port stays as it is.
-
-Only under `--network host` does the container port become the host port, and only then
-do you actually change the listening port: add `-e MOVIECLAW_WEB_PORT=8096`, or change it
-after setup under **Settings → Network** (restarts itself on save).
-
-**Host networking has a further trap**: the container's internal frontend (3001) and
-backend (8000) also bind directly on the host. They're not currently configurable, and
-`MOVIECLAW_WEB_PORT` doesn't reach them. If either port is taken, the container exits at
-startup with `EADDRINUSE: address already in use` in `docker logs`. Host mode also
-listens on UDP 7359 for Jellyfin LAN discovery, which collides with an existing Jellyfin
-or Emby.
-
-**Bottom line: unless you specifically need LAN auto-discovery, change the left side of
-the colon and stay off host networking.**
-</details>
-
-<details>
-<summary><b>Scraping keeps failing; the logs say TMDB is unreachable</b></summary>
-
-`无法连通 TMDB` ("cannot reach TMDB"), `ConnectTimeout`, `CircuitOpenError`, or
-`CERTIFICATE_VERIFY_FAILED` — whether in the logs or in the connectivity test under
-**Settings → Network** — all point to the same problem.
-
-If your network can't reach `api.themoviedb.org` directly, set a proxy or mirror address
-under **Settings → Network** and confirm with the built-in connectivity test. By
-default the proxy covers TMDB, artwork fetches, and GitHub updates, while tracker sites
-stay on direct connections (usually faster that way).
-</details>
-
-<details>
-<summary><b>What user does the container run as? Is PUID / PGID supported?</b></summary>
-
-**It runs as root; PUID / PGID aren't supported yet.** The database and key files under
-`data/` are owned by `root:root`.
-
-Mounted media directories **must be writable** — filing imports and recycling replaced
-versions both move files, and a read-only mount breaks those features. If the directories
-belong to another user on your NAS, root can generally still write there; the friction
-runs the other way — your own account may lack permissions on directories MovieClaw
-creates. If that matters to you, loosen the directory permissions on the host before
-mounting.
-</details>
-
-<details>
-<summary><b>My library lives on an SMB / NFS network mount</b></summary>
-
-Turn off *real-time file watching* when you create the library. File events over network
-mounts are unreliable; periodic reconciliation plus a manual scan is far more
-dependable.
-</details>
-
-## Building from Source
-
-You'll need a free TMDB API key from
-[themoviedb.org](https://www.themoviedb.org/settings/api) — the official image has one
-baked in; only self-builds need their own.
+### 构建安装包
 
 ```bash
-git clone https://github.com/movieclaw/movieclaw.git
-cd movieclaw
-TMDB_API_KEY=your_key ./scripts/build-image.sh
-#   Mirror acceleration for mainland China:  CN_MIRROR=1 TMDB_API_KEY=... ./scripts/build-image.sh
-#   Cross-building for a NAS:                PLATFORM=linux/amd64 TMDB_API_KEY=... ./scripts/build-image.sh
+cd apps/desktop
+powershell -File scripts/package.ps1
 ```
 
-The key can also live in a `.env` at the repo root. Note that `.env.example` ships the
-line **commented out** (`# TMDB_API_KEY=`) — drop the `#` or the script won't see it.
-With no key at all, the script fails fast instead of wasting your time on a build.
+产物输出到 `apps/desktop/dist/`:
+- `MovieClaw-Desktop-*-Setup-x64.exe` — NSIS 安装包
+- `MovieClaw-Desktop-portable-x64.zip` — 便携版
 
-The build reaches out to `deb.debian.org`, `repo.jellyfin.org`, `pypi.org`,
-`registry.npmjs.org`, and GitHub. On mainland-China networks, add `CN_MIRROR=1`. Behind
-a corporate proxy that intercepts and re-signs TLS, the build dies at
-`curl ... exit code 60` or pip's `CERTIFICATE_VERIFY_FAILED` — that's a certificate-trust
-problem, not a script bug.
+---
 
-Then point the `image:` line in `docker-compose.yml` at `movieclaw:latest` and start.
-As a self-check, the build generates PGS test samples and OCRs them back to SRT, failing
-hard on any mismatch. The subtitle runtime and its release gates are described in
-[docker-subtitle-runtime.md](docs/design/docker-subtitle-runtime.md).
+## CI / CD
 
-## Local Development
+| Workflow | 触发 | 功能 |
+|---|---|---|
+| `desktop-ci.yml` | push/PR | 编译 + 打包 + 上传 Artifacts |
+| `desktop-release.yml` | tag `v*` | 构建 Release + 安装包 + 上传 GitHub Releases |
+| `upstream-watch.yml` | 每周 | 监控上游 MovieClaw API 变更 |
 
-**First, free up ports 3000 and 8000.** If this machine also runs the MovieClaw Docker
-container, `docker compose down` it first — "used the image, now wants to hack on the
-code" is the single most common contributor story, and the collision is guaranteed. When
-a port is taken, the dev script fails immediately and tells you how to find the culprit
-(requires `lsof`).
+---
+
+## Upstream
+
+本仓库 fork 自 [movieclaw/MovieClaw](https://github.com/movieclaw/MovieClaw)，保留全量代码以便：
+
+1. **上游 API 变更监控** — `upstream-watch.yml` 自动 diff 上游
+2. **完整部署能力** — 客户端 + 服务端一站式
+3. **快速同步** — `git remote add upstream` + `git merge upstream/main`
 
 ```bash
-./scripts/dev.sh          # start backend and frontend together
-./scripts/dev.sh api      # backend only
-./scripts/dev.sh web      # frontend only
+# 同步上游更新
+git fetch upstream
+git merge upstream/main
 ```
 
-The script handles first-run setup on its own (virtualenv, dependencies, `.env`,
-`pnpm install`). Logs carry colored `[api]` / `[web]` prefixes, and `Ctrl-C` tears
-everything down cleanly — child processes included, ports freed. Note that it picks the
-newest Python it can find for the virtualenv (3.14 → 3.11), which may not be the one
-your `python3` points at.
-
-Going manual takes **two terminals** — backend and frontend are both foreground
-processes:
-
-```bash
-# Terminal 1: backend (Python 3.11+)
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env
-uvicorn movieclaw_api.main:app --factory --reload --reload-dir src
-```
-
-> Keep `--reload-dir src`. By default uvicorn watches the whole working directory, and
-> runtime logs land in `data/logs/` — so every log write triggers reload detection, the
-> detection writes another log line, and the loop floods the log until it's unreadable.
-> `./scripts/dev.sh` pins this for you.
-
-```bash
-# Terminal 2: frontend (Node.js 20+)
-pnpm install && pnpm web:dev
-```
-
-Web console at `http://127.0.0.1:3000`, API docs at `http://127.0.0.1:8000/docs`. A
-blank `.env` boots fine — you just lose the TMDB-dependent features.
-
-> Changing the backend port means changing it in two places. `APP_PORT` in `.env` moves
-> the backend, but the frontend's proxy target is hardcoded to default to
-> `http://127.0.0.1:8000` — you **must also** set `MOVIECLAW_API_PROXY_TARGET` in
-> `apps/web/.env.local` to the new port. Change only one, and the page loads while every
-> API call comes back empty. The frontend's own 3000 is hardcoded and not configurable.
-> And on the manual path, a uvicorn port collision says only
-> `[Errno 98] Address already in use`, without `dev.sh`'s friendlier hint.
-
-When running from source, **the NER model behind torrent-name parsing needs placing by
-hand** (the Docker image includes it): download `model.int8.onnx`, `tokenizer.json`, and
-`labels.json` from [Releases](https://github.com/movieclaw/movieclaw/releases), drop them
-into `data/models/torrent-ner/` (path configurable via `MOVIECLAW_NER_DIR`), and restart.
-Without the model, the app runs fine — that one feature just stays off. The first time
-extraction is actually triggered, the log notes that the model is missing and that
-title/year/season/episode fields will stay empty. But that warning is emitted **lazily**:
-it never appears at startup, so a clean boot log is not proof the model is in place.
-
-One more known boundary when running from source: if the process is killed in a way that
-allows no cleanup — `kill -9`, a power cut — while the AI assistant is executing a command,
-the subprocesses it spawned may be left running (normal shutdown, timeouts, and the user's
-stop button all reap the whole process group, and under Docker a container restart cleans
-up as well). After a hard crash on bare metal, a quick `ps` check for leftovers is worth it.
-
-## Community
-
-Deployment questions, setup tips, feature ideas, or just showing off your library —
-come say hello:
+---
 
 <p align="center">
-  <a href="https://t.me/movieclawio"><img src="https://img.shields.io/badge/Telegram-%40movieclawio-26A5E4?logo=telegram&logoColor=white&style=for-the-badge" alt="Telegram group"></a>
-  <br><br>
-  <b>Telegram</b><br>
-  <a href="https://t.me/movieclawio">t.me/movieclawio</a>
-  <br><br>
-  Open to everyone, no invite needed.
+  <sub>Based on <a href="https://github.com/movieclaw/MovieClaw">MovieClaw</a> · Licensed under the same terms</sub>
 </p>
-
-## Docs & Support
-
-The major design decisions behind every module — and the trade-offs that shaped them —
-live in [`docs/design/`](docs/design/), one file per topic: library, metadata, subscriptions,
-quality upgrades, Jellyfin compatibility, in-app updates, the CLI… browse by filename.
-The reasoning behind this README's own structure is in
-[readme-rewrite.md](docs/design/readme-rewrite.md).
-
-Questions, ideas, bug reports — please
-[open an issue](https://github.com/movieclaw/movieclaw/issues).
-
-## License
-
-Versions released after v0.27.0 are licensed under the [MovieClaw License](LICENSE):
-the Apache License 2.0 with additional conditions.
-
-- **Free for non-commercial use**: personal and household self-hosting, sharing
-  with family and friends, study and research.
-- **Commercial use requires written authorization**, including offering it as
-  SaaS or a hosted service, selling it or bundling it with hardware such as NAS
-  devices, paid deployment services, and use by companies.
-
-v0.27.0 and earlier releases remain under the MIT License. For commercial
-licensing, please email [service@movieclaw.io](mailto:service@movieclaw.io).
