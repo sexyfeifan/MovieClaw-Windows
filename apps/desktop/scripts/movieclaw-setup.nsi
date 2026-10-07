@@ -6,14 +6,14 @@
 !include "FileFunc.nsh"
 
 Name "MovieClaw Desktop"
-OutFile "..\dist\MovieClaw-Desktop-0.1.0-Setup-x64.exe"
+OutFile "..\dist\MovieClaw-Desktop-v0.2.100-Setup-x64.exe"
 InstallDir "$LOCALAPPDATA\MovieClaw\Desktop"
 InstallDirRegKey HKCU "Software\MovieClaw\Desktop" "InstallDir"
 RequestExecutionLevel user
 Unicode True
 
 !define APP_NAME "MovieClaw Desktop"
-!define APP_VERSION "0.1.0"
+!define APP_VERSION "0.2.100"
 !define APP_PUBLISHER "MovieClaw"
 !define APP_EXE "movieclaw-desktop.exe"
 
@@ -72,10 +72,12 @@ Section "安装" SecInstall
 SectionEnd
 
 Section "Uninstall"
-    Delete "$INSTDIR\${APP_NAME}.exe"
+    Delete "$INSTDIR\${APP_EXE}"
     Delete "$INSTDIR\connect.html"
     Delete "$INSTDIR\inject.js"
+    Delete "$INSTDIR\volume-overlay.html"
     Delete "$INSTDIR\WebView2Loader.dll"
+    RMDir /r "$INSTDIR\desktop"
     RMDir /r "$INSTDIR\mpv"
     Delete "$INSTDIR\uninstall.exe"
     RMDir "$INSTDIR"

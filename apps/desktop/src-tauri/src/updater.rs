@@ -13,9 +13,15 @@ pub struct UpdateInfo {
     pub message: String,
 }
 
-/// 解析 semver 字符串为 (major, minor, patch) 比较元组
+/// 解析版本号字符串为 (major, minor, patch) 比较元组
+/// 支持格式: "0.2.100", "v0.2.100", "desktop-v0.2.100", "desktop-0.2.100"
 fn parse_version(v: &str) -> (u64, u64, u64) {
-    let cleaned = v.trim_start_matches('v');
+    // 移除所有前缀: "desktop-v", "desktop-", "v"
+    let cleaned = v
+        .trim()
+        .trim_start_matches("desktop-v")
+        .trim_start_matches("desktop-")
+        .trim_start_matches('v');
     let parts: Vec<&str> = cleaned.split('.').collect();
     let major = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
     let minor = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -26,7 +32,8 @@ fn parse_version(v: &str) -> (u64, u64, u64) {
 /// 检查 GitHub Releases 是否有新版本
 #[tauri::command]
 pub fn check_for_updates() -> Result<UpdateInfo, String> {
-    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
+    // 获取所有 releases，找最新的桌面版 release
+    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=10");
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(10))
         .build();
@@ -38,54 +45,106 @@ pub fn check_for_updates() -> Result<UpdateInfo, String> {
         .call()
         .map_err(|e| format!("请求 GitHub API 失败: {e}"))?;
 
-    let body: serde_json::Value = resp
+    let releases: serde_json::Value = resp
         .into_json()
         .map_err(|e| format!("解析响应失败: {e}"))?;
 
-    let latest_tag = body
-        .get("tag_name")
-        .and_then(|t| t.as_str())
-        .unwrap_or("")
-        .to_string();
-    let latest_clean = latest_tag.trim_start_matches('v');
-    let current_clean = CURRENT_VERSION.trim_start_matches('v');
+    let current_ver = parse_version(CURRENT_VERSION);
 
-    // 找 Windows 安装包下载链接
-    let mut download_url = String::new();
-    if let Some(assets) = body.get("assets").and_then(|a| a.as_array()) {
-        for asset in assets {
-            let name = asset.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            if name.contains("Setup") && name.ends_with(".exe") {
-                download_url = asset
-                    .get("browser_download_url")
-                    .and_then(|u| u.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                break;
+    // 找最新的包含 Setup exe 的桌面 release
+    let mut best_release: Option<&serde_json::Value> = None;
+    let mut best_ver = current_ver;
+    let mut has_update = false;
+
+    if let Some(arr) = releases.as_array() {
+        for release in arr {
+            let tag = release.get("tag_name").and_then(|t| t.as_str()).unwrap_or("");
+            // 只关注桌面版 release（tag 含 "desktop" 或有 Setup asset）
+            let has_setup = release
+                .get("assets")
+                .and_then(|a| a.as_array())
+                .map(|assets| {
+                    assets.iter().any(|a| {
+                        let name = a.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        name.contains("Setup") && name.ends_with(".exe")
+                    })
+                })
+                .unwrap_or(false);
+
+            if !has_setup && !tag.contains("desktop") {
+                continue;
+            }
+
+            let ver = parse_version(tag);
+            if ver > best_ver {
+                best_ver = ver;
+                best_release = Some(release);
+                has_update = true;
             }
         }
     }
 
-    let release_notes = body
-        .get("body")
-        .and_then(|b| b.as_str())
-        .unwrap_or("")
-        .to_string();
+    let (latest_tag, download_url, release_notes) = if let Some(release) = best_release {
+        let tag = release
+            .get("tag_name")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
 
-    let current_ver = parse_version(current_clean);
-    let latest_ver = parse_version(latest_clean);
-    let has_update = latest_ver > current_ver;
+        // 找 Windows 安装包下载链接（优先 Setup exe）
+        let mut url = String::new();
+        if let Some(assets) = release.get("assets").and_then(|a| a.as_array()) {
+            // 先找 Setup exe
+            for asset in assets {
+                let name = asset.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                if name.contains("Setup") && name.ends_with(".exe") {
+                    url = asset
+                        .get("browser_download_url")
+                        .and_then(|u| u.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    break;
+                }
+            }
+            // 没有 Setup 就找任意 exe 或 zip
+            if url.is_empty() {
+                for asset in assets {
+                    let name = asset.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    if name.ends_with(".exe") || name.ends_with(".zip") {
+                        url = asset
+                            .get("browser_download_url")
+                            .and_then(|u| u.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        break;
+                    }
+                }
+            }
+        }
+
+        let notes = release
+            .get("body")
+            .and_then(|b| b.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        (tag, url, notes)
+    } else {
+        (String::new(), String::new(), String::new())
+    };
+
+    let release_notes = if release_notes.len() > 500 {
+        release_notes[..500].to_string()
+    } else {
+        release_notes
+    };
 
     Ok(UpdateInfo {
         has_update,
         current_version: CURRENT_VERSION.to_string(),
         latest_version: latest_tag.clone(),
         download_url,
-        release_notes: if release_notes.len() > 500 {
-            release_notes[..500].to_string()
-        } else {
-            release_notes
-        },
+        release_notes,
         message: if has_update {
             format!("发现新版本 {latest_tag}（当前 {CURRENT_VERSION}）")
         } else {

@@ -1,5 +1,14 @@
 // MovieClaw Desktop — Main application
 
+// 修复图片 URL：相对路径拼接服务器地址
+function resolveUrl(url) {
+  if (!url) return '';
+  if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('data:')) return url;
+  const base = (window.__MOVIECLAW_SERVER__ || '').replace(/\/+$/, '');
+  if (!base) return url;
+  return base + (url.startsWith('/') ? url : '/' + url);
+}
+
 const App = {
   currentPage: 'home',
   libraries: [],
@@ -215,15 +224,19 @@ const App = {
 
       // 并行加载多个横排数据
       const shelves = await Promise.all([
-        API.listLibraryItems(this.libraries[0]?.id, { limit: 12, sort: 'added_at', order: 'desc' }).catch(e => { console.error(e); return []; }),
-        API.listLibraryItems(this.libraries[0]?.id, { limit: 12, sort: 'rating', order: 'desc' }).catch(e => { console.error(e); return []; }),
-        API.listLibraryItems(this.libraries[0]?.id, { limit: 12, sort: 'release_date', order: 'desc' }).catch(e => { console.error(e); return []; }),
+        API.listLibraryItems(this.libraries[0]?.id, { limit: 12, sort: 'added_at', order: 'desc' }).catch(() => []),
+        API.listLibraryItems(this.libraries[0]?.id, { limit: 12, sort: 'rating', order: 'desc' }).catch(() => []),
+        API.listLibraryItems(this.libraries[0]?.id, { limit: 12, sort: 'release_date', order: 'desc' }).catch(() => []),
       ]);
 
       const unwrap = (r) => r?.data || r?.items || r || [];
+      const allItems = unwrap(shelves[0]);
+
+      // 选一部高分影片做英雄横幅
+      const heroItem = unwrap(shelves[1])[0] || allItems[0];
 
       const shelfData = [
-        { title: '最近添加', items: unwrap(shelves[0]) },
+        { title: '最近添加', items: allItems },
         { title: '高分精选', items: unwrap(shelves[1]) },
         { title: '最新上映', items: unwrap(shelves[2]) },
       ].filter(s => s.items && s.items.length > 0);
@@ -233,9 +246,34 @@ const App = {
         return;
       }
 
-      container.innerHTML = shelfData.map(shelf => `
+      const heroHtml = heroItem ? `
+        <div class="hero-banner" data-hero-id="${heroItem.id || ''}" data-hero-lib="${heroItem.libraryId || this.libraries[0]?.id || ''}">
+          <div class="hero-bg">
+            <img src="${resolveUrl(heroItem.backdropUrl || heroItem.backdrop_url || heroItem.posterUrl || heroItem.poster_url || '')}" alt="">
+          </div>
+          <div class="hero-info">
+            <div class="hero-tag">精选推荐</div>
+            <h1 class="hero-title">${heroItem.title || heroItem.name || ''}</h1>
+            <div class="hero-meta">
+              ${heroItem.year ? `<span>${heroItem.year}</span>` : ''}
+              ${heroItem.genres?.length ? `<span>${heroItem.genres.slice(0, 3).join(' / ')}</span>` : ''}
+              ${heroItem.runtime ? `<span>${heroItem.runtime} 分钟</span>` : ''}
+            </div>
+            ${heroItem.overview ? `<p class="hero-desc">${heroItem.overview}</p>` : ''}
+            <div class="hero-actions">
+              <button class="btn-play" id="heroPlayBtn">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                <span>播放</span>
+              </button>
+              <button class="btn-secondary" id="heroDetailBtn">详情</button>
+            </div>
+          </div>
+        </div>
+      ` : '';
+
+      container.innerHTML = heroHtml + shelfData.map(shelf => `
         <div class="shelf-section">
-          <div class="shelf-header">
+          <div class="shelf-header" data-shelf-title="${shelf.title}">
             <h2 class="shelf-title">${shelf.title}</h2>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-secondary)"><polyline points="9 18 15 12 9 6"/></svg>
           </div>
@@ -244,6 +282,19 @@ const App = {
           </div>
         </div>
       `).join('');
+
+      // 绑定英雄横幅事件
+      if (heroItem) {
+        document.getElementById('heroPlayBtn')?.addEventListener('click', () => {
+          this.startPlayback(heroItem);
+        });
+        document.getElementById('heroDetailBtn')?.addEventListener('click', () => {
+          this.navigate('detail', {
+            libraryId: heroItem.libraryId || this.libraries[0]?.id,
+            itemId: heroItem.id || heroItem.media_item_id
+          });
+        });
+      }
 
       this.bindPosterCards(container);
     } catch (e) {
@@ -289,8 +340,12 @@ const App = {
   async renderFavorites(container) {
     container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
     try {
-      const resp = await API.listLibraryItems(this.libraries[0]?.id, { favorites: true, limit: 60 }).catch(() => []);
-      const items = resp?.data || resp?.items || resp || [];
+      // 查询所有媒体库的收藏
+      const promises = this.libraries.map(lib =>
+        API.listLibraryItems(lib.id, { favorites: true, limit: 60 }).catch(() => [])
+      );
+      const results = await Promise.all(promises);
+      const items = results.flatMap(r => r?.data || r?.items || r || []);
       this.renderPosterWall(container, items, {
         title: '我的收藏',
         subtitle: `${items.length} 个项目`,
@@ -305,12 +360,23 @@ const App = {
     container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
     try {
       const results = await API.search(query);
-      this.renderPosterWall(container, results?.items || results || [], {
+      const items = results?.data?.items || results?.items || results?.data || results || [];
+      if (!items.length) {
+        container.innerHTML = `
+          <div class="page-header">
+            <h1 class="page-title">搜索结果</h1>
+            <span class="page-subtitle">"${query}"</span>
+          </div>
+          <div class="page-loading"><div style="color:var(--text-secondary)">没有找到匹配的内容</div></div>
+        `;
+        return;
+      }
+      this.renderPosterWall(container, items, {
         title: `"${query}" 的搜索结果`,
-        subtitle: `${(results?.items || results || []).length} 个结果`,
+        subtitle: `${items.length} 个结果`,
       });
     } catch (e) {
-      container.innerHTML = '<div class="page-loading"><div style="color:var(--text-secondary)">搜索失败</div></div>';
+      container.innerHTML = '<div class="page-loading"><div style="color:var(--text-secondary)">搜索失败: ' + (e.message || e) + '</div></div>';
     }
   },
 
@@ -319,64 +385,147 @@ const App = {
     container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
     try {
       const item = await API.getItemDetail(params.libraryId, params.itemId);
+      const info = item.data || item;
+
       container.innerHTML = `
         <div class="detail-hero">
           <div class="detail-hero-bg">
-            <img src="${item.backdropUrl || item.posterUrl || ''}" alt="">
+            <img src="${resolveUrl(info.backdropUrl || info.backdrop_url || info.posterUrl || info.poster_url || '')}" alt="">
           </div>
           <div class="detail-hero-info">
-            <h1 class="detail-title">${item.title}</h1>
+            <h1 class="detail-title">${info.title}</h1>
             <div class="detail-meta">
-              ${item.year ? `<span>${item.year}</span>` : ''}
-              ${item.genres?.length ? `<span>${item.genres.slice(0, 3).join(' / ')}</span>` : ''}
-              ${item.runtime ? `<span>${item.runtime} 分钟</span>` : ''}
+              ${info.year ? `<span>${info.year}</span>` : ''}
+              ${info.genres?.length ? `<span>${info.genres.slice(0, 3).join(' / ')}</span>` : ''}
+              ${info.runtime ? `<span>${info.runtime} 分钟</span>` : ''}
+              ${info.quality ? `<span class="quality-badge">${info.quality}</span>` : ''}
             </div>
             <div class="detail-actions">
               <button class="btn-play" id="btnPlay">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                <span>${item.watched ? '继续播放' : '播放'}</span>
+                <span>${info.watchProgress > 0 ? '继续播放' : '播放'}</span>
               </button>
-              <button class="btn-secondary">详情</button>
+              <button class="btn-icon" id="btnFavorite" title="收藏">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+                </svg>
+              </button>
+              <button class="btn-icon" id="btnMarkWatched" title="标记已看">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <circle cx="12" cy="12" r="10"/><polyline points="9 12 11 14 15 10"/>
+                </svg>
+              </button>
             </div>
           </div>
         </div>
         <div class="detail-body">
-          ${item.overview ? `<p class="detail-overview">${item.overview}</p>` : ''}
-          ${item.episodes?.length ? `
-            <div class="detail-section">
-              <h3>剧集</h3>
-              <div class="episode-grid">
-                ${item.episodes.map(ep => `
-                  <div class="episode-card" data-episode-id="${ep.id}">
-                    <div class="episode-art">
-                      <img src="${ep.thumbUrl || ''}" alt="">
-                      <div class="episode-num">${ep.episodeNumber}</div>
-                    </div>
-                    <div class="episode-info">
-                      <div class="episode-title">${ep.title}</div>
-                      <div class="episode-subtitle">${ep.runtime ? ep.runtime + ' 分钟' : ''}</div>
+          ${info.overview ? `<p class="detail-overview">${info.overview}</p>` : ''}
+
+          <div class="detail-columns">
+            <div class="detail-main">
+              ${info.seasons?.length ? `
+                <div class="detail-section">
+                  <h3>剧集</h3>
+                  <div class="season-selector">
+                    ${info.seasons.map((s, i) => `<button class="season-pill ${i === 0 ? 'active' : ''}" data-season="${s.seasonNumber || i + 1}">第 ${s.seasonNumber || i + 1} 季</button>`).join('')}
+                  </div>
+                  <div class="episode-grid" id="episodeGrid">
+                    ${(info.episodes || []).map(ep => `
+                      <div class="episode-card" data-episode-id="${ep.id}">
+                        <div class="episode-art">
+                          <img src="${resolveUrl(ep.thumbUrl || ep.thumb_url || '')}" alt="" onerror="this.style.display='none'">
+                          <div class="episode-num">${ep.episodeNumber}</div>
+                          ${ep.watchProgress > 0 ? `<div class="episode-progress"><div class="episode-progress-fill" style="width:${Math.round(ep.watchProgress * 100)}%"></div></div>` : ''}
+                        </div>
+                        <div class="episode-info">
+                          <div class="episode-title">${ep.title}</div>
+                          <div class="episode-subtitle">${ep.runtime ? ep.runtime + ' 分钟' : ''}${ep.airDate ? ' · ' + ep.airDate : ''}</div>
+                        </div>
+                      </div>
+                    `).join('')}
+                  </div>
+                </div>
+              ` : ''}
+
+              ${info.collections?.length ? `
+                <div class="detail-section">
+                  <h3>所属合集</h3>
+                  <div class="collection-chips">
+                    ${info.collections.map(c => `<a class="collection-chip" data-collection-id="${c.id}" href="#">${c.name}</a>`).join('')}
+                  </div>
+                </div>
+              ` : ''}
+            </div>
+
+            <aside class="detail-sidebar">
+              <div class="detail-info-block">
+                <h4>影片信息</h4>
+                ${info.originalTitle ? `<div class="info-row"><span class="info-label">原名</span><span>${info.originalTitle}</span></div>` : ''}
+                ${info.releaseDate ? `<div class="info-row"><span class="info-label">上映</span><span>${info.releaseDate}</span></div>` : ''}
+                ${info.genres?.length ? `<div class="info-row"><span class="info-label">类型</span><span>${info.genres.join(' / ')}</span></div>` : ''}
+                ${info.director ? `<div class="info-row"><span class="info-label">导演</span><span>${info.director}</span></div>` : ''}
+                ${info.cast?.length ? `
+                  <div class="info-row info-row-cast">
+                    <span class="info-label">主演</span>
+                    <div class="cast-list">
+                      ${info.cast.slice(0, 6).map(p => `
+                        <div class="cast-item">
+                          ${p.avatarUrl ? `<img src="${resolveUrl(p.avatarUrl)}" alt="" class="cast-avatar">` : '<div class="cast-avatar cast-avatar-placeholder"></div>'}
+                          <div>
+                            <div class="cast-name">${p.name}</div>
+                            <div class="cast-role">${p.role || ''}</div>
+                          </div>
+                        </div>
+                      `).join('')}
                     </div>
                   </div>
-                `).join('')}
+                ` : ''}
+                ${info.rating ? `<div class="info-row"><span class="info-label">评分</span><span class="rating-score">${info.rating}</span></div>` : ''}
+                ${info.fileCount ? `<div class="info-row"><span class="info-label">文件</span><span>${info.fileCount} 个</span></div>` : ''}
               </div>
-            </div>
-          ` : ''}
+            </aside>
+          </div>
         </div>
       `;
 
+      // 绑定事件
       document.getElementById('btnPlay')?.addEventListener('click', () => {
-        this.startPlayback(item);
+        this.startPlayback(info);
+      });
+
+      document.getElementById('btnFavorite')?.addEventListener('click', async () => {
+        try {
+          await API.request(`/items/${info.id}/favorite`, { method: 'POST' });
+          document.getElementById('btnFavorite').classList.toggle('active');
+        } catch (e) { console.error('Favorite toggle failed:', e); }
+      });
+
+      document.getElementById('btnMarkWatched')?.addEventListener('click', async () => {
+        try {
+          await API.request(`/items/${info.id}/watched`, { method: 'POST' });
+          document.getElementById('btnMarkWatched').classList.toggle('active');
+        } catch (e) { console.error('Mark watched failed:', e); }
       });
 
       container.querySelectorAll('.episode-card').forEach(card => {
         card.addEventListener('click', () => {
           const epId = card.dataset.episodeId;
-          const ep = item.episodes?.find(e => e.id == epId);
-          if (ep) this.startPlayback({ ...ep, title: item.title + ' - ' + ep.title });
+          const ep = (info.episodes || []).find(e => e.id == epId);
+          if (ep) this.startPlayback({ ...ep, title: info.title + ' - ' + ep.title });
         });
       });
+
+      container.querySelectorAll('.season-pill').forEach(pill => {
+        pill.addEventListener('click', () => {
+          container.querySelectorAll('.season-pill').forEach(p => p.classList.remove('active'));
+          pill.classList.add('active');
+          // TODO: filter episodes by season
+        });
+      });
+
     } catch (e) {
-      container.innerHTML = '<div class="page-loading"><div style="color:var(--text-secondary)">加载失败</div></div>';
+      console.error('Render detail error:', e);
+      container.innerHTML = '<div class="page-loading"><div style="color:var(--text-secondary)">加载失败: ' + (e.message || e) + '</div></div>';
     }
   },
 
@@ -401,12 +550,12 @@ const App = {
     const itemId = item.id || item.media_item_id || item.mediaItemId || '';
     const libId = item.libraryId || item.library_id || '';
     const title = item.title || item.name || '未知';
-    const posterUrl = item.posterUrl || item.poster_url || item.thumbUrl || item.thumb_url || '';
+    const posterUrl = resolveUrl(item.posterUrl || item.poster_url || item.thumbUrl || item.thumb_url || '');
     const year = item.year || '';
     return `
       <div class="poster-card" data-item-id="${itemId}" data-library-id="${libId}">
         <div class="poster-art">
-          <img src="${posterUrl}" alt="${title}" loading="lazy">
+          <img src="${posterUrl}" alt="${title}" loading="lazy" onerror="this.style.display='none';this.parentElement.classList.add('no-img')">
           <div class="play-overlay">
             <div class="play-btn">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -448,7 +597,7 @@ const App = {
         <div class="settings-card">
           <h3>关于</h3>
           <p>MovieClaw Desktop</p>
-          <p style="color:var(--text-secondary);margin-top:4px;">版本 0.1.1</p>
+          <p style="color:var(--text-secondary);margin-top:4px;">版本 0.2.100</p>
         </div>
       </div>
     `;
