@@ -1,12 +1,36 @@
 // MovieClaw Desktop — Main application
 
-// 修复图片 URL：相对路径拼接服务器地址
+// 修复图片 URL：相对路径拼接服务器地址，远程 URL 走服务器代理
 function resolveUrl(url) {
   if (!url) return '';
-  if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('data:')) return url;
+  if (url.startsWith('data:')) return url;
   const base = (window.__MOVIECLAW_SERVER__ || '').replace(/\/+$/, '');
+  // 远程 TMDB 等图片走服务器缓存代理（和 Web 端一致）
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    if (!base) return url;
+    return base + '/images/proxy?url=' + encodeURIComponent(url);
+  }
+  // 相对路径拼接服务器地址
   if (!base) return url;
   return base + (url.startsWith('/') ? url : '/' + url);
+}
+
+// 图片加载失败时通过 Rust 代理（带 Cookie）重试
+function imgFallback(imgEl, rawUrl) {
+  if (!rawUrl || imgEl.dataset.retried) {
+    imgEl.style.display = 'none';
+    imgEl.parentElement?.classList.add('no-img');
+    return;
+  }
+  imgEl.dataset.retried = '1';
+  API.proxyImage(rawUrl).then(dataUri => {
+    if (dataUri) {
+      imgEl.src = dataUri;
+    } else {
+      imgEl.style.display = 'none';
+      imgEl.parentElement?.classList.add('no-img');
+    }
+  });
 }
 
 const App = {
@@ -249,7 +273,7 @@ const App = {
       const heroHtml = heroItem ? `
         <div class="hero-banner" data-hero-id="${heroItem.id || ''}" data-hero-lib="${heroItem.libraryId || this.libraries[0]?.id || ''}">
           <div class="hero-bg">
-            <img src="${resolveUrl(heroItem.backdropUrl || heroItem.backdrop_url || heroItem.posterUrl || heroItem.poster_url || '')}" alt="">
+            <img src="${resolveUrl(heroItem.backdropUrl || heroItem.backdrop_url || heroItem.posterUrl || heroItem.poster_url || '')}" alt="" data-raw="${heroItem.backdropUrl || heroItem.backdrop_url || heroItem.posterUrl || heroItem.poster_url || ''}" onerror="imgFallback(this, this.dataset.raw)">
           </div>
           <div class="hero-info">
             <div class="hero-tag">精选推荐</div>
@@ -390,7 +414,7 @@ const App = {
       container.innerHTML = `
         <div class="detail-hero">
           <div class="detail-hero-bg">
-            <img src="${resolveUrl(info.backdropUrl || info.backdrop_url || info.posterUrl || info.poster_url || '')}" alt="">
+            <img src="${resolveUrl(info.backdropUrl || info.backdrop_url || info.posterUrl || info.poster_url || '')}" alt="" data-raw="${info.backdropUrl || info.backdrop_url || info.posterUrl || info.poster_url || ''}" onerror="imgFallback(this, this.dataset.raw)">
           </div>
           <div class="detail-hero-info">
             <h1 class="detail-title">${info.title}</h1>
@@ -433,7 +457,7 @@ const App = {
                     ${(info.episodes || []).map(ep => `
                       <div class="episode-card" data-episode-id="${ep.id}">
                         <div class="episode-art">
-                          <img src="${resolveUrl(ep.thumbUrl || ep.thumb_url || '')}" alt="" onerror="this.style.display='none'">
+                          <img src="${resolveUrl(ep.thumbUrl || ep.thumb_url || '')}" alt="" data-raw="${ep.thumbUrl || ep.thumb_url || ''}" onerror="imgFallback(this, this.dataset.raw)">
                           <div class="episode-num">${ep.episodeNumber}</div>
                           ${ep.watchProgress > 0 ? `<div class="episode-progress"><div class="episode-progress-fill" style="width:${Math.round(ep.watchProgress * 100)}%"></div></div>` : ''}
                         </div>
@@ -550,12 +574,13 @@ const App = {
     const itemId = item.id || item.media_item_id || item.mediaItemId || '';
     const libId = item.libraryId || item.library_id || '';
     const title = item.title || item.name || '未知';
-    const posterUrl = resolveUrl(item.posterUrl || item.poster_url || item.thumbUrl || item.thumb_url || '');
+    const rawPoster = item.posterUrl || item.poster_url || item.thumbUrl || item.thumb_url || '';
+    const posterUrl = resolveUrl(rawPoster);
     const year = item.year || '';
     return `
       <div class="poster-card" data-item-id="${itemId}" data-library-id="${libId}">
         <div class="poster-art">
-          <img src="${posterUrl}" alt="${title}" loading="lazy" onerror="this.style.display='none';this.parentElement.classList.add('no-img')">
+          <img src="${posterUrl}" alt="${title}" loading="lazy" data-raw="${rawPoster}" onerror="imgFallback(this, this.dataset.raw)">
           <div class="play-overlay">
             <div class="play-btn">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -597,7 +622,7 @@ const App = {
         <div class="settings-card">
           <h3>关于</h3>
           <p>MovieClaw Desktop</p>
-          <p style="color:var(--text-secondary);margin-top:4px;">版本 0.2.100</p>
+          <p style="color:var(--text-secondary);margin-top:4px;">版本 0.2.101</p>
         </div>
       </div>
     `;

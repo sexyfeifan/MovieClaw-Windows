@@ -16,6 +16,25 @@ const API = {
     }
   },
 
+  // 通过 proxy_api 的 /__image__ 路径加载需要认证的图片，返回 data URI
+  async proxyImage(pathOrUrl) {
+    try {
+      const encoded = encodeURIComponent(pathOrUrl);
+      const result = await window.__TAURI__.core.invoke('proxy_api', {
+        method: 'GET',
+        path: '/__image__?url=' + encoded,
+        body: null,
+      });
+      if (result.status === 200 && result.body.startsWith('data:')) {
+        return result.body;
+      }
+      return '';
+    } catch (e) {
+      console.warn('[API] proxyImage failed:', pathOrUrl, e);
+      return '';
+    }
+  },
+
   // 通过 Rust proxy_api 命令发送请求（自动 Cookie，绕过 CORS，无 URL scope 限制）
   async rawFetch(path, options = {}) {
     const method = (options.method || 'GET').toUpperCase();
