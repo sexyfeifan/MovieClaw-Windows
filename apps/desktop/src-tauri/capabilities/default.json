@@ -1,17 +1,12 @@
 {
   "identifier": "default",
   "description": "Default capability for MovieClaw Desktop",
-  "windows": ["main"],
-  "remote": {
-    "urls": ["http://*:*", "https://*:*"]
-  },
+  "windows": ["main", "controls"],
   "permissions": [
     "core:default",
     "shell:allow-execute",
     "shell:allow-kill",
     "shell:allow-open",
-    "shell:allow-spawn",
-    "shell:allow-stdin-write",
     "allow-launch-player",
     "allow-stop-player",
     "allow-save-server-url",
@@ -19,6 +14,8 @@
     "allow-clear-server-url",
     "allow-probe-server",
     "allow-send-mpv-command",
+    "allow-open-controls-window",
+    "allow-close-controls-window",
     "allow-check-for-updates",
     "allow-open-download-page",
     "allow-open-release-page"
