@@ -1,0 +1,6 @@
+# 使用 llvm-mingw (clang + MinGW UCRT) 编译 Tauri
+# 工具链: stable-x86_64-pc-windows-gnu (已设为 rustup default)
+# 编译器: llvm-mingw clang/clang++/windres/ar
+
+[target.x86_64-pc-windows-gnu]
+linker = "C:/Users/zhou_/toolchains/llvm-mingw-20260922-ucrt-x86_64/bin/clang.exe"
