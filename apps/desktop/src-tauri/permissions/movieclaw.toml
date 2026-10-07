@@ -64,6 +64,11 @@ description = "Allows toggling the volume control overlay window"
 commands.allow = ["toggle_volume_window"]
 
 [[permission]]
+identifier = "allow-proxy-api"
+description = "Allows proxying API requests to the MovieClaw server"
+commands.allow = ["proxy_api"]
+
+[[permission]]
 identifier = "default"
 description = "Default permissions for MovieClaw Desktop"
 permissions = [
@@ -79,5 +84,6 @@ permissions = [
     "allow-open-release-page",
     "allow-show-volume-window",
     "allow-hide-volume-window",
-    "allow-toggle-volume-window"
+    "allow-toggle-volume-window",
+    "allow-proxy-api"
 ]

@@ -10,13 +10,39 @@ const API = {
   },
 
   async request(path, options = {}) {
-    const url = this.baseUrl + '/api/v1' + path;
-    const headers = { 'Accept': 'application/json', ...options.headers };
-    if (options.body && typeof options.body !== 'string' && !(options.body instanceof FormData)) {
-      headers['Content-Type'] = 'application/json';
-      options.body = JSON.stringify(options.body);
+    const method = (options.method || 'GET').toUpperCase();
+    let body = options.body || null;
+    let contentType = null;
+
+    if (body && typeof body !== 'string') {
+      contentType = 'application/json';
+      body = JSON.stringify(body);
     }
-    const res = await fetch(url, { ...options, headers });
+
+    // 通过 Tauri Rust 后端代理请求，绕过 CORS
+    if (window.__TAURI__) {
+      const resp = await window.__TAURI__.core.invoke('proxy_api', {
+        method,
+        path,
+        body: body || null,
+        contentType,
+      });
+      if (resp.status === 204) return null;
+      if (resp.status >= 400) {
+        throw new Error(`API error ${resp.status}: ${resp.body}`);
+      }
+      try {
+        return JSON.parse(resp.body);
+      } catch {
+        return resp.body;
+      }
+    }
+
+    // 回退：直接 fetch（同源部署时可用）
+    const url = this.baseUrl + '/api/v1' + path;
+    const headers = { 'Accept': 'application/json' };
+    if (contentType) headers['Content-Type'] = contentType;
+    const res = await fetch(url, { method, headers, body });
     if (res.status === 204) return null;
     if (!res.ok) {
       const text = await res.text();

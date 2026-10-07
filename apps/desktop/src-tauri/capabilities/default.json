@@ -24,6 +24,7 @@
     "allow-open-release-page",
     "allow-show-volume-window",
     "allow-hide-volume-window",
-    "allow-toggle-volume-window"
+    "allow-toggle-volume-window",
+    "allow-proxy-api"
   ]
 }

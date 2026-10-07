@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod api_proxy;
 mod connect;
 mod player;
 mod updater;
@@ -172,6 +173,7 @@ fn main() {
             volume_overlay::show_volume_window,
             volume_overlay::hide_volume_window,
             volume_overlay::toggle_volume_window,
+            api_proxy::proxy_api,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MovieClaw Desktop");
