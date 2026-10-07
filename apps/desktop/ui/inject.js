@@ -250,205 +250,54 @@
     if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
   }
 
-  // ---- 覆盖层系统（iframe 完全隔离，不被网页遮挡）----
+  // ---- 音量控制（原生 Tauri 窗口，永远在最上层）----
 
-  var _overlayIframe = null;
-  var _overlayDoc = null;
-
-  function ensureOverlay() {
-    if (_overlayIframe && _overlayIframe.isConnected) return _overlayDoc;
-
-    _overlayIframe = document.createElement('iframe');
-    _overlayIframe.id = '__mc_overlay__';
-    _overlayIframe.style.cssText = [
-      'position:fixed',
-      'top:0', 'left:0', 'width:100vw', 'height:100vh',
-      'z-index:2147483647',
-      'border:none',
-      'pointer-events:none',
-      'background:transparent'
-    ].join(';');
-
-    // 用 srcdoc 创建独立文档，完全隔离页面样式
-    _overlayIframe.srcdoc = `<!DOCTYPE html><html><head><style>
-      * { box-sizing: border-box; margin: 0; padding: 0; }
-      body { width: 100vw; height: 100vh; overflow: hidden; background: transparent; font-family: 'Segoe UI', system-ui, sans-serif; }
-
-      /* ===== 音量控件 ===== */
-      .mc-vol {
-        position: fixed; bottom: 16px; right: 16px;
-        display: flex; align-items: center; gap: 6px;
-        background: rgba(15, 17, 23, 0.92);
-        border: 1px solid rgba(255,255,255,0.1);
-        border-radius: 12px;
-        padding: 10px 14px;
-        color: #e8e8e8;
-        user-select: none;
-        pointer-events: auto;
-        box-shadow: 0 4px 24px rgba(0,0,0,0.5);
-        transition: opacity 0.3s, transform 0.3s;
-      }
-      .mc-vol.hidden { opacity: 0; transform: translateY(8px); pointer-events: none; }
-      .mc-vol button {
-        width: 34px; height: 34px;
-        border: none; border-radius: 8px;
-        cursor: pointer;
-        display: flex; align-items: center; justify-content: center;
-        font-size: 15px;
-        background: rgba(255,255,255,0.1);
-        color: #e8e8e8;
-        transition: background 0.15s;
-      }
-      .mc-vol button:hover { background: rgba(255,255,255,0.2); }
-      .mc-vol button.active { background: rgba(248,113,113,0.5); }
-      .mc-vol input[type=range] {
-        -webkit-appearance: none;
-        width: 100px; height: 4px;
-        border-radius: 2px;
-        background: rgba(255,255,255,0.15);
-        outline: none; cursor: pointer;
-      }
-      .mc-vol input[type=range]::-webkit-slider-thumb {
-        -webkit-appearance: none;
-        width: 14px; height: 14px; border-radius: 50%;
-        background: #fff; cursor: pointer;
-      }
-      .mc-vol .pct { font-size: 12px; min-width: 36px; text-align: center; opacity: 0.8; font-weight: 600; }
-
-      /* ===== 更新横幅 ===== */
-      .mc-update {
-        position: fixed; top: 16px; right: 16px;
-        background: linear-gradient(135deg, #1a6b3c, #2d8f56);
-        color: #fff;
-        padding: 18px 22px;
-        border-radius: 12px;
-        box-shadow: 0 8px 32px rgba(0,0,0,0.4);
-        max-width: 360px;
-        pointer-events: auto;
-        transition: opacity 0.3s, transform 0.3s;
-      }
-      .mc-update.hidden { opacity: 0; transform: translateX(100%); pointer-events: none; }
-      .mc-update .ut { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
-      .mc-update .um { font-size: 13px; opacity: 0.9; margin-bottom: 14px; line-height: 1.4; }
-      .mc-update .ua { display: flex; gap: 8px; }
-      .mc-update .up {
-        flex: 1; padding: 8px 16px; border: none; border-radius: 8px;
-        background: rgba(255,255,255,0.95); color: #1a6b3c;
-        font-weight: 600; cursor: pointer; font-size: 13px;
-      }
-      .mc-update .ug {
-        padding: 8px 16px; border: none; border-radius: 8px;
-        background: rgba(255,255,255,0.2); color: #fff;
-        cursor: pointer; font-size: 13px;
-      }
-
-      /* ===== Toast ===== */
-      .mc-toast {
-        position: fixed; bottom: 80px; right: 16px;
-        background: rgba(0,0,0,0.8);
-        color: #fff;
-        padding: 10px 18px;
-        border-radius: 8px;
-        font-size: 13px;
-        pointer-events: none;
-        transition: opacity 0.3s;
-      }
-      .mc-toast.hidden { opacity: 0; }
-    </style></head><body>
-      <div class="mc-vol hidden" id="vol">
-        <button id="volMute" title="静音 (M)">🔊</button>
-        <button id="volDown" title="音量减 (↓)">−</button>
-        <input type="range" id="volSlider" min="0" max="130" value="100" step="1">
-        <button id="volUp" title="音量加 (↑)">+</button>
-        <span class="pct" id="volPct">100%</span>
-      </div>
-      <div class="mc-update hidden" id="update">
-        <div class="ut" id="updateTitle"></div>
-        <div class="um" id="updateMsg"></div>
-        <div class="ua">
-          <button class="up" id="updateDl">立即更新</button>
-          <button class="ug" id="updateDismiss">稍后</button>
-        </div>
-      </div>
-      <div class="mc-toast hidden" id="toast"></div>
-    </body></html>`;
-
-    document.documentElement.appendChild(_overlayIframe);
-
-    // 等 iframe 加载完，绑定事件
-    return new Promise(function (resolve) {
-      _overlayIframe.addEventListener('load', function () {
-        _overlayDoc = _overlayIframe.contentDocument;
-        bindOverlayEvents();
-        resolve(_overlayDoc);
-      });
-    });
-  }
-
-  function bindOverlayEvents() {
-    if (!_overlayDoc) return;
-    _overlayDoc.getElementById('volMute').addEventListener('click', toggleMute);
-    _overlayDoc.getElementById('volDown').addEventListener('click', function () { adjustVolume(-5); });
-    _overlayDoc.getElementById('volUp').addEventListener('click', function () { adjustVolume(5); });
-    _overlayDoc.getElementById('volSlider').addEventListener('input', function () {
-      setVolume(parseInt(this.value, 10));
-    });
-    _overlayDoc.getElementById('updateDl').addEventListener('click', function () {
-      invoke('open_download_page').catch(function () {});
-      hideUpdateBanner();
-    });
-    _overlayDoc.getElementById('updateDismiss').addEventListener('click', hideUpdateBanner);
-  }
-
-  // ===== 音量控件 API =====
   function showVolumeWidget() {
-    ensureOverlay().then(function (doc) {
-      if (doc) doc.getElementById('vol').classList.remove('hidden');
+    invoke('show_volume_window').catch(function (e) {
+      log('show_volume_window failed:', e);
     });
   }
 
   function hideVolumeWidget() {
-    if (_overlayDoc) _overlayDoc.getElementById('vol').classList.add('hidden');
+    invoke('hide_volume_window').catch(function () {});
   }
 
   function updateVolumeUI() {
-    if (!_overlayDoc) return;
-    var vol = Math.round(playerState.volume);
-    var slider = _overlayDoc.getElementById('volSlider');
-    var pct = _overlayDoc.getElementById('volPct');
-    var mute = _overlayDoc.getElementById('volMute');
-    if (slider) slider.value = vol;
-    if (pct) pct.textContent = vol + '%';
-    if (mute) {
-      mute.textContent = playerState.mute ? '🔇' : '🔊';
-      mute.classList.toggle('active', playerState.mute);
-    }
+    // 音量窗口通过 Tauri 事件自行更新，无需同步
   }
 
-  // ===== 更新横幅 API =====
+  // ---- 更新横幅 / Toast（简易 DOM，高 z-index + !important）----
+
   function showUpdateBanner(info) {
-    ensureOverlay().then(function (doc) {
-      if (!doc) return;
-      doc.getElementById('updateTitle').textContent = '🔄 发现新版本 ' + (info.version || '');
-      doc.getElementById('updateMsg').textContent = info.message || '';
-      doc.getElementById('update').classList.remove('hidden');
-      setTimeout(hideUpdateBanner, 10000);
+    var old = document.getElementById('__mc_update__');
+    if (old) old.remove();
+    var el = document.createElement('div');
+    el.id = '__mc_update__';
+    el.style.cssText = 'position:fixed!important;top:16px!important;right:16px!important;z-index:2147483647!important;pointer-events:auto!important;background:linear-gradient(135deg,#1a6b3c,#2d8f56)!important;color:#fff!important;padding:18px 22px!important;border-radius:12px!important;box-shadow:0 8px 32px rgba(0,0,0,0.4)!important;max-width:360px!important;font-family:Segoe UI,system-ui,sans-serif!important;';
+    el.innerHTML = '<div style="font-size:15px;font-weight:600;margin-bottom:8px!important;">发现新版本 ' + (info.version || '') + '</div>'
+      + '<div style="font-size:13px;opacity:0.9;margin-bottom:14px!important;line-height:1.4!important;">' + (info.message || '') + '</div>'
+      + '<div style="display:flex!important;gap:8px!important;">'
+      + '<button id="__mc_upd_dl__" style="flex:1!important;padding:8px 16px!important;border:none!important;border-radius:8px!important;background:rgba(255,255,255,0.95)!important;color:#1a6b3c!important;font-weight:600!important;cursor:pointer!important;font-size:13px!important;">立即更新</button>'
+      + '<button id="__mc_upd_no__" style="padding:8px 16px!important;border:none!important;border-radius:8px!important;background:rgba(255,255,255,0.2)!important;color:#fff!important;cursor:pointer!important;font-size:13px!important;">稍后</button>'
+      + '</div>';
+    document.documentElement.appendChild(el);
+    document.getElementById('__mc_upd_dl__').addEventListener('click', function () {
+      invoke('open_download_page').catch(function () {});
+      el.remove();
     });
+    document.getElementById('__mc_upd_no__').addEventListener('click', function () { el.remove(); });
+    setTimeout(function () { if (el.parentNode) el.remove(); }, 10000);
   }
 
-  function hideUpdateBanner() {
-    if (_overlayDoc) _overlayDoc.getElementById('update').classList.add('hidden');
-  }
-
-  // ===== Toast API =====
   function showToast(msg) {
-    ensureOverlay().then(function (doc) {
-      if (!doc) return;
-      var t = doc.getElementById('toast');
-      t.textContent = msg;
-      t.classList.remove('hidden');
-      setTimeout(function () { t.classList.add('hidden'); }, 3000);
-    });
+    var old = document.getElementById('__mc_toast__');
+    if (old) old.remove();
+    var el = document.createElement('div');
+    el.id = '__mc_toast__';
+    el.textContent = msg;
+    el.style.cssText = 'position:fixed!important;bottom:80px!important;right:16px!important;z-index:2147483647!important;pointer-events:none!important;background:rgba(0,0,0,0.8)!important;color:#fff!important;padding:10px 18px!important;border-radius:8px!important;font-family:Segoe UI,system-ui,sans-serif!important;font-size:13px!important;';
+    document.documentElement.appendChild(el);
+    setTimeout(function () { if (el.parentNode) el.remove(); }, 3000);
   }
 
   function setVolume(level) {

@@ -21,6 +21,9 @@
     "allow-send-mpv-command",
     "allow-check-for-updates",
     "allow-open-download-page",
-    "allow-open-release-page"
+    "allow-open-release-page",
+    "allow-show-volume-window",
+    "allow-hide-volume-window",
+    "allow-toggle-volume-window"
   ]
 }

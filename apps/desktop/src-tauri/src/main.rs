@@ -3,6 +3,7 @@
 mod connect;
 mod player;
 mod updater;
+mod volume_overlay;
 
 use tauri::Manager;
 use tauri::WebviewUrl;
@@ -163,6 +164,9 @@ fn main() {
             updater::check_for_updates,
             updater::open_download_page,
             updater::open_release_page,
+            volume_overlay::show_volume_window,
+            volume_overlay::hide_volume_window,
+            volume_overlay::toggle_volume_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MovieClaw Desktop");

@@ -41,6 +41,7 @@ Section "安装" SecInstall
     File "..\dist\portable\movieclaw-desktop.exe"
     File "..\dist\portable\connect.html"
     File "..\dist\portable\inject.js"
+    File "..\dist\portable\volume-overlay.html"
     File "..\dist\portable\WebView2Loader.dll"
     ; mpv sidecar (如存在)
     File /nonfatal /r "..\dist\portable\mpv"

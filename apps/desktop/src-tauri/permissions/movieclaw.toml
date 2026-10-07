@@ -49,6 +49,21 @@ description = "Allows opening the release page in browser"
 commands.allow = ["open_release_page"]
 
 [[permission]]
+identifier = "allow-show-volume-window"
+description = "Allows showing the volume control overlay window"
+commands.allow = ["show_volume_window"]
+
+[[permission]]
+identifier = "allow-hide-volume-window"
+description = "Allows hiding the volume control overlay window"
+commands.allow = ["hide_volume_window"]
+
+[[permission]]
+identifier = "allow-toggle-volume-window"
+description = "Allows toggling the volume control overlay window"
+commands.allow = ["toggle_volume_window"]
+
+[[permission]]
 identifier = "default"
 description = "Default permissions for MovieClaw Desktop"
 permissions = [
@@ -61,5 +76,8 @@ permissions = [
     "allow-send-mpv-command",
     "allow-check-for-updates",
     "allow-open-download-page",
-    "allow-open-release-page"
+    "allow-open-release-page",
+    "allow-show-volume-window",
+    "allow-hide-volume-window",
+    "allow-toggle-volume-window"
 ]
