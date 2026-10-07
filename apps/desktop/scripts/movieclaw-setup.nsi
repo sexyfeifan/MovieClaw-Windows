@@ -39,8 +39,11 @@ Section "安装" SecInstall
 
     ; 主程序
     File "..\dist\portable\movieclaw-desktop.exe"
+    File "..\dist\portable\index.html"
+    File "..\dist\portable\app.css"
+    File "..\dist\portable\app.js"
     File "..\dist\portable\connect.html"
-    File "..\dist\portable\inject.js"
+    File "..\dist\portable\controls.html"
     File "..\dist\portable\WebView2Loader.dll"
     ; mpv sidecar (如存在)
     File /nonfatal /r "..\dist\portable\mpv"
@@ -70,8 +73,11 @@ SectionEnd
 
 Section "Uninstall"
     Delete "$INSTDIR\${APP_NAME}.exe"
+    Delete "$INSTDIR\index.html"
+    Delete "$INSTDIR\app.css"
+    Delete "$INSTDIR\app.js"
     Delete "$INSTDIR\connect.html"
-    Delete "$INSTDIR\inject.js"
+    Delete "$INSTDIR\controls.html"
     Delete "$INSTDIR\WebView2Loader.dll"
     RMDir /r "$INSTDIR\mpv"
     Delete "$INSTDIR\uninstall.exe"
