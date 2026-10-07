@@ -1,0 +1,107 @@
+name: Desktop Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - 'desktop-v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (GNU target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: Setup MinGW
+        run: |
+          $gcc = Get-Command gcc -ErrorAction SilentlyContinue
+          if (-not $gcc) {
+            choco install mingw -y --no-progress
+            echo "C:\ProgramData\mingw64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          }
+          gcc --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop/src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build release
+        working-directory: apps/desktop/src-tauri
+        run: cargo build --release
+        env:
+          CC_x86_64_pc_windows_gnu: gcc
+          CXX_x86_64_pc_windows_gnu: g++
+
+      - name: Assemble portable
+        run: |
+          $dist = "apps/desktop/dist"
+          $portable = "$dist/portable"
+          New-Item -ItemType Directory -Force -Path $portable
+          Copy-Item apps/desktop/src-tauri/target/release/movieclaw-desktop.exe $portable/
+          Copy-Item apps/desktop/ui/connect.html $portable/
+          Copy-Item apps/desktop/ui/inject.js $portable/
+          $dll = Get-ChildItem -Path apps/desktop/src-tauri/target -Recurse -Filter WebView2Loader.dll | Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1
+          if ($dll) { Copy-Item $dll.FullName $portable/ }
+          New-Item -ItemType Directory -Force -Path "$portable/mpv"
+          if (Test-Path apps/desktop/scripts/mpv) {
+            Copy-Item apps/desktop/scripts/mpv/* "$portable/mpv/" -Recurse -ErrorAction SilentlyContinue
+          }
+          @"
+          MovieClaw Desktop (Portable)
+          1. Run movieclaw-desktop.exe
+          2. Enter your MovieClaw server URL
+          3. Browse and play
+          Requires: Windows 10/11 x64, WebView2 Runtime, mpv
+          "@ | Set-Content "$portable/README.txt"
+
+      - name: Create portable zip
+        run: |
+          Compress-Archive -Path 'apps/desktop/dist/portable/*' -DestinationPath 'apps/desktop/dist/MovieClaw-Desktop-portable-x64.zip' -Force
+
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
+      - name: Build NSIS installer
+        run: |
+          & "C:\Program Files (x86)\NSIS\makensis.exe" apps/desktop/scripts/movieclaw-setup.nsi
+
+      - name: Generate checksums
+        run: |
+          Get-ChildItem apps/desktop/dist -Include *.exe,*.zip -Recurse | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)" | Out-File -Append apps/desktop/dist/SHA256SUMS.txt
+          }
+          Get-Content apps/desktop/dist/SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: MovieClaw Desktop ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
+          generate_release_notes: true
+          files: |
+            apps/desktop/dist/MovieClaw-Desktop-*.exe
+            apps/desktop/dist/MovieClaw-Desktop-*.zip
+            apps/desktop/dist/SHA256SUMS.txt

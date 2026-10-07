@@ -1,0 +1,116 @@
+name: Upstream Watch
+
+on:
+  schedule:
+    # 每周一 8:17 UTC (~16:17 CST)
+    - cron: '17 8 * * 1'
+  workflow_dispatch:
+
+jobs:
+  check-upstream:
+    name: Check MovieClaw Upstream
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check upstream for changes
+        id: upstream
+        run: |
+          # 上游仓库 API schema 关注
+          UPSTREAM_REPO="movieclaw/MovieClaw"
+
+          # 获取最近 7 天的 commits
+          SINCE=$(date -u -d "7 days ago" +%Y-%m-%dT%H:%M:%SZ)
+          COMMITS=$(curl -s "https://api.github.com/repos/${UPSTREAM_REPO}/commits?since=${SINCE}&per_page=20" \
+            -H "Accept: application/vnd.github.v3+json")
+
+          COMMIT_COUNT=$(echo "$COMMITS" | jq 'length')
+          echo "commits_count=${COMMIT_COUNT}" >> "$GITHUB_OUTPUT"
+
+          if [ "$COMMIT_COUNT" -gt 0 ]; then
+            echo "found_changes=true" >> "$GITHUB_OUTPUT"
+            echo "=== 最近 ${COMMIT_COUNT} 条上游提交 ==="
+            echo "$COMMITS" | jq -r '.[] | "- \(.sha[0:7]) \(.commit.message | split("\n")[0])"'
+          else
+            echo "found_changes=false" >> "$GITHUB_OUTPUT"
+            echo "上游过去 7 天无新提交"
+          fi
+
+      - name: Check API schema drift
+        id: schema
+        run: |
+          # 检查关键 API 路径是否在上游有变化
+          # 这里比较的是 inject.js 用到的字段 vs 上游 schema
+
+          UPSTREAM_REPO="movieclaw/MovieClaw"
+          # 查找 playback / API 定义文件
+          CHANGED=$(curl -s "https://api.github.com/repos/${UPSTREAM_REPO}/commits?since=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)" \
+            -H "Accept: application/vnd.github.v3+json" | \
+            jq -r '[.[].files[]?.filename // empty] | unique | .[]')
+
+          echo "changed_files=${CHANGED}" >> "$GITHUB_OUTPUT"
+          echo "=== 上游变更文件 ==="
+          echo "$CHANGED"
+
+          # 检查是否有 API/schema 相关变更
+          API_CHANGES=$(echo "$CHANGED" | grep -E '(api|schema|playback|session|progress)' || true)
+          if [ -n "$API_CHANGES" ]; then
+            echo "api_changed=true" >> "$GITHUB_OUTPUT"
+            echo "⚠️ 检测到 API/schema 相关变更:"
+            echo "$API_CHANGES"
+          else
+            echo "api_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create issue if API changed
+        if: steps.schema.outputs.api_changed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = '🤖 上游 MovieClaw API 变更检测';
+            const body = [
+              '## 上游变更摘要',
+              '',
+              `**变更文件:**`,
+              '```',
+              `${process.env.CHANGED_FILES || 'N/A'}`,
+              '```',
+              '',
+              '## 检查项',
+              '- [ ] `/api/v1/playback/sessions` 字段是否有变更',
+              '- [ ] `/api/v1/playback/progress` 请求体是否有变更',
+              '- [ ] `universal` capability 是否仍然生效',
+              '- [ ] `subtitle_urls` 字段是否变更',
+              '- [ ] 认证 API 是否变更',
+              '',
+              '> 此 issue 由 upstream-watch workflow 自动创建',
+            ].join('\n');
+
+            // 避免重复创建
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'upstream-watch',
+              state: 'open',
+            });
+
+            if (issues.data.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['upstream-watch', 'automated'],
+              });
+            }
+        env:
+          CHANGED_FILES: ${{ steps.schema.outputs.changed_files }}
+
+      - name: Summary
+        run: |
+          echo "## 上游监控结果" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- 最近 7 天上游提交数: ${{ steps.upstream.outputs.commits_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "- API/schema 变更: ${{ steps.schema.outputs.api_changed }}" >> $GITHUB_STEP_SUMMARY
