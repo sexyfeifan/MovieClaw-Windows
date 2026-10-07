@@ -18,6 +18,9 @@
     "allow-load-server-url",
     "allow-clear-server-url",
     "allow-probe-server",
-    "allow-send-mpv-command"
+    "allow-send-mpv-command",
+    "allow-check-for-updates",
+    "allow-open-download-page",
+    "allow-open-release-page"
   ]
 }

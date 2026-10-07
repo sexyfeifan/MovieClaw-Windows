@@ -34,6 +34,21 @@ description = "Allows sending commands to the mpv player via IPC"
 commands.allow = ["send_mpv_command"]
 
 [[permission]]
+identifier = "allow-check-for-updates"
+description = "Allows checking for software updates from GitHub"
+commands.allow = ["check_for_updates"]
+
+[[permission]]
+identifier = "allow-open-download-page"
+description = "Allows opening the download page in browser"
+commands.allow = ["open_download_page"]
+
+[[permission]]
+identifier = "allow-open-release-page"
+description = "Allows opening the release page in browser"
+commands.allow = ["open_release_page"]
+
+[[permission]]
 identifier = "default"
 description = "Default permissions for MovieClaw Desktop"
 permissions = [
@@ -43,5 +58,8 @@ permissions = [
     "allow-load-server-url",
     "allow-clear-server-url",
     "allow-probe-server",
-    "allow-send-mpv-command"
+    "allow-send-mpv-command",
+    "allow-check-for-updates",
+    "allow-open-download-page",
+    "allow-open-release-page"
 ]

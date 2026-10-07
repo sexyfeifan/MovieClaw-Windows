@@ -361,6 +361,74 @@
     }
   });
 
+  // ---- 软件更新提示 ----
+
+  function showUpdateBanner(info) {
+    // 移除已有提示
+    var old = document.getElementById('mc-update-banner');
+    if (old) old.remove();
+
+    var banner = document.createElement('div');
+    banner.id = 'mc-update-banner';
+    banner.innerHTML = [
+      '<div style="position:fixed;top:16px;right:16px;z-index:99999;',
+      'background:linear-gradient(135deg,#1a6b3c,#2d8f56);color:#fff;',
+      'padding:16px 20px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,0.3);',
+      'font-family:system-ui,sans-serif;max-width:360px;backdrop-filter:blur(12px);',
+      'animation:mc-slide-in 0.4s ease;">',
+      '<div style="font-size:15px;font-weight:600;margin-bottom:8px;">',
+      '🔄 发现新版本 ' + (info.version || '') + '</div>',
+      '<div style="font-size:13px;opacity:0.9;margin-bottom:12px;">',
+      (info.message || '') + '</div>',
+      '<div style="display:flex;gap:8px;">',
+      '<button id="mc-update-download" style="flex:1;padding:8px 16px;border:none;',
+      'border-radius:8px;background:rgba(255,255,255,0.95);color:#1a6b3c;',
+      'font-weight:600;cursor:pointer;font-size:13px;">立即更新</button>',
+      '<button id="mc-update-dismiss" style="padding:8px 16px;border:none;',
+      'border-radius:8px;background:rgba(255,255,255,0.2);color:#fff;',
+      'cursor:pointer;font-size:13px;">稍后</button>',
+      '</div></div>',
+      '<style>@keyframes mc-slide-in{from{transform:translateX(100%);opacity:0}',
+      'to{transform:translateX(0);opacity:1}}</style>'
+    ].join('');
+
+    document.body.appendChild(banner);
+
+    document.getElementById('mc-update-download').addEventListener('click', function () {
+      invoke('open_download_page').catch(function () {});
+      banner.remove();
+    });
+    document.getElementById('mc-update-dismiss').addEventListener('click', function () {
+      banner.remove();
+    });
+
+    // 10 秒后自动消失
+    setTimeout(function () {
+      if (banner.parentNode) banner.remove();
+    }, 10000);
+  }
+
+  // 监听 Rust 侧更新事件
+  function setupUpdateListeners() {
+    if (!window.__TAURI__ || !window.__TAURI__.event) return;
+    window.__TAURI__.event.listen('update_available', function (e) {
+      log('发现新版本:', e.payload);
+      showUpdateBanner(e.payload);
+    });
+    window.__TAURI__.event.listen('update_check_result', function (e) {
+      log('更新检查:', e.payload.message);
+      if (!e.payload.has_update) {
+        // 轻量 toast 提示
+        var toast = document.createElement('div');
+        toast.textContent = e.payload.message;
+        toast.style.cssText = 'position:fixed;bottom:80px;right:16px;z-index:99999;background:rgba(0,0,0,0.75);color:#fff;padding:10px 18px;border-radius:8px;font-family:system-ui;font-size:13px;backdrop-filter:blur(8px);';
+        document.body.appendChild(toast);
+        setTimeout(function () { toast.remove(); }, 3000);
+      }
+    });
+  }
+  setupUpdateListeners();
+
   // ---- 播放请求处理 ----
 
   var _lastPlayTs = 0;

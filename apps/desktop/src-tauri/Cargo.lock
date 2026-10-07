@@ -2096,6 +2096,7 @@ dependencies = [
 name = "movieclaw-desktop"
 version = "0.1.0"
 dependencies = [
+ "open",
  "serde",
  "serde_json",
  "tauri",
