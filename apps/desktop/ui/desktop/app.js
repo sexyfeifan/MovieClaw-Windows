@@ -377,22 +377,76 @@ const App = {
     overlay.hidden = false;
 
     try {
-      // 通过 Tauri 调用 mpv 播放
+      // 1. 创建播放会话
+      const body = {
+        media_item_id: item.id || item.mediaItemId,
+        capability: {
+          universal: true,
+          hdr_passthrough: true,
+          containers: ['mp4', 'hls-fmp4'],
+          video: [],
+          audio: [],
+          mse: 'none',
+          is_mobile: false,
+          native_hls: false,
+        },
+        client: 'web',
+        attempt_id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36),
+      };
+      if (item.seasonNumber != null) body.season_number = item.seasonNumber;
+      if (item.episodeNumber != null) body.episode_number = item.episodeNumber;
+
+      const sessionResp = await API.request('/playback/sessions', {
+        method: 'POST',
+        body,
+      });
+
+      const session = sessionResp?.data || sessionResp;
+      console.log('Playback session:', session);
+
+      // 2. 检查决策
+      if (session?.decision && session.decision.outcome !== 'plan') {
+        throw new Error('播放不可用: ' + (session.decision.reason || session.decision.outcome));
+      }
+
+      if (!session?.stream_url) {
+        throw new Error('无播放流地址');
+      }
+
+      // 3. 处理流地址（相对路径转绝对）
+      const origin = API.baseUrl || window.location.origin;
+      const streamUrl = session.stream_url.startsWith('http')
+        ? session.stream_url
+        : origin + session.stream_url;
+
+      const subtitleUrls = (session.subtitle_urls || []).map(s =>
+        s.startsWith('http') ? s : origin + s
+      );
+
+      // 4. 启动 mpv
+      const isSessionTimeline = session.session_id && session.timeline === 'session';
+      const mpvStartMs = isSessionTimeline ? null : (session.start_ms > 0 ? session.start_ms : null);
+
       if (window.__TAURI__) {
         const result = await window.__TAURI__.core.invoke('launch_player', {
           params: {
-            stream_url: item.streamUrl || item.playUrl,
-            title: item.title,
-            start_ms: item.resumeMs || item.watchProgressMs || 0,
+            stream_url: streamUrl,
+            subtitle_urls: subtitleUrls.length > 0 ? subtitleUrls : null,
+            start_ms: mpvStartMs,
+            title: item.title || 'MovieClaw',
           },
         });
         console.log('Player launched:', result);
+        overlay.querySelector('.player-overlay-status').textContent = '播放器已启动';
       }
     } catch (e) {
       console.error('Playback error:', e);
-    } finally {
-      setTimeout(() => { overlay.hidden = true; }, 1500);
+      overlay.querySelector('.player-overlay-status').textContent = '播放失败: ' + e.message;
+      setTimeout(() => { overlay.hidden = true; }, 3000);
+      return;
     }
+
+    setTimeout(() => { overlay.hidden = true; }, 1500);
   },
 };
 

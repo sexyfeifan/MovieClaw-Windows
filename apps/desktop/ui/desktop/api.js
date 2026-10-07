@@ -5,8 +5,8 @@ const API = {
   baseUrl: '',
 
   init() {
-    // 从注入的全局变量获取服务器地址
-    this.baseUrl = window.__MOVIECLAW_SERVER__ || '';
+    // 从注入的全局变量获取服务器地址，去掉末尾斜杠
+    this.baseUrl = (window.__MOVIECLAW_SERVER__ || '').replace(/\/+$/, '');
   },
 
   async request(path, options = {}) {
