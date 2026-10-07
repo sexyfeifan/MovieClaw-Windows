@@ -250,81 +250,129 @@
     if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
   }
 
-  // ---- 音量控制 UI ----
+  // ---- 音量控制 UI（Shadow DOM 隔离，不被网页遮挡）----
 
-  var volumeWidget = null;
+  var volumeHost = null;
+  var volumeShadow = null;
 
   function ensureVolumeWidget() {
-    if (volumeWidget) return volumeWidget;
+    if (volumeHost && volumeHost.isConnected) return;
 
-    var style = document.createElement('style');
-    style.textContent = [
-      '.mc-vol-widget{position:fixed;bottom:16px;right:16px;z-index:99999;',
-      'display:flex;align-items:center;gap:6px;background:rgba(0,0,0,0.72);',
-      'border-radius:10px;padding:8px 12px;font-family:system-ui,sans-serif;',
-      'color:#fff;user-select:none;transition:opacity 0.3s;backdrop-filter:blur(8px);',
-      'box-shadow:0 2px 12px rgba(0,0,0,0.35);}',
-      '.mc-vol-widget.hidden{opacity:0;pointer-events:none;}',
-      '.mc-vol-btn{width:32px;height:32px;border:none;border-radius:8px;cursor:pointer;',
-      'display:flex;align-items:center;justify-content:center;font-size:16px;',
-      'background:rgba(255,255,255,0.12);color:#fff;transition:background 0.15s;}',
-      '.mc-vol-btn:hover{background:rgba(255,255,255,0.25);}',
-      '.mc-vol-btn.active{background:rgba(255,80,80,0.6);}',
-      '.mc-vol-slider{-webkit-appearance:none;width:100px;height:4px;border-radius:2px;',
-      'background:rgba(255,255,255,0.25);outline:none;cursor:pointer;}',
-      '.mc-vol-slider::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;',
-      'border-radius:50%;background:#fff;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,0.3);}',
-      '.mc-vol-pct{font-size:12px;min-width:32px;text-align:center;opacity:0.85;}'
-    ].join('\n');
-    document.head.appendChild(style);
+    // 宿主元素：固定在视口最上层
+    volumeHost = document.createElement('div');
+    volumeHost.id = '__mc_vol_host__';
+    volumeHost.style.cssText = 'position:fixed;bottom:16px;right:16px;z-index:2147483647;pointer-events:none;';
+    document.documentElement.appendChild(volumeHost);
 
-    volumeWidget = document.createElement('div');
-    volumeWidget.className = 'mc-vol-widget hidden';
-    volumeWidget.innerHTML = [
-      '<button class="mc-vol-btn mc-vol-mute" title="静音 (M)">🔊</button>',
-      '<button class="mc-vol-btn mc-vol-down" title="音量减 (↓)">−</button>',
-      '<input type="range" class="mc-vol-slider" min="0" max="130" value="100" step="1">',
-      '<button class="mc-vol-btn mc-vol-up" title="音量加 (↑)">+</button>',
-      '<span class="mc-vol-pct">100%</span>'
-    ].join('');
-    document.body.appendChild(volumeWidget);
+    // Shadow DOM 完全隔离页面 CSS
+    volumeShadow = volumeHost.attachShadow({ mode: 'open' });
+
+    volumeShadow.innerHTML = `
+      <style>
+        :host { all: initial; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        .widget {
+          pointer-events: auto;
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          background: rgba(15, 17, 23, 0.88);
+          border: 1px solid rgba(255,255,255,0.08);
+          border-radius: 12px;
+          padding: 10px 14px;
+          font-family: 'Segoe UI', system-ui, sans-serif;
+          color: #e8e8e8;
+          user-select: none;
+          backdrop-filter: blur(16px);
+          -webkit-backdrop-filter: blur(16px);
+          box-shadow: 0 4px 24px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.05);
+          transition: opacity 0.3s, transform 0.3s;
+        }
+        .widget.hidden {
+          opacity: 0;
+          transform: translateY(8px);
+          pointer-events: none;
+        }
+        .btn {
+          width: 34px; height: 34px;
+          border: none; border-radius: 8px;
+          cursor: pointer;
+          display: flex; align-items: center; justify-content: center;
+          font-size: 15px;
+          background: rgba(255,255,255,0.08);
+          color: #e8e8e8;
+          transition: background 0.15s, transform 0.1s;
+        }
+        .btn:hover { background: rgba(255,255,255,0.18); }
+        .btn:active { transform: scale(0.92); }
+        .btn.active { background: rgba(248,113,113,0.5); }
+        .slider {
+          -webkit-appearance: none;
+          width: 100px; height: 4px;
+          border-radius: 2px;
+          background: rgba(255,255,255,0.15);
+          outline: none;
+          cursor: pointer;
+        }
+        .slider::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          width: 14px; height: 14px;
+          border-radius: 50%;
+          background: #fff;
+          cursor: pointer;
+          box-shadow: 0 1px 6px rgba(0,0,0,0.4);
+        }
+        .pct {
+          font-size: 12px;
+          min-width: 36px;
+          text-align: center;
+          opacity: 0.8;
+          font-weight: 600;
+          letter-spacing: 0.3px;
+        }
+      </style>
+      <div class="widget hidden" id="w">
+        <button class="btn mute" title="静音 (M)">🔊</button>
+        <button class="btn down" title="音量减 (↓)">−</button>
+        <input type="range" class="slider" min="0" max="130" value="100" step="1">
+        <button class="btn up" title="音量加 (↑)">+</button>
+        <span class="pct">100%</span>
+      </div>`;
 
     // 绑定事件
-    var btnMute = volumeWidget.querySelector('.mc-vol-mute');
-    var btnDown = volumeWidget.querySelector('.mc-vol-down');
-    var btnUp = volumeWidget.querySelector('.mc-vol-up');
-    var slider = volumeWidget.querySelector('.mc-vol-slider');
-
-    btnMute.addEventListener('click', function () { toggleMute(); });
-    btnDown.addEventListener('click', function () { adjustVolume(-5); });
-    btnUp.addEventListener('click', function () { adjustVolume(5); });
-    slider.addEventListener('input', function () {
-      setVolume(parseInt(slider.value, 10));
+    var w = volumeShadow.getElementById('w');
+    volumeShadow.querySelector('.mute').addEventListener('click', toggleMute);
+    volumeShadow.querySelector('.down').addEventListener('click', function () { adjustVolume(-5); });
+    volumeShadow.querySelector('.up').addEventListener('click', function () { adjustVolume(5); });
+    volumeShadow.querySelector('.slider').addEventListener('input', function () {
+      setVolume(parseInt(this.value, 10));
     });
-
-    return volumeWidget;
   }
 
   function showVolumeWidget() {
     ensureVolumeWidget();
-    volumeWidget.classList.remove('hidden');
+    var w = volumeShadow.getElementById('w');
+    if (w) w.classList.remove('hidden');
   }
 
   function hideVolumeWidget() {
-    if (volumeWidget) volumeWidget.classList.add('hidden');
+    if (!volumeShadow) return;
+    var w = volumeShadow.getElementById('w');
+    if (w) w.classList.add('hidden');
   }
 
   function updateVolumeUI() {
-    if (!volumeWidget) return;
-    var btnMute = volumeWidget.querySelector('.mc-vol-mute');
-    var slider = volumeWidget.querySelector('.mc-vol-slider');
-    var pct = volumeWidget.querySelector('.mc-vol-pct');
+    if (!volumeShadow) return;
+    var mute = volumeShadow.querySelector('.mute');
+    var slider = volumeShadow.querySelector('.slider');
+    var pct = volumeShadow.querySelector('.pct');
     var vol = Math.round(playerState.volume);
-    slider.value = vol;
-    pct.textContent = vol + '%';
-    btnMute.textContent = playerState.mute ? '🔇' : '🔊';
-    btnMute.classList.toggle('active', playerState.mute);
-    btnMute.title = playerState.mute ? '取消静音 (M)' : '静音 (M)';
+    if (slider) slider.value = vol;
+    if (pct) pct.textContent = vol + '%';
+    if (mute) {
+      mute.textContent = playerState.mute ? '🔇' : '🔊';
+      mute.classList.toggle('active', playerState.mute);
+    }
   }
 
   function setVolume(level) {
@@ -365,46 +413,74 @@
 
   function showUpdateBanner(info) {
     // 移除已有提示
-    var old = document.getElementById('mc-update-banner');
+    var old = document.getElementById('__mc_update_host__');
     if (old) old.remove();
 
-    var banner = document.createElement('div');
-    banner.id = 'mc-update-banner';
-    banner.innerHTML = [
-      '<div style="position:fixed;top:16px;right:16px;z-index:99999;',
-      'background:linear-gradient(135deg,#1a6b3c,#2d8f56);color:#fff;',
-      'padding:16px 20px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,0.3);',
-      'font-family:system-ui,sans-serif;max-width:360px;backdrop-filter:blur(12px);',
-      'animation:mc-slide-in 0.4s ease;">',
-      '<div style="font-size:15px;font-weight:600;margin-bottom:8px;">',
-      '🔄 发现新版本 ' + (info.version || '') + '</div>',
-      '<div style="font-size:13px;opacity:0.9;margin-bottom:12px;">',
-      (info.message || '') + '</div>',
-      '<div style="display:flex;gap:8px;">',
-      '<button id="mc-update-download" style="flex:1;padding:8px 16px;border:none;',
-      'border-radius:8px;background:rgba(255,255,255,0.95);color:#1a6b3c;',
-      'font-weight:600;cursor:pointer;font-size:13px;">立即更新</button>',
-      '<button id="mc-update-dismiss" style="padding:8px 16px;border:none;',
-      'border-radius:8px;background:rgba(255,255,255,0.2);color:#fff;',
-      'cursor:pointer;font-size:13px;">稍后</button>',
-      '</div></div>',
-      '<style>@keyframes mc-slide-in{from{transform:translateX(100%);opacity:0}',
-      'to{transform:translateX(0);opacity:1}}</style>'
-    ].join('');
+    // Shadow DOM 宿主
+    var host = document.createElement('div');
+    host.id = '__mc_update_host__';
+    host.style.cssText = 'position:fixed;top:16px;right:16px;z-index:2147483647;pointer-events:none;';
+    document.documentElement.appendChild(host);
 
-    document.body.appendChild(banner);
+    var shadow = host.attachShadow({ mode: 'open' });
+    shadow.innerHTML = `
+      <style>
+        :host { all: initial; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        .banner {
+          pointer-events: auto;
+          background: linear-gradient(135deg, #1a6b3c, #2d8f56);
+          color: #fff;
+          padding: 18px 22px;
+          border-radius: 12px;
+          box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+          max-width: 360px;
+          font-family: 'Segoe UI', system-ui, sans-serif;
+          animation: slide-in 0.4s ease;
+        }
+        @keyframes slide-in {
+          from { transform: translateX(100%); opacity: 0; }
+          to { transform: translateX(0); opacity: 1; }
+        }
+        .title { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+        .msg { font-size: 13px; opacity: 0.9; margin-bottom: 14px; line-height: 1.4; }
+        .actions { display: flex; gap: 8px; }
+        .btn-primary {
+          flex: 1; padding: 8px 16px; border: none;
+          border-radius: 8px;
+          background: rgba(255,255,255,0.95);
+          color: #1a6b3c;
+          font-weight: 600; cursor: pointer; font-size: 13px;
+        }
+        .btn-ghost {
+          padding: 8px 16px; border: none;
+          border-radius: 8px;
+          background: rgba(255,255,255,0.2);
+          color: #fff;
+          cursor: pointer; font-size: 13px;
+        }
+        .btn-ghost:hover { background: rgba(255,255,255,0.3); }
+      </style>
+      <div class="banner">
+        <div class="title">🔄 发现新版本 ${info.version || ''}</div>
+        <div class="msg">${info.message || ''}</div>
+        <div class="actions">
+          <button class="btn-primary" id="dl">立即更新</button>
+          <button class="btn-ghost" id="dismiss">稍后</button>
+        </div>
+      </div>`;
 
-    document.getElementById('mc-update-download').addEventListener('click', function () {
+    shadow.getElementById('dl').addEventListener('click', function () {
       invoke('open_download_page').catch(function () {});
-      banner.remove();
+      host.remove();
     });
-    document.getElementById('mc-update-dismiss').addEventListener('click', function () {
-      banner.remove();
+    shadow.getElementById('dismiss').addEventListener('click', function () {
+      host.remove();
     });
 
     // 10 秒后自动消失
     setTimeout(function () {
-      if (banner.parentNode) banner.remove();
+      if (host.parentNode) host.remove();
     }, 10000);
   }
 
