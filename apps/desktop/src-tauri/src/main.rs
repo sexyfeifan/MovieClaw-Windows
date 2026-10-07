@@ -8,9 +8,12 @@ use tauri::Manager;
 use tauri::WebviewUrl;
 use tauri::WebviewWindowBuilder;
 
+const INJECT_SCRIPT: &str = include_str!("../../ui/inject.js");
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // 已有实例运行时，聚焦主窗口
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_focus();
             }
@@ -22,12 +25,23 @@ fn main() {
             }
         })
         .setup(|app| {
-            // 加载自定义原生 UI
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+            // 启动时检查是否已有服务器配置，决定加载连接页还是 Web UI
+            let start_url = connect::load_server_url().unwrap_or_default();
+            let url = if start_url.is_empty() {
+                WebviewUrl::App("connect.html".into())
+            } else {
+                let parsed = start_url.parse::<url::Url>()
+                    .or_else(|_| format!("http://{start_url}").parse::<url::Url>())
+                    .unwrap_or_else(|_| "about:blank".parse().unwrap());
+                WebviewUrl::External(parsed)
+            };
+
+            WebviewWindowBuilder::new(app, "main", url)
                 .title("MovieClaw")
                 .inner_size(1280.0, 800.0)
                 .min_inner_size(960.0, 600.0)
                 .center()
+                .initialization_script(INJECT_SCRIPT)
                 .build()?;
 
             // 系统托盘图标
@@ -53,12 +67,13 @@ fn main() {
                             }
                         }
                         "reconnect" => {
+                            // 清除服务器配置，回到连接页
                             let _ = connect::clear_server_url();
                             let _ = player::stop_player();
                             if let Some(w) = app.get_webview_window("main") {
                                 let _ = w.show();
-                                // 导航到设置页
-                                let _ = w.eval("window.navigate && window.navigate('settings')");
+                                // 用 Tauri 内部协议加载 connect.html
+                                let _ = w.eval("window.location.href = 'http://tauri.localhost/connect.html'");
                                 let _ = w.set_focus();
                             }
                         }
@@ -145,8 +160,6 @@ fn main() {
             player::launch_player,
             player::stop_player,
             player::send_mpv_command,
-            player::open_controls_window,
-            player::close_controls_window,
             updater::check_for_updates,
             updater::open_download_page,
             updater::open_release_page,
