@@ -489,6 +489,10 @@ html, body {
   background: rgba(0, 0, 0, 0.88);
 }
 
+.player-overlay[hidden] {
+  display: none !important;
+}
+
 .player-overlay-bg {
   position: absolute;
   inset: 0;
