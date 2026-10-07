@@ -141,11 +141,37 @@ const App = {
   async renderHome(container) {
     container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
     try {
-      const items = await API.listLibraryItems(this.libraries[0]?.id, { limit: 20 }).catch(() => []);
-      this.renderPosterWall(container, items || [], {
-        title: '最近添加',
-        subtitle: '全部媒体库',
-      });
+      // 并行加载多个横排数据
+      const shelves = await Promise.all([
+        API.listLibraryItems(this.libraries[0]?.id, { limit: 12, sort: 'added_at', order: 'desc' }).catch(() => []),
+        API.listLibraryItems(this.libraries[0]?.id, { limit: 12, sort: 'rating', order: 'desc' }).catch(() => []),
+        API.listLibraryItems(this.libraries[0]?.id, { limit: 12, sort: 'release_date', order: 'desc' }).catch(() => []),
+      ]);
+
+      const shelfData = [
+        { title: '最近添加', items: shelves[0] },
+        { title: '高分精选', items: shelves[1] },
+        { title: '最新上映', items: shelves[2] },
+      ].filter(s => s.items && s.items.length > 0);
+
+      if (shelfData.length === 0) {
+        container.innerHTML = '<div class="page-loading"><div style="color:var(--text-secondary)">暂无内容</div></div>';
+        return;
+      }
+
+      container.innerHTML = shelfData.map(shelf => `
+        <div class="shelf-section">
+          <div class="shelf-header">
+            <h2 class="shelf-title">${shelf.title}</h2>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-secondary)"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="shelf-row">
+            ${shelf.items.map(item => this.posterCard(item)).join('')}
+          </div>
+        </div>
+      `).join('');
+
+      this.bindPosterCards(container);
     } catch (e) {
       container.innerHTML = '<div class="page-loading"><div style="color:var(--text-secondary)">加载失败</div></div>';
     }
@@ -283,26 +309,39 @@ const App = {
       </div>
       <div class="poster-wall">
         <div class="poster-grid">
-          ${items.map(item => `
-            <div class="poster-card" data-item-id="${item.id}" data-library-id="${item.libraryId || ''}">
-              <div class="poster-art">
-                <img src="${item.posterUrl || item.thumbUrl || ''}" alt="${item.title}" loading="lazy">
-                <div class="play-overlay">
-                  <div class="play-btn">
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                  </div>
-                </div>
-              </div>
-              <div class="poster-info">
-                <div class="poster-title">${item.title}</div>
-                <div class="poster-subtitle">${item.year || ''}${item.seasons ? ' · ' + item.seasons + ' 季' : ''}</div>
-              </div>
-            </div>
-          `).join('')}
+          ${items.map(item => this.posterCard(item)).join('')}
         </div>
       </div>
     `;
+    this.bindPosterCards(container);
+  },
 
+  posterCard(item) {
+    const progress = item.watchProgress || item.progress || 0;
+    return `
+      <div class="poster-card" data-item-id="${item.id}" data-library-id="${item.libraryId || ''}">
+        <div class="poster-art">
+          <img src="${item.posterUrl || item.thumbUrl || ''}" alt="${item.title}" loading="lazy">
+          <div class="play-overlay">
+            <div class="play-btn">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            </div>
+          </div>
+          ${progress > 0 && progress < 1 ? `
+            <div class="poster-progress">
+              <div class="poster-progress-fill" style="width:${Math.round(progress * 100)}%"></div>
+            </div>
+          ` : ''}
+        </div>
+        <div class="poster-info">
+          <div class="poster-title">${item.title}</div>
+          <div class="poster-subtitle">${item.year || ''}${item.seasons ? ' · ' + item.seasons + ' 季' : ''}</div>
+        </div>
+      </div>
+    `;
+  },
+
+  bindPosterCards(container) {
     container.querySelectorAll('.poster-card').forEach(card => {
       card.addEventListener('click', () => {
         const itemId = card.dataset.itemId;
