@@ -1,0 +1,47 @@
+[[permission]]
+identifier = "allow-launch-player"
+description = "Allows launching the media player with a stream URL"
+commands.allow = ["launch_player"]
+
+[[permission]]
+identifier = "allow-stop-player"
+description = "Allows stopping the media player"
+commands.allow = ["stop_player"]
+
+[[permission]]
+identifier = "allow-save-server-url"
+description = "Allows saving the server URL to config"
+commands.allow = ["save_server_url"]
+
+[[permission]]
+identifier = "allow-load-server-url"
+description = "Allows loading the server URL from config"
+commands.allow = ["load_server_url"]
+
+[[permission]]
+identifier = "allow-clear-server-url"
+description = "Allows clearing the saved server URL"
+commands.allow = ["clear_server_url"]
+
+[[permission]]
+identifier = "allow-probe-server"
+description = "Allows probing a server for health check"
+commands.allow = ["probe_server"]
+
+[[permission]]
+identifier = "allow-send-mpv-command"
+description = "Allows sending commands to the mpv player via IPC"
+commands.allow = ["send_mpv_command"]
+
+[[permission]]
+identifier = "default"
+description = "Default permissions for MovieClaw Desktop"
+permissions = [
+    "allow-launch-player",
+    "allow-stop-player",
+    "allow-save-server-url",
+    "allow-load-server-url",
+    "allow-clear-server-url",
+    "allow-probe-server",
+    "allow-send-mpv-command"
+]
