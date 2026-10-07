@@ -113,11 +113,13 @@ const App = {
   async loadSidebarData() {
     try {
       const [libs, colls] = await Promise.all([
-        API.listLibraries().catch(() => []),
-        API.listCollections().catch(() => []),
+        API.listLibraries().catch(e => { console.error('Load libraries failed:', e); return []; }),
+        API.listCollections().catch(e => { console.error('Load collections failed:', e); return []; }),
       ]);
-      this.libraries = libs || [];
-      this.collections = colls || [];
+      // API 可能返回 { data: [...] } 包装
+      this.libraries = libs?.data || libs || [];
+      this.collections = colls?.data || colls || [];
+      console.log('Libraries:', this.libraries.length, 'Collections:', this.collections.length);
       this.renderSidebar();
     } catch (e) {
       console.error('Failed to load sidebar:', e);
@@ -206,17 +208,24 @@ const App = {
   async renderHome(container) {
     container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
     try {
+      if (!this.libraries.length) {
+        container.innerHTML = '<div class="page-loading"><div style="color:var(--text-secondary)">暂无媒体库，请先在服务器添加</div></div>';
+        return;
+      }
+
       // 并行加载多个横排数据
       const shelves = await Promise.all([
-        API.listLibraryItems(this.libraries[0]?.id, { limit: 12, sort: 'added_at', order: 'desc' }).catch(() => []),
-        API.listLibraryItems(this.libraries[0]?.id, { limit: 12, sort: 'rating', order: 'desc' }).catch(() => []),
-        API.listLibraryItems(this.libraries[0]?.id, { limit: 12, sort: 'release_date', order: 'desc' }).catch(() => []),
+        API.listLibraryItems(this.libraries[0]?.id, { limit: 12, sort: 'added_at', order: 'desc' }).catch(e => { console.error(e); return []; }),
+        API.listLibraryItems(this.libraries[0]?.id, { limit: 12, sort: 'rating', order: 'desc' }).catch(e => { console.error(e); return []; }),
+        API.listLibraryItems(this.libraries[0]?.id, { limit: 12, sort: 'release_date', order: 'desc' }).catch(e => { console.error(e); return []; }),
       ]);
 
+      const unwrap = (r) => r?.data || r?.items || r || [];
+
       const shelfData = [
-        { title: '最近添加', items: shelves[0] },
-        { title: '高分精选', items: shelves[1] },
-        { title: '最新上映', items: shelves[2] },
+        { title: '最近添加', items: unwrap(shelves[0]) },
+        { title: '高分精选', items: unwrap(shelves[1]) },
+        { title: '最新上映', items: unwrap(shelves[2]) },
       ].filter(s => s.items && s.items.length > 0);
 
       if (shelfData.length === 0) {
@@ -238,7 +247,8 @@ const App = {
 
       this.bindPosterCards(container);
     } catch (e) {
-      container.innerHTML = '<div class="page-loading"><div style="color:var(--text-secondary)">加载失败</div></div>';
+      console.error('Render home error:', e);
+      container.innerHTML = `<div class="page-loading"><div style="color:var(--text-secondary)">加载失败: ${e.message || e}</div></div>`;
     }
   },
 
@@ -246,14 +256,16 @@ const App = {
   async renderLibrary(container, libraryId) {
     container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
     try {
-      const lib = this.libraries.find(l => l.id === libraryId);
-      const items = await API.listLibraryItems(libraryId, { limit: 60 });
-      this.renderPosterWall(container, items || [], {
+      const lib = this.libraries.find(l => l.id === libraryId || l.id == libraryId);
+      const resp = await API.listLibraryItems(libraryId, { limit: 60 });
+      const items = resp?.data || resp?.items || resp || [];
+      this.renderPosterWall(container, items, {
         title: lib?.name || '媒体库',
-        subtitle: items ? `${items.length} 个项目` : '',
+        subtitle: `${items.length} 个项目`,
       });
     } catch (e) {
-      container.innerHTML = '<div class="page-loading"><div style="color:var(--text-secondary)">加载失败</div></div>';
+      console.error('Render library error:', e);
+      container.innerHTML = `<div class="page-loading"><div style="color:var(--text-secondary)">加载失败: ${e.message || e}</div></div>`;
     }
   },
 
@@ -261,13 +273,15 @@ const App = {
   async renderCollection(container, collectionId) {
     container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
     try {
-      const items = await API.listCollectionItems(collectionId);
-      this.renderPosterWall(container, items || [], {
+      const resp = await API.listCollectionItems(collectionId);
+      const items = resp?.data || resp?.items || resp || [];
+      this.renderPosterWall(container, items, {
         title: '合集',
-        subtitle: `${(items || []).length} 个项目`,
+        subtitle: `${items.length} 个项目`,
       });
     } catch (e) {
-      container.innerHTML = '<div class="page-loading"><div style="color:var(--text-secondary)">加载失败</div></div>';
+      console.error('Render collection error:', e);
+      container.innerHTML = `<div class="page-loading"><div style="color:var(--text-secondary)">加载失败: ${e.message || e}</div></div>`;
     }
   },
 
@@ -275,13 +289,14 @@ const App = {
   async renderFavorites(container) {
     container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
     try {
-      const items = await API.listLibraryItems(this.libraries[0]?.id, { favorites: true, limit: 60 }).catch(() => []);
-      this.renderPosterWall(container, items || [], {
+      const resp = await API.listLibraryItems(this.libraries[0]?.id, { favorites: true, limit: 60 }).catch(() => []);
+      const items = resp?.data || resp?.items || resp || [];
+      this.renderPosterWall(container, items, {
         title: '我的收藏',
-        subtitle: `${(items || []).length} 个项目`,
+        subtitle: `${items.length} 个项目`,
       });
     } catch (e) {
-      container.innerHTML = '<div class="page-loading"><div style="color:var(--text-secondary)">加载失败</div></div>';
+      container.innerHTML = `<div class="page-loading"><div style="color:var(--text-secondary)">加载失败: ${e.message || e}</div></div>`;
     }
   },
 
@@ -383,10 +398,15 @@ const App = {
 
   posterCard(item) {
     const progress = item.watchProgress || item.progress || 0;
+    const itemId = item.id || item.media_item_id || item.mediaItemId || '';
+    const libId = item.libraryId || item.library_id || '';
+    const title = item.title || item.name || '未知';
+    const posterUrl = item.posterUrl || item.poster_url || item.thumbUrl || item.thumb_url || '';
+    const year = item.year || '';
     return `
-      <div class="poster-card" data-item-id="${item.id}" data-library-id="${item.libraryId || ''}">
+      <div class="poster-card" data-item-id="${itemId}" data-library-id="${libId}">
         <div class="poster-art">
-          <img src="${item.posterUrl || item.thumbUrl || ''}" alt="${item.title}" loading="lazy">
+          <img src="${posterUrl}" alt="${title}" loading="lazy">
           <div class="play-overlay">
             <div class="play-btn">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -399,8 +419,8 @@ const App = {
           ` : ''}
         </div>
         <div class="poster-info">
-          <div class="poster-title">${item.title}</div>
-          <div class="poster-subtitle">${item.year || ''}${item.seasons ? ' · ' + item.seasons + ' 季' : ''}</div>
+          <div class="poster-title">${title}</div>
+          <div class="poster-subtitle">${year}${item.seasons ? ' · ' + item.seasons + ' 季' : ''}</div>
         </div>
       </div>
     `;
@@ -440,19 +460,35 @@ const App = {
     const statusEl = overlay.querySelector('.player-overlay-status');
     const title = document.getElementById('playerTitle');
     title.textContent = item.title || '正在播放...';
-    statusEl.textContent = '正在启动播放器...';
+    statusEl.textContent = '正在准备播放...';
     overlay.hidden = false;
 
-    // 15 秒超时兜底，防止永久卡住
+    // 20 秒超时兜底
     const timeout = setTimeout(() => {
-      overlay.hidden = true;
-    }, 15000);
+      statusEl.textContent = '播放超时，请检查服务器连接';
+      setTimeout(() => { overlay.hidden = true; }, 3000);
+    }, 20000);
 
     try {
+      // 0. 检查 API 状态
+      statusEl.textContent = '正在检查 API 状态...';
+      if (!API.baseUrl) {
+        throw new Error('未配置服务器地址，请重新连接');
+      }
+      console.log('API base URL:', API.baseUrl);
+      console.log('Tauri available:', !!window.__TAURI__);
+      console.log('Tauri http available:', !!window.__TAURI__?.http?.fetch);
+
       // 1. 创建播放会话
       statusEl.textContent = '正在获取播放链接...';
+      const mediaId = item.id || item.mediaItemId;
+      if (!mediaId) {
+        throw new Error('无效的媒体项 ID');
+      }
+      console.log('Media item ID:', mediaId);
+
       const body = {
-        media_item_id: item.id || item.mediaItemId,
+        media_item_id: mediaId,
         capability: {
           universal: true,
           hdr_passthrough: true,
@@ -469,13 +505,14 @@ const App = {
       if (item.seasonNumber != null) body.season_number = item.seasonNumber;
       if (item.episodeNumber != null) body.episode_number = item.episodeNumber;
 
+      console.log('Playback request body:', JSON.stringify(body));
       const sessionResp = await API.request('/playback/sessions', {
         method: 'POST',
         body,
       });
+      console.log('Playback response:', sessionResp);
 
       const session = sessionResp?.data || sessionResp;
-      console.log('Playback session:', session);
 
       // 2. 检查决策
       if (session?.decision && session.decision.outcome !== 'plan') {
@@ -483,14 +520,15 @@ const App = {
       }
 
       if (!session?.stream_url) {
-        throw new Error('无播放流地址');
+        throw new Error('服务器未返回播放地址 (stream_url)');
       }
 
-      // 3. 处理流地址（相对路径转绝对）
-      const origin = API.baseUrl || window.location.origin;
+      // 3. 处理流地址
+      const origin = API.baseUrl;
       const streamUrl = session.stream_url.startsWith('http')
         ? session.stream_url
         : origin + session.stream_url;
+      console.log('Stream URL:', streamUrl);
 
       const subtitleUrls = (session.subtitle_urls || []).map(s =>
         s.startsWith('http') ? s : origin + s
@@ -501,23 +539,28 @@ const App = {
       const isSessionTimeline = session.session_id && session.timeline === 'session';
       const mpvStartMs = isSessionTimeline ? null : (session.start_ms > 0 ? session.start_ms : null);
 
-      if (window.__TAURI__) {
-        const result = await window.__TAURI__.core.invoke('launch_player', {
-          params: {
-            stream_url: streamUrl,
-            subtitle_urls: subtitleUrls.length > 0 ? subtitleUrls : null,
-            start_ms: mpvStartMs,
-            title: item.title || 'MovieClaw',
-          },
-        });
-        console.log('Player launched:', result);
-        statusEl.textContent = '播放器已启动';
+      if (!window.__TAURI__) {
+        throw new Error('Tauri API 不可用');
       }
+
+      const result = await window.__TAURI__.core.invoke('launch_player', {
+        params: {
+          stream_url: streamUrl,
+          subtitle_urls: subtitleUrls.length > 0 ? subtitleUrls : null,
+          start_ms: mpvStartMs,
+          title: item.title || 'MovieClaw',
+        },
+      });
+      console.log('Player launched:', result);
+      statusEl.textContent = '播放器已启动';
+
     } catch (e) {
       console.error('Playback error:', e);
-      statusEl.textContent = '播放失败: ' + (e.message || e);
+      const msg = e.message || String(e);
+      statusEl.textContent = '播放失败: ' + msg;
       clearTimeout(timeout);
-      setTimeout(() => { overlay.hidden = true; }, 5000);
+      // 显示详细错误 8 秒
+      setTimeout(() => { overlay.hidden = true; }, 8000);
       return;
     }
 

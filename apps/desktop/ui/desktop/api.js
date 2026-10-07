@@ -19,8 +19,10 @@ const API = {
   // 通过 tauri-plugin-http 发送请求（自动 Cookie，绕过 CORS）
   async rawFetch(url, options = {}) {
     if (window.__TAURI__?.http?.fetch) {
+      console.log('[API] Using tauri-plugin-http fetch:', url);
       return window.__TAURI__.http.fetch(url, options);
     }
+    console.warn('[API] tauri-plugin-http not available, falling back to regular fetch');
     return fetch(url, { ...options, credentials: 'include' });
   },
 
@@ -36,11 +38,21 @@ const API = {
       body = JSON.stringify(body);
     }
 
-    const res = await this.rawFetch(url, { method, headers, body });
+    console.log('[API]', method, url);
+    let res;
+    try {
+      res = await this.rawFetch(url, { method, headers, body });
+    } catch (e) {
+      console.error('[API] Network error:', e);
+      throw new Error('网络请求失败: ' + (e.message || e));
+    }
+
+    console.log('[API] Response status:', res.status);
 
     if (res.status === 204) return null;
 
     const text = await res.text();
+    console.log('[API] Response body:', text.substring(0, 200));
     let data;
     try { data = JSON.parse(text); } catch { data = text; }
 
