@@ -2,9 +2,6 @@
   "identifier": "default",
   "description": "Default capability for MovieClaw Desktop",
   "windows": ["main"],
-  "remote": {
-    "urls": ["http://*:*", "https://*:*"]
-  },
   "permissions": [
     "core:default",
     "shell:allow-execute",
@@ -12,13 +9,6 @@
     "shell:allow-open",
     "shell:allow-spawn",
     "shell:allow-stdin-write",
-    {
-      "identifier": "http:default",
-      "allow": [
-        { "url": "http://**" },
-        { "url": "https://**" }
-      ]
-    },
     "allow-launch-player",
     "allow-stop-player",
     "allow-save-server-url",

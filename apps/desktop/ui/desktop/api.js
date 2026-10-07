@@ -1,5 +1,5 @@
 // MovieClaw Desktop — API client
-// Uses tauri-plugin-http for cookie-aware, CORS-free requests
+// Uses Rust proxy command (proxy_api) for cookie-aware, CORS-free requests
 
 const API = {
   baseUrl: '',
@@ -16,38 +16,42 @@ const API = {
     }
   },
 
-  // 通过 tauri-plugin-http 发送请求（自动 Cookie，绕过 CORS）
-  async rawFetch(url, options = {}) {
-    if (window.__TAURI__?.http?.fetch) {
-      console.log('[API] Using tauri-plugin-http fetch:', url);
-      return window.__TAURI__.http.fetch(url, options);
+  // 通过 Rust proxy_api 命令发送请求（自动 Cookie，绕过 CORS，无 URL scope 限制）
+  async rawFetch(path, options = {}) {
+    const method = (options.method || 'GET').toUpperCase();
+    const body = options.body || null;
+
+    console.log('[API] proxy_api', method, path);
+    try {
+      const result = await window.__TAURI__.core.invoke('proxy_api', {
+        method,
+        path,
+        body: body || null,
+      });
+      console.log('[API] Response status:', result.status);
+      // 构造一个类 Response 对象
+      return {
+        ok: result.status >= 200 && result.status < 300,
+        status: result.status,
+        text: async () => result.body,
+        json: async () => JSON.parse(result.body),
+      };
+    } catch (e) {
+      console.error('[API] proxy_api error:', e);
+      throw new Error('网络请求失败: ' + (e.message || e));
     }
-    console.warn('[API] tauri-plugin-http not available, falling back to regular fetch');
-    return fetch(url, { ...options, credentials: 'include' });
   },
 
   async request(path, options = {}) {
     const method = (options.method || 'GET').toUpperCase();
-    const url = this.baseUrl + '/api/v1' + path;
-
     let body = options.body;
-    let headers = { 'Accept': 'application/json', ...options.headers };
 
+    // body 已经是对象则序列化为 JSON
     if (body && typeof body !== 'string') {
-      headers['Content-Type'] = 'application/json';
       body = JSON.stringify(body);
     }
 
-    console.log('[API]', method, url);
-    let res;
-    try {
-      res = await this.rawFetch(url, { method, headers, body });
-    } catch (e) {
-      console.error('[API] Network error:', e);
-      throw new Error('网络请求失败: ' + (e.message || e));
-    }
-
-    console.log('[API] Response status:', res.status);
+    const res = await this.rawFetch(path, { method, body });
 
     if (res.status === 204) return null;
 
