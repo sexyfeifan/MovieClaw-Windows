@@ -6,14 +6,14 @@
 !include "FileFunc.nsh"
 
 Name "MovieClaw Desktop"
-OutFile "..\dist\MovieClaw-Desktop-v0.2.102-Setup-x64.exe"
+OutFile "..\dist\MovieClaw-Desktop-v0.2.103-Setup-x64.exe"
 InstallDir "$LOCALAPPDATA\MovieClaw\Desktop"
 InstallDirRegKey HKCU "Software\MovieClaw\Desktop" "InstallDir"
 RequestExecutionLevel user
 Unicode True
 
 !define APP_NAME "MovieClaw Desktop"
-!define APP_VERSION "0.2.102"
+!define APP_VERSION "0.2.103"
 !define APP_PUBLISHER "MovieClaw"
 !define APP_EXE "movieclaw-desktop.exe"
 

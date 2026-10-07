@@ -20,21 +20,48 @@ static PIPE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 fn find_mpv() -> Option<String> {
     if let Ok(p) = std::env::var("MOVIECLAW_MPV") {
-        return Some(p);
+        if std::path::Path::new(&p).exists() {
+            return Some(p);
+        }
     }
-    // 尝试 PATH 中的 mpv
-    let candidates = ["mpv.exe", "mpv"];
-    for c in &candidates {
+    // PATH 中的 mpv
+    for c in &["mpv.exe", "mpv"] {
         if which(c).is_some() {
             return Some(c.to_string());
         }
     }
-    // 便携目录
+    // 程序目录旁边的 mpv 子目录
     if let Ok(exe_dir) = std::env::current_exe() {
         if let Some(dir) = exe_dir.parent() {
-            let local = dir.join("mpv").join("mpv.exe");
-            if local.exists() {
-                return Some(local.to_string_lossy().to_string());
+            for sub in &["mpv/mpv.exe", "mpv-2023/mpv.exe"] {
+                let local = dir.join(sub);
+                if local.exists() {
+                    return Some(local.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    // 常见 Windows 安装位置
+    let extra_paths = [
+        r"C:\Program Files\mpv\mpv.exe",
+        r"C:\Program Files (x86)\mpv\mpv.exe",
+        r"C:\ProgramData\chocolatey\bin\mpv.exe",
+    ];
+    for p in &extra_paths {
+        if std::path::Path::new(p).exists() {
+            return Some(p.to_string());
+        }
+    }
+    // scoop / 用户本地
+    if let Ok(user) = std::env::var("USERPROFILE") {
+        for sub in &[
+            r"scoop\apps\mpv\current\mpv.exe",
+            r"AppData\Local\Programs\mpv\mpv.exe",
+            r"AppData\Local\Microsoft\WinGet\Links\mpv.exe",
+        ] {
+            let p = std::path::Path::new(&user).join(sub);
+            if p.exists() {
+                return Some(p.to_string_lossy().to_string());
             }
         }
     }

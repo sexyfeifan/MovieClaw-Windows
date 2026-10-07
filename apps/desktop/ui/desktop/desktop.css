@@ -481,6 +481,40 @@ html, body {
   height: 300px;
 }
 
+/* 页面切换过渡 */
+#content {
+  animation: pageIn 0.18s ease-out;
+}
+
+@keyframes pageIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* 图片占位背景（防止裂图闪烁） */
+.poster-art {
+  background: var(--surface-raised, #1a1a1e);
+}
+
+.hero-bg,
+.detail-hero-bg {
+  background: var(--surface, #111114);
+}
+
+img {
+  opacity: 1;
+  transition: opacity 0.25s ease;
+}
+
+img[loading] {
+  opacity: 0;
+}
+
+img.loaded,
+img:not([loading]) {
+  opacity: 1;
+}
+
 .spinner {
   width: 28px;
   height: 28px;
@@ -696,21 +730,23 @@ html, body {
   border-color: var(--accent);
 }
 
-/* 详情页两栏布局 */
-.detail-columns {
+/* 详情页布局 */
+.detail-layout {
   display: flex;
   gap: 32px;
-  margin-top: 24px;
+  align-items: flex-start;
 }
 
-.detail-main {
+.detail-content {
   flex: 1;
   min-width: 0;
 }
 
 .detail-sidebar {
-  width: 280px;
+  width: 300px;
   flex-shrink: 0;
+  position: sticky;
+  top: 20px;
 }
 
 .detail-info-block {
@@ -866,7 +902,6 @@ html, body {
   font-size: 14px;
   line-height: 1.6;
   color: var(--text-secondary);
-  max-width: 640px;
   margin-bottom: 28px;
 }
 
@@ -1206,7 +1241,7 @@ html, body {
 
 /* ===== 响应式 ===== */
 @media (max-width: 900px) {
-  .detail-columns {
+  .detail-layout {
     flex-direction: column;
   }
   .detail-sidebar {

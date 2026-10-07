@@ -276,7 +276,7 @@ const App = {
       const heroHtml = heroItem ? `
         <div class="hero-banner" data-hero-id="${heroItem.media_item_id || heroItem.id || ''}" data-hero-lib="${heroItem.library_id ?? heroItem.libraryId ?? this.libraries[0]?.id ?? ''}">
           <div class="hero-bg">
-            <img src="${resolveUrl(heroItem.backdropUrl || heroItem.backdrop_url || heroItem.posterUrl || heroItem.poster_url || '')}" alt="" data-raw="${heroItem.backdropUrl || heroItem.backdrop_url || heroItem.posterUrl || heroItem.poster_url || ''}" onerror="imgFallback(this, this.dataset.raw)">
+            <img src="${resolveUrl(heroItem.backdrop_url || heroItem.poster_url || '')}" alt="" style="opacity:0;transition:opacity 0.4s" data-raw="${heroItem.backdrop_url || heroItem.poster_url || ''}" onload="this.style.opacity='1'" onerror="imgFallback(this, this.dataset.raw)">
           </div>
           <div class="hero-info">
             <div class="hero-tag">精选推荐</div>
@@ -350,8 +350,8 @@ const App = {
     container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
     try {
       const lib = this.libraries.find(l => l.id === libraryId || l.id == libraryId);
-      const resp = await API.listLibraryItems(libraryId, { limit: 60 });
-      const items = this.unwrapItems(resp);
+      // 分页加载全部条目
+      const items = await this.loadAllLibraryItems(libraryId);
       this.renderPosterWall(container, items, {
         title: lib?.name || '媒体库',
         subtitle: `${items.length} 个项目`,
@@ -361,6 +361,25 @@ const App = {
       console.error('Render library error:', e);
       container.innerHTML = `<div class="page-loading"><div style="color:var(--text-secondary)">加载失败: ${e.message || e}</div></div>`;
     }
+  },
+
+  // 分页加载全部媒体条目
+  async loadAllLibraryItems(libraryId, params = {}) {
+    const allItems = [];
+    let page = 1;
+    const pageSize = 100;
+    while (true) {
+      const resp = await API.listLibraryItems(libraryId, { limit: pageSize, offset: (page - 1) * pageSize, ...params });
+      const items = this.unwrapItems(resp);
+      if (!items.length) break;
+      allItems.push(...items);
+      // 如果返回少于 pageSize，说明没有更多了
+      if (items.length < pageSize) break;
+      // 安全上限，防止死循环
+      if (page > 50) break;
+      page++;
+    }
+    return allItems;
   },
 
   // ===== 合集 =====
@@ -385,10 +404,10 @@ const App = {
     try {
       // 查询所有媒体库的收藏
       const promises = this.libraries.map(lib =>
-        API.listLibraryItems(lib.id, { favorites: true, limit: 60 }).catch(() => null)
+        this.loadAllLibraryItems(lib.id, { favorites: true }).catch(() => [])
       );
       const results = await Promise.all(promises);
-      const items = results.flatMap(r => this.unwrapItems(r));
+      const items = results.flat();
       this.renderPosterWall(container, items, {
         title: '我的收藏',
         subtitle: `${items.length} 个项目`,
@@ -443,7 +462,7 @@ const App = {
       container.innerHTML = `
         <div class="detail-hero">
           <div class="detail-hero-bg">
-            <img src="${resolveUrl(backdropRaw)}" alt="" data-raw="${backdropRaw}" onerror="imgFallback(this, this.dataset.raw)">
+            <img src="${resolveUrl(backdropRaw)}" alt="" style="opacity:0;transition:opacity 0.4s" data-raw="${backdropRaw}" onload="this.style.opacity='1'" onerror="imgFallback(this, this.dataset.raw)">
           </div>
           <div class="detail-hero-info">
             <h1 class="detail-title">${info.title}</h1>
@@ -471,10 +490,10 @@ const App = {
           </div>
         </div>
         <div class="detail-body">
-          ${plot ? `<p class="detail-overview">${plot}</p>` : ''}
+          <div class="detail-layout">
+            <div class="detail-content">
+              ${plot ? `<p class="detail-overview">${plot}</p>` : ''}
 
-          <div class="detail-columns">
-            <div class="detail-main">
               ${info.seasons?.length ? `
                 <div class="detail-section">
                   <h3>剧集</h3>
@@ -506,24 +525,24 @@ const App = {
                 ${runtime ? `<div class="info-row"><span class="info-label">片长</span><span>${runtime} 分钟</span></div>` : ''}
                 ${directors.length ? `<div class="info-row"><span class="info-label">导演</span><span>${directors.join(' / ')}</span></div>` : ''}
                 ${rating ? `<div class="info-row"><span class="info-label">评分</span><span class="rating-score">${rating.toFixed(1)}</span></div>` : ''}
-                ${actors.length ? `
-                  <div class="info-row info-row-cast">
-                    <span class="info-label">主演</span>
-                    <div class="cast-list">
-                      ${actors.slice(0, 6).map(p => `
-                        <div class="cast-item">
-                          ${p.thumb_url ? `<img src="${resolveUrl(p.thumb_url)}" alt="" class="cast-avatar" onerror="this.style.display='none'">` : '<div class="cast-avatar cast-avatar-placeholder"></div>'}
-                          <div>
-                            <div class="cast-name">${p.name}</div>
-                            <div class="cast-role">${p.role || ''}</div>
-                          </div>
-                        </div>
-                      `).join('')}
-                    </div>
-                  </div>
-                ` : ''}
                 ${info.files?.length ? `<div class="info-row"><span class="info-label">文件</span><span>${info.files.length} 个</span></div>` : ''}
               </div>
+              ${actors.length ? `
+                <div class="detail-info-block" style="margin-top:16px">
+                  <h4>主演</h4>
+                  <div class="cast-list">
+                    ${actors.slice(0, 8).map(p => `
+                      <div class="cast-item">
+                        ${p.thumb_url ? `<img src="${resolveUrl(p.thumb_url)}" alt="" class="cast-avatar" style="opacity:0;transition:opacity 0.3s" onload="this.style.opacity='1'" onerror="this.style.display='none'">` : '<div class="cast-avatar cast-avatar-placeholder"></div>'}
+                        <div>
+                          <div class="cast-name">${p.name}</div>
+                          <div class="cast-role">${p.role || ''}</div>
+                        </div>
+                      </div>
+                    `).join('')}
+                  </div>
+                </div>
+              ` : ''}
             </aside>
           </div>
         </div>
@@ -638,7 +657,7 @@ const App = {
     return `
       <div class="poster-card" data-item-id="${itemId}" data-library-id="${libId}">
         <div class="poster-art">
-          <img src="${posterUrl}" alt="${title}" loading="lazy" data-raw="${rawPoster}" onerror="imgFallback(this, this.dataset.raw)">
+          <img src="${posterUrl}" alt="" loading="lazy" style="opacity:0;transition:opacity 0.3s" data-raw="${rawPoster}" onload="this.style.opacity='1'" onerror="imgFallback(this, this.dataset.raw)">
           <div class="play-overlay">
             <div class="play-btn">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -680,7 +699,7 @@ const App = {
         <div class="settings-card">
           <h3>关于</h3>
           <p>MovieClaw Desktop</p>
-          <p style="color:var(--text-secondary);margin-top:4px;">版本 0.2.102</p>
+          <p style="color:var(--text-secondary);margin-top:4px;">版本 0.2.103</p>
         </div>
       </div>
     `;
@@ -759,11 +778,11 @@ const App = {
       const origin = API.baseUrl;
       const streamUrl = session.stream_url.startsWith('http')
         ? session.stream_url
-        : origin + session.stream_url;
+        : origin + (session.stream_url.startsWith('/api/') ? session.stream_url : '/api/v1' + (session.stream_url.startsWith('/') ? session.stream_url : '/' + session.stream_url));
       console.log('Stream URL:', streamUrl);
 
       const subtitleUrls = (session.subtitle_urls || []).map(s =>
-        s.startsWith('http') ? s : origin + s
+        s.startsWith('http') ? s : origin + (s.startsWith('/api/') ? s : '/api/v1' + (s.startsWith('/') ? s : '/' + s))
       );
 
       // 4. 启动 mpv
