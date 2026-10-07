@@ -69,6 +69,11 @@ description = "Allows proxying API requests to the MovieClaw server"
 commands.allow = ["proxy_api"]
 
 [[permission]]
+identifier = "allow-get-server-url"
+description = "Allows reading the configured server URL"
+commands.allow = ["get_server_url"]
+
+[[permission]]
 identifier = "default"
 description = "Default permissions for MovieClaw Desktop"
 permissions = [
@@ -85,5 +90,6 @@ permissions = [
     "allow-show-volume-window",
     "allow-hide-volume-window",
     "allow-toggle-volume-window",
-    "allow-proxy-api"
+    "allow-proxy-api",
+    "allow-get-server-url"
 ]

@@ -35,12 +35,12 @@ fn main() {
                 WebviewUrl::App("desktop/index.html".into())
             };
 
-            // 注入服务器地址到 JS 上下文
-            let inject = if start_url.is_empty() {
-                INJECT_SCRIPT.to_string()
-            } else {
-                format!("window.__MOVIECLAW_SERVER__ = {};\n{}", serde_json::to_string(&start_url).unwrap(), INJECT_SCRIPT)
-            };
+            // 注入服务器地址到 JS 上下文（始终注入，首次为空）
+            let inject = format!(
+                "window.__MOVIECLAW_SERVER__ = {};\n{}",
+                serde_json::to_string(&start_url).unwrap(),
+                INJECT_SCRIPT
+            );
 
             WebviewWindowBuilder::new(app, "main", url)
                 .title("MovieClaw")
@@ -163,6 +163,7 @@ fn main() {
             connect::save_server_url,
             connect::load_server_url,
             connect::clear_server_url,
+            connect::get_server_url,
             connect::probe_server,
             player::launch_player,
             player::stop_player,

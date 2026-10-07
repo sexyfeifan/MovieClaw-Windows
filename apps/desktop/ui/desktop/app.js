@@ -6,6 +6,7 @@ const App = {
   collections: [],
 
   async init() {
+    await API.init();
     this.bindEvents();
     await this.loadSidebarData();
     this.navigate('home');
@@ -372,12 +373,20 @@ const App = {
   // ===== 播放 =====
   async startPlayback(item) {
     const overlay = document.getElementById('playerOverlay');
+    const statusEl = overlay.querySelector('.player-overlay-status');
     const title = document.getElementById('playerTitle');
     title.textContent = item.title || '正在播放...';
+    statusEl.textContent = '正在启动播放器...';
     overlay.hidden = false;
+
+    // 15 秒超时兜底，防止永久卡住
+    const timeout = setTimeout(() => {
+      overlay.hidden = true;
+    }, 15000);
 
     try {
       // 1. 创建播放会话
+      statusEl.textContent = '正在获取播放链接...';
       const body = {
         media_item_id: item.id || item.mediaItemId,
         capability: {
@@ -391,7 +400,7 @@ const App = {
           native_hls: false,
         },
         client: 'web',
-        attempt_id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36),
+        attempt_id: Date.now().toString(36) + Math.random().toString(36).slice(2),
       };
       if (item.seasonNumber != null) body.season_number = item.seasonNumber;
       if (item.episodeNumber != null) body.episode_number = item.episodeNumber;
@@ -424,6 +433,7 @@ const App = {
       );
 
       // 4. 启动 mpv
+      statusEl.textContent = '正在启动播放器...';
       const isSessionTimeline = session.session_id && session.timeline === 'session';
       const mpvStartMs = isSessionTimeline ? null : (session.start_ms > 0 ? session.start_ms : null);
 
@@ -437,15 +447,17 @@ const App = {
           },
         });
         console.log('Player launched:', result);
-        overlay.querySelector('.player-overlay-status').textContent = '播放器已启动';
+        statusEl.textContent = '播放器已启动';
       }
     } catch (e) {
       console.error('Playback error:', e);
-      overlay.querySelector('.player-overlay-status').textContent = '播放失败: ' + e.message;
-      setTimeout(() => { overlay.hidden = true; }, 3000);
+      statusEl.textContent = '播放失败: ' + (e.message || e);
+      clearTimeout(timeout);
+      setTimeout(() => { overlay.hidden = true; }, 5000);
       return;
     }
 
+    clearTimeout(timeout);
     setTimeout(() => { overlay.hidden = true; }, 1500);
   },
 };

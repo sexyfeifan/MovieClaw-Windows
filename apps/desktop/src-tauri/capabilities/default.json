@@ -25,6 +25,7 @@
     "allow-show-volume-window",
     "allow-hide-volume-window",
     "allow-toggle-volume-window",
-    "allow-proxy-api"
+    "allow-proxy-api",
+    "allow-get-server-url"
   ]
 }

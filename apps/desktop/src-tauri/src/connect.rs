@@ -47,6 +47,12 @@ pub fn save_server_url(url: String) -> Result<ConnectResult, String> {
     })
 }
 
+/// 供前端获取当前配置的服务器地址
+#[tauri::command]
+pub fn get_server_url() -> Result<String, String> {
+    load_server_url()
+}
+
 #[tauri::command]
 pub fn load_server_url() -> Result<String, String> {
     fs::read_to_string(config_path())

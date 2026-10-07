@@ -4,9 +4,19 @@
 const API = {
   baseUrl: '',
 
-  init() {
-    // 从注入的全局变量获取服务器地址，去掉末尾斜杠
+  async init() {
+    // 优先用注入的全局变量
     this.baseUrl = (window.__MOVIECLAW_SERVER__ || '').replace(/\/+$/, '');
+
+    // 如果为空，从 Rust 后端获取（处理首次连接后导航的情况）
+    if (!this.baseUrl && window.__TAURI__) {
+      try {
+        const url = await window.__TAURI__.core.invoke('get_server_url');
+        this.baseUrl = (url || '').replace(/\/+$/, '');
+      } catch (e) {
+        console.error('Failed to get server URL:', e);
+      }
+    }
   },
 
   async request(path, options = {}) {
