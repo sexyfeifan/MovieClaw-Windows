@@ -148,9 +148,8 @@
       const r = await callTauri('probe_server', { url });
       if (r.ok) {
         setStatus('连接成功，正在跳转...', 'ok');
-        // 导航到服务器 Web UI
-        let target = url.replace(/\/+$/, '');
-        window.location.href = target;
+        // 导航到桌面 UI
+        window.location.href = 'desktop/index.html';
       } else {
         setStatus(r.message, 'err');
       }

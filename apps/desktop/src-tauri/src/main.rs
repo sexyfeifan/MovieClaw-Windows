@@ -26,15 +26,19 @@ fn main() {
             }
         })
         .setup(|app| {
-            // 启动时检查是否已有服务器配置，决定加载连接页还是 Web UI
+            // 启动时检查是否已有服务器配置，决定加载连接页还是桌面 UI
             let start_url = connect::load_server_url().unwrap_or_default();
             let url = if start_url.is_empty() {
                 WebviewUrl::App("connect.html".into())
             } else {
-                let parsed = start_url.parse::<url::Url>()
-                    .or_else(|_| format!("http://{start_url}").parse::<url::Url>())
-                    .unwrap_or_else(|_| "about:blank".parse().unwrap());
-                WebviewUrl::External(parsed)
+                WebviewUrl::App("desktop/index.html".into())
+            };
+
+            // 注入服务器地址到 JS 上下文
+            let inject = if start_url.is_empty() {
+                INJECT_SCRIPT.to_string()
+            } else {
+                format!("window.__MOVIECLAW_SERVER__ = {};\n{}", serde_json::to_string(&start_url).unwrap(), INJECT_SCRIPT)
             };
 
             WebviewWindowBuilder::new(app, "main", url)
@@ -42,7 +46,8 @@ fn main() {
                 .inner_size(1280.0, 800.0)
                 .min_inner_size(960.0, 600.0)
                 .center()
-                .initialization_script(INJECT_SCRIPT)
+                .decorations(false)
+                .initialization_script(&inject)
                 .build()?;
 
             // 系统托盘图标
