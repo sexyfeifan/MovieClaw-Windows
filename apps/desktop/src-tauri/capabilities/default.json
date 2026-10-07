@@ -12,6 +12,21 @@
     "shell:allow-open",
     "shell:allow-spawn",
     "shell:allow-stdin-write",
+    "http:default",
+    {
+      "identifier": "http:allow-fetch",
+      "allow": [
+        { "url": "http://**" },
+        { "url": "https://**" }
+      ]
+    },
+    {
+      "identifier": "http:allow-fetch-cancel",
+      "allow": [
+        { "url": "http://**" },
+        { "url": "https://**" }
+      ]
+    },
     "allow-launch-player",
     "allow-stop-player",
     "allow-save-server-url",

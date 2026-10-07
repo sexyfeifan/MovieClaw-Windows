@@ -1,5 +1,3 @@
-use serde_json::Value;
-
 /// 代理前端 API 请求到 MovieClaw 服务器，绕过 CORS 限制
 #[tauri::command]
 pub async fn proxy_api(

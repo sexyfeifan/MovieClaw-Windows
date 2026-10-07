@@ -21,6 +21,7 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_http::init())
         .on_window_event(|_, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 let _ = player::stop_player();

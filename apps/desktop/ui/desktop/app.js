@@ -7,9 +7,73 @@ const App = {
 
   async init() {
     await API.init();
+
+    // 检查登录状态
+    try {
+      const session = await API.getSession();
+      console.log('Session:', session);
+      // 已登录
+    } catch (e) {
+      console.log('Not logged in:', e);
+      this.renderLogin();
+      return;
+    }
+
     this.bindEvents();
     await this.loadSidebarData();
     this.navigate('home');
+  },
+
+  // ===== 登录 =====
+  renderLogin() {
+    const content = document.getElementById('content');
+    const sidebar = document.getElementById('sidebar');
+    if (sidebar) sidebar.style.display = 'none';
+
+    content.innerHTML = `
+      <div class="login-page">
+        <div class="login-card">
+          <div class="login-logo">MovieClaw</div>
+          <div class="login-subtitle">登录到服务器</div>
+          <form id="loginForm">
+            <div class="login-field">
+              <label for="loginUser">用户名</label>
+              <input type="text" id="loginUser" placeholder="输入用户名" autocomplete="username" required>
+            </div>
+            <div class="login-field">
+              <label for="loginPass">密码</label>
+              <input type="password" id="loginPass" placeholder="输入密码" autocomplete="current-password" required>
+            </div>
+            <button type="submit" class="login-btn" id="loginBtn">登录</button>
+            <div class="login-error" id="loginError"></div>
+          </form>
+        </div>
+      </div>
+    `;
+
+    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('loginBtn');
+      const err = document.getElementById('loginError');
+      btn.disabled = true;
+      btn.textContent = '正在登录...';
+      err.textContent = '';
+
+      try {
+        const user = document.getElementById('loginUser').value.trim();
+        const pass = document.getElementById('loginPass').value;
+        await API.login(user, pass);
+        // 登录成功，重新加载
+        sidebar.style.display = '';
+        this.bindEvents();
+        await this.loadSidebarData();
+        this.navigate('home');
+      } catch (ex) {
+        err.textContent = ex.message || '登录失败';
+        btn.disabled = false;
+        btn.textContent = '登录';
+      }
+    });
   },
 
   bindEvents() {

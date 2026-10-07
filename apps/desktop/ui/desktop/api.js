@@ -1,14 +1,11 @@
 // MovieClaw Desktop — API client
-// Communicates with the MovieClaw server REST API
+// Uses tauri-plugin-http for cookie-aware, CORS-free requests
 
 const API = {
   baseUrl: '',
 
   async init() {
-    // 优先用注入的全局变量
     this.baseUrl = (window.__MOVIECLAW_SERVER__ || '').replace(/\/+$/, '');
-
-    // 如果为空，从 Rust 后端获取（处理首次连接后导航的情况）
     if (!this.baseUrl && window.__TAURI__) {
       try {
         const url = await window.__TAURI__.core.invoke('get_server_url');
@@ -19,46 +16,39 @@ const API = {
     }
   },
 
+  // 通过 tauri-plugin-http 发送请求（自动 Cookie，绕过 CORS）
+  async rawFetch(url, options = {}) {
+    if (window.__TAURI__?.http?.fetch) {
+      return window.__TAURI__.http.fetch(url, options);
+    }
+    return fetch(url, { ...options, credentials: 'include' });
+  },
+
   async request(path, options = {}) {
     const method = (options.method || 'GET').toUpperCase();
-    let body = options.body || null;
-    let contentType = null;
+    const url = this.baseUrl + '/api/v1' + path;
+
+    let body = options.body;
+    let headers = { 'Accept': 'application/json', ...options.headers };
 
     if (body && typeof body !== 'string') {
-      contentType = 'application/json';
+      headers['Content-Type'] = 'application/json';
       body = JSON.stringify(body);
     }
 
-    // 通过 Tauri Rust 后端代理请求，绕过 CORS
-    if (window.__TAURI__) {
-      const resp = await window.__TAURI__.core.invoke('proxy_api', {
-        method,
-        path,
-        body: body || null,
-        contentType,
-      });
-      if (resp.status === 204) return null;
-      if (resp.status >= 400) {
-        throw new Error(`API error ${resp.status}: ${resp.body}`);
-      }
-      try {
-        return JSON.parse(resp.body);
-      } catch {
-        return resp.body;
-      }
-    }
+    const res = await this.rawFetch(url, { method, headers, body });
 
-    // 回退：直接 fetch（同源部署时可用）
-    const url = this.baseUrl + '/api/v1' + path;
-    const headers = { 'Accept': 'application/json' };
-    if (contentType) headers['Content-Type'] = contentType;
-    const res = await fetch(url, { method, headers, body });
     if (res.status === 204) return null;
+
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = text; }
+
     if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`API error ${res.status}: ${text}`);
+      const msg = (data && data.message) || text || `HTTP ${res.status}`;
+      throw new Error(`API ${res.status}: ${msg}`);
     }
-    return res.json();
+    return data;
   },
 
   // ===== 媒体库 =====
@@ -127,7 +117,25 @@ const API = {
 
   // ===== 认证 =====
   getSession() {
-    return this.request('/auth/session');
+    return this.request('/auth/me');
+  },
+
+  async login(username, password, remember = true) {
+    return this.request('/auth/login', {
+      method: 'POST',
+      body: { username, password, remember },
+    });
+  },
+
+  async getBootstrapStatus() {
+    return this.request('/auth/bootstrap');
+  },
+
+  async createAdmin(username, password) {
+    return this.request('/auth/bootstrap', {
+      method: 'POST',
+      body: { username, password },
+    });
   },
 };
 
