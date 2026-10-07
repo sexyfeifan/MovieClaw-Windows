@@ -1,6 +1,6 @@
 // MovieClaw Desktop — Main application
 
-// 修复图片 URL：相对路径拼接服务器地址，远程 URL 走服务器代理
+// 修复图片 URL：相对路径拼接 {server}/api/v1，远程 URL 走服务器代理
 function resolveUrl(url) {
   if (!url) return '';
   if (url.startsWith('data:')) return url;
@@ -8,11 +8,12 @@ function resolveUrl(url) {
   // 远程 TMDB 等图片走服务器缓存代理（和 Web 端一致）
   if (url.startsWith('http://') || url.startsWith('https://')) {
     if (!base) return url;
-    return base + '/images/proxy?url=' + encodeURIComponent(url);
+    return base + '/api/v1/images/proxy?url=' + encodeURIComponent(url);
   }
-  // 相对路径拼接服务器地址
+  // 相对路径：拼接 {server}/api/v1 前缀（API 返回的路径不带 /api/v1）
   if (!base) return url;
-  return base + (url.startsWith('/') ? url : '/' + url);
+  const path = url.startsWith('/') ? url : '/' + url;
+  return base + '/api/v1' + path;
 }
 
 // 图片加载失败时通过 Rust 代理（带 Cookie）重试
@@ -253,16 +254,18 @@ const App = {
         API.listLibraryItems(this.libraries[0]?.id, { limit: 12, sort: 'release_date', order: 'desc' }).catch(() => []),
       ]);
 
-      const unwrap = (r) => r?.data || r?.items || r || [];
+      const unwrap = (r) => this.unwrapItems(r);
       const allItems = unwrap(shelves[0]);
+      const topItems = unwrap(shelves[1]);
+      const newItems = unwrap(shelves[2]);
 
       // 选一部高分影片做英雄横幅
-      const heroItem = unwrap(shelves[1])[0] || allItems[0];
+      const heroItem = topItems[0] || allItems[0];
 
       const shelfData = [
         { title: '最近添加', items: allItems },
-        { title: '高分精选', items: unwrap(shelves[1]) },
-        { title: '最新上映', items: unwrap(shelves[2]) },
+        { title: '高分精选', items: topItems },
+        { title: '最新上映', items: newItems },
       ].filter(s => s.items && s.items.length > 0);
 
       if (shelfData.length === 0) {
@@ -271,7 +274,7 @@ const App = {
       }
 
       const heroHtml = heroItem ? `
-        <div class="hero-banner" data-hero-id="${heroItem.id || ''}" data-hero-lib="${heroItem.libraryId || this.libraries[0]?.id || ''}">
+        <div class="hero-banner" data-hero-id="${heroItem.media_item_id || heroItem.id || ''}" data-hero-lib="${heroItem.library_id ?? heroItem.libraryId ?? this.libraries[0]?.id ?? ''}">
           <div class="hero-bg">
             <img src="${resolveUrl(heroItem.backdropUrl || heroItem.backdrop_url || heroItem.posterUrl || heroItem.poster_url || '')}" alt="" data-raw="${heroItem.backdropUrl || heroItem.backdrop_url || heroItem.posterUrl || heroItem.poster_url || ''}" onerror="imgFallback(this, this.dataset.raw)">
           </div>
@@ -280,10 +283,10 @@ const App = {
             <h1 class="hero-title">${heroItem.title || heroItem.name || ''}</h1>
             <div class="hero-meta">
               ${heroItem.year ? `<span>${heroItem.year}</span>` : ''}
-              ${heroItem.genres?.length ? `<span>${heroItem.genres.slice(0, 3).join(' / ')}</span>` : ''}
-              ${heroItem.runtime ? `<span>${heroItem.runtime} 分钟</span>` : ''}
+              ${heroItem.rating ? `<span>★ ${Number(heroItem.rating).toFixed(1)}</span>` : ''}
+              ${heroItem.seasons?.length ? `<span>${heroItem.seasons.length} 季</span>` : (heroItem.episode_count ? `<span>${heroItem.episode_count} 集</span>` : '')}
+              ${heroItem.air_status ? `<span>${heroItem.air_status}</span>` : ''}
             </div>
-            ${heroItem.overview ? `<p class="hero-desc">${heroItem.overview}</p>` : ''}
             <div class="hero-actions">
               <button class="btn-play" id="heroPlayBtn">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -295,6 +298,7 @@ const App = {
         </div>
       ` : '';
 
+      const defaultLibId = this.libraries[0]?.id;
       container.innerHTML = heroHtml + shelfData.map(shelf => `
         <div class="shelf-section">
           <div class="shelf-header" data-shelf-title="${shelf.title}">
@@ -302,7 +306,7 @@ const App = {
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-secondary)"><polyline points="9 18 15 12 9 6"/></svg>
           </div>
           <div class="shelf-row">
-            ${shelf.items.map(item => this.posterCard(item)).join('')}
+            ${shelf.items.map(item => this.posterCard(item, defaultLibId)).join('')}
           </div>
         </div>
       `).join('');
@@ -310,12 +314,12 @@ const App = {
       // 绑定英雄横幅事件
       if (heroItem) {
         document.getElementById('heroPlayBtn')?.addEventListener('click', () => {
-          this.startPlayback(heroItem);
+          this.startPlayback({ media_item_id: heroItem.media_item_id || heroItem.id, title: heroItem.title });
         });
         document.getElementById('heroDetailBtn')?.addEventListener('click', () => {
           this.navigate('detail', {
-            libraryId: heroItem.libraryId || this.libraries[0]?.id,
-            itemId: heroItem.id || heroItem.media_item_id
+            libraryId: heroItem.library_id ?? heroItem.libraryId ?? this.libraries[0]?.id,
+            itemId: heroItem.media_item_id || heroItem.id
           });
         });
       }
@@ -327,16 +331,31 @@ const App = {
     }
   },
 
+  // 解包 API 响应：兼容 {data:[...]}, {data:{items:[...]}}, {items:[...]}, [...] 等
+  unwrapItems(resp) {
+    if (!resp) return [];
+    if (Array.isArray(resp)) return resp;
+    if (resp.data) {
+      if (Array.isArray(resp.data)) return resp.data;
+      if (resp.data.items && Array.isArray(resp.data.items)) return resp.data.items;
+      if (Array.isArray(resp.data.results)) return resp.data.results;
+    }
+    if (resp.items && Array.isArray(resp.items)) return resp.items;
+    if (resp.results && Array.isArray(resp.results)) return resp.results;
+    return [];
+  },
+
   // ===== 媒体库 =====
   async renderLibrary(container, libraryId) {
     container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
     try {
       const lib = this.libraries.find(l => l.id === libraryId || l.id == libraryId);
       const resp = await API.listLibraryItems(libraryId, { limit: 60 });
-      const items = resp?.data || resp?.items || resp || [];
+      const items = this.unwrapItems(resp);
       this.renderPosterWall(container, items, {
         title: lib?.name || '媒体库',
         subtitle: `${items.length} 个项目`,
+        libraryId,
       });
     } catch (e) {
       console.error('Render library error:', e);
@@ -349,7 +368,7 @@ const App = {
     container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
     try {
       const resp = await API.listCollectionItems(collectionId);
-      const items = resp?.data || resp?.items || resp || [];
+      const items = this.unwrapItems(resp);
       this.renderPosterWall(container, items, {
         title: '合集',
         subtitle: `${items.length} 个项目`,
@@ -366,10 +385,10 @@ const App = {
     try {
       // 查询所有媒体库的收藏
       const promises = this.libraries.map(lib =>
-        API.listLibraryItems(lib.id, { favorites: true, limit: 60 }).catch(() => [])
+        API.listLibraryItems(lib.id, { favorites: true, limit: 60 }).catch(() => null)
       );
       const results = await Promise.all(promises);
-      const items = results.flatMap(r => r?.data || r?.items || r || []);
+      const items = results.flatMap(r => this.unwrapItems(r));
       this.renderPosterWall(container, items, {
         title: '我的收藏',
         subtitle: `${items.length} 个项目`,
@@ -384,7 +403,7 @@ const App = {
     container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
     try {
       const results = await API.search(query);
-      const items = results?.data?.items || results?.items || results?.data || results || [];
+      const items = this.unwrapItems(results);
       if (!items.length) {
         container.innerHTML = `
           <div class="page-header">
@@ -408,26 +427,35 @@ const App = {
   async renderDetail(container, params) {
     container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
     try {
-      const item = await API.getItemDetail(params.libraryId, params.itemId);
-      const info = item.data || item;
+      const resp = await API.getItemDetail(params.libraryId, params.itemId);
+      const info = resp?.data || resp;
+      const meta = info.local_meta || {};
+
+      const genres = meta.genres || [];
+      const plot = meta.plot || '';
+      const runtime = meta.runtime_minutes || null;
+      const rating = meta.rating || null;
+      const directors = meta.directors || [];
+      const actors = meta.actors || [];
+      const posterRaw = info.poster_url || info.backdrop_url || '';
+      const backdropRaw = info.backdrop_url || info.poster_url || '';
 
       container.innerHTML = `
         <div class="detail-hero">
           <div class="detail-hero-bg">
-            <img src="${resolveUrl(info.backdropUrl || info.backdrop_url || info.posterUrl || info.poster_url || '')}" alt="" data-raw="${info.backdropUrl || info.backdrop_url || info.posterUrl || info.poster_url || ''}" onerror="imgFallback(this, this.dataset.raw)">
+            <img src="${resolveUrl(backdropRaw)}" alt="" data-raw="${backdropRaw}" onerror="imgFallback(this, this.dataset.raw)">
           </div>
           <div class="detail-hero-info">
             <h1 class="detail-title">${info.title}</h1>
             <div class="detail-meta">
               ${info.year ? `<span>${info.year}</span>` : ''}
-              ${info.genres?.length ? `<span>${info.genres.slice(0, 3).join(' / ')}</span>` : ''}
-              ${info.runtime ? `<span>${info.runtime} 分钟</span>` : ''}
-              ${info.quality ? `<span class="quality-badge">${info.quality}</span>` : ''}
+              ${genres.length ? `<span>${genres.slice(0, 3).join(' / ')}</span>` : ''}
+              ${runtime ? `<span>${runtime} 分钟</span>` : ''}
             </div>
             <div class="detail-actions">
               <button class="btn-play" id="btnPlay">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                <span>${info.watchProgress > 0 ? '继续播放' : '播放'}</span>
+                <span>播放</span>
               </button>
               <button class="btn-icon" id="btnFavorite" title="收藏">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -443,7 +471,7 @@ const App = {
           </div>
         </div>
         <div class="detail-body">
-          ${info.overview ? `<p class="detail-overview">${info.overview}</p>` : ''}
+          ${plot ? `<p class="detail-overview">${plot}</p>` : ''}
 
           <div class="detail-columns">
             <div class="detail-main">
@@ -451,22 +479,10 @@ const App = {
                 <div class="detail-section">
                   <h3>剧集</h3>
                   <div class="season-selector">
-                    ${info.seasons.map((s, i) => `<button class="season-pill ${i === 0 ? 'active' : ''}" data-season="${s.seasonNumber || i + 1}">第 ${s.seasonNumber || i + 1} 季</button>`).join('')}
+                    ${info.seasons.map((s, i) => `<button class="season-pill ${i === 0 ? 'active' : ''}" data-season="${s}">第 ${s} 季</button>`).join('')}
                   </div>
                   <div class="episode-grid" id="episodeGrid">
-                    ${(info.episodes || []).map(ep => `
-                      <div class="episode-card" data-episode-id="${ep.id}">
-                        <div class="episode-art">
-                          <img src="${resolveUrl(ep.thumbUrl || ep.thumb_url || '')}" alt="" data-raw="${ep.thumbUrl || ep.thumb_url || ''}" onerror="imgFallback(this, this.dataset.raw)">
-                          <div class="episode-num">${ep.episodeNumber}</div>
-                          ${ep.watchProgress > 0 ? `<div class="episode-progress"><div class="episode-progress-fill" style="width:${Math.round(ep.watchProgress * 100)}%"></div></div>` : ''}
-                        </div>
-                        <div class="episode-info">
-                          <div class="episode-title">${ep.title}</div>
-                          <div class="episode-subtitle">${ep.runtime ? ep.runtime + ' 分钟' : ''}${ep.airDate ? ' · ' + ep.airDate : ''}</div>
-                        </div>
-                      </div>
-                    `).join('')}
+                    <div class="page-loading"><div class="spinner"></div></div>
                   </div>
                 </div>
               ` : ''}
@@ -484,17 +500,19 @@ const App = {
             <aside class="detail-sidebar">
               <div class="detail-info-block">
                 <h4>影片信息</h4>
-                ${info.originalTitle ? `<div class="info-row"><span class="info-label">原名</span><span>${info.originalTitle}</span></div>` : ''}
-                ${info.releaseDate ? `<div class="info-row"><span class="info-label">上映</span><span>${info.releaseDate}</span></div>` : ''}
-                ${info.genres?.length ? `<div class="info-row"><span class="info-label">类型</span><span>${info.genres.join(' / ')}</span></div>` : ''}
-                ${info.director ? `<div class="info-row"><span class="info-label">导演</span><span>${info.director}</span></div>` : ''}
-                ${info.cast?.length ? `
+                ${info.original_title ? `<div class="info-row"><span class="info-label">原名</span><span>${info.original_title}</span></div>` : ''}
+                ${info.year ? `<div class="info-row"><span class="info-label">年份</span><span>${info.year}</span></div>` : ''}
+                ${genres.length ? `<div class="info-row"><span class="info-label">类型</span><span>${genres.join(' / ')}</span></div>` : ''}
+                ${runtime ? `<div class="info-row"><span class="info-label">片长</span><span>${runtime} 分钟</span></div>` : ''}
+                ${directors.length ? `<div class="info-row"><span class="info-label">导演</span><span>${directors.join(' / ')}</span></div>` : ''}
+                ${rating ? `<div class="info-row"><span class="info-label">评分</span><span class="rating-score">${rating.toFixed(1)}</span></div>` : ''}
+                ${actors.length ? `
                   <div class="info-row info-row-cast">
                     <span class="info-label">主演</span>
                     <div class="cast-list">
-                      ${info.cast.slice(0, 6).map(p => `
+                      ${actors.slice(0, 6).map(p => `
                         <div class="cast-item">
-                          ${p.avatarUrl ? `<img src="${resolveUrl(p.avatarUrl)}" alt="" class="cast-avatar">` : '<div class="cast-avatar cast-avatar-placeholder"></div>'}
+                          ${p.thumb_url ? `<img src="${resolveUrl(p.thumb_url)}" alt="" class="cast-avatar" onerror="this.style.display='none'">` : '<div class="cast-avatar cast-avatar-placeholder"></div>'}
                           <div>
                             <div class="cast-name">${p.name}</div>
                             <div class="cast-role">${p.role || ''}</div>
@@ -504,47 +522,42 @@ const App = {
                     </div>
                   </div>
                 ` : ''}
-                ${info.rating ? `<div class="info-row"><span class="info-label">评分</span><span class="rating-score">${info.rating}</span></div>` : ''}
-                ${info.fileCount ? `<div class="info-row"><span class="info-label">文件</span><span>${info.fileCount} 个</span></div>` : ''}
+                ${info.files?.length ? `<div class="info-row"><span class="info-label">文件</span><span>${info.files.length} 个</span></div>` : ''}
               </div>
             </aside>
           </div>
         </div>
       `;
 
+      // 加载剧集
+      if (info.seasons?.length) {
+        this.loadEpisodes(container, params.libraryId, params.itemId, info.seasons[0], info.title);
+        container.querySelectorAll('.season-pill').forEach(pill => {
+          pill.addEventListener('click', () => {
+            container.querySelectorAll('.season-pill').forEach(p => p.classList.remove('active'));
+            pill.classList.add('active');
+            this.loadEpisodes(container, params.libraryId, params.itemId, parseInt(pill.dataset.season), info.title);
+          });
+        });
+      }
+
       // 绑定事件
       document.getElementById('btnPlay')?.addEventListener('click', () => {
-        this.startPlayback(info);
+        this.startPlayback({ ...info, id: info.media_item_id, title: info.title });
       });
 
       document.getElementById('btnFavorite')?.addEventListener('click', async () => {
         try {
-          await API.request(`/items/${info.id}/favorite`, { method: 'POST' });
+          await API.request(`/libraries/${params.libraryId}/items/${info.media_item_id}/favorite`, { method: 'POST' });
           document.getElementById('btnFavorite').classList.toggle('active');
         } catch (e) { console.error('Favorite toggle failed:', e); }
       });
 
       document.getElementById('btnMarkWatched')?.addEventListener('click', async () => {
         try {
-          await API.request(`/items/${info.id}/watched`, { method: 'POST' });
+          await API.request(`/libraries/${params.libraryId}/items/${info.media_item_id}/watched`, { method: 'POST' });
           document.getElementById('btnMarkWatched').classList.toggle('active');
         } catch (e) { console.error('Mark watched failed:', e); }
-      });
-
-      container.querySelectorAll('.episode-card').forEach(card => {
-        card.addEventListener('click', () => {
-          const epId = card.dataset.episodeId;
-          const ep = (info.episodes || []).find(e => e.id == epId);
-          if (ep) this.startPlayback({ ...ep, title: info.title + ' - ' + ep.title });
-        });
-      });
-
-      container.querySelectorAll('.season-pill').forEach(pill => {
-        pill.addEventListener('click', () => {
-          container.querySelectorAll('.season-pill').forEach(p => p.classList.remove('active'));
-          pill.classList.add('active');
-          // TODO: filter episodes by season
-        });
       });
 
     } catch (e) {
@@ -553,8 +566,53 @@ const App = {
     }
   },
 
+  // 加载某一季的剧集
+  async loadEpisodes(container, libraryId, itemId, seasonNumber, showTitle) {
+    const grid = document.getElementById('episodeGrid');
+    if (!grid) return;
+    grid.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
+    try {
+      const resp = await API.request(`/libraries/${libraryId}/items/${itemId}/episodes?season_number=${seasonNumber}`);
+      const data = resp?.data || resp;
+      const episodes = data?.episodes || data || [];
+      if (!episodes.length) {
+        grid.innerHTML = '<div style="color:var(--text-secondary);padding:20px;">暂无剧集信息</div>';
+        return;
+      }
+      grid.innerHTML = episodes.map(ep => `
+        <div class="episode-card" data-episode-number="${ep.episode_number}" data-season="${seasonNumber}">
+          <div class="episode-art">
+            ${ep.still_url ? `<img src="${resolveUrl(ep.still_url)}" alt="" data-raw="${ep.still_url}" onerror="imgFallback(this, this.dataset.raw)">` : ''}
+            <div class="episode-num">E${ep.episode_number}</div>
+            ${ep.progress_percent ? `<div class="episode-progress"><div class="episode-progress-fill" style="width:${ep.progress_percent}%"></div></div>` : ''}
+            ${ep.played ? '<div class="episode-played"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="9 12 11 14 15 10"/></svg></div>' : ''}
+          </div>
+          <div class="episode-info">
+            <div class="episode-title">${ep.name || '第 ' + ep.episode_number + ' 集'}</div>
+            <div class="episode-subtitle">${ep.air_date || ''}</div>
+          </div>
+        </div>
+      `).join('');
+
+      grid.querySelectorAll('.episode-card').forEach(card => {
+        card.addEventListener('click', () => {
+          const epNum = card.dataset.episodeNumber;
+          this.startPlayback({
+            media_item_id: itemId,
+            title: `${showTitle} S${seasonNumber}E${epNum}`,
+            seasonNumber: parseInt(seasonNumber),
+            episodeNumber: parseInt(epNum),
+          });
+        });
+      });
+    } catch (e) {
+      console.error('Load episodes failed:', e);
+      grid.innerHTML = '<div style="color:var(--text-secondary);padding:20px;">加载剧集失败</div>';
+    }
+  },
+
   // ===== 海报墙渲染 =====
-  renderPosterWall(container, items, { title, subtitle }) {
+  renderPosterWall(container, items, { title, subtitle, libraryId }) {
     container.innerHTML = `
       <div class="page-header">
         <h1 class="page-title">${title}</h1>
@@ -562,19 +620,19 @@ const App = {
       </div>
       <div class="poster-wall">
         <div class="poster-grid">
-          ${items.map(item => this.posterCard(item)).join('')}
+          ${items.map(item => this.posterCard(item, libraryId)).join('')}
         </div>
       </div>
     `;
     this.bindPosterCards(container);
   },
 
-  posterCard(item) {
-    const progress = item.watchProgress || item.progress || 0;
-    const itemId = item.id || item.media_item_id || item.mediaItemId || '';
-    const libId = item.libraryId || item.library_id || '';
+  posterCard(item, defaultLibId) {
+    const progress = item.progress_percent ? item.progress_percent / 100 : (item.watchProgress || item.progress || 0);
+    const itemId = item.media_item_id || item.id || '';
+    const libId = item.library_id ?? item.libraryId ?? defaultLibId ?? '';
     const title = item.title || item.name || '未知';
-    const rawPoster = item.posterUrl || item.poster_url || item.thumbUrl || item.thumb_url || '';
+    const rawPoster = item.poster_url || item.posterUrl || '';
     const posterUrl = resolveUrl(rawPoster);
     const year = item.year || '';
     return `
@@ -594,7 +652,7 @@ const App = {
         </div>
         <div class="poster-info">
           <div class="poster-title">${title}</div>
-          <div class="poster-subtitle">${year}${item.seasons ? ' · ' + item.seasons + ' 季' : ''}</div>
+          <div class="poster-subtitle">${year}${item.seasons?.length ? ' · ' + item.seasons.length + ' 季' : (item.episode_count ? ' · ' + item.episode_count + ' 集' : '')}</div>
         </div>
       </div>
     `;
@@ -622,7 +680,7 @@ const App = {
         <div class="settings-card">
           <h3>关于</h3>
           <p>MovieClaw Desktop</p>
-          <p style="color:var(--text-secondary);margin-top:4px;">版本 0.2.101</p>
+          <p style="color:var(--text-secondary);margin-top:4px;">版本 0.2.102</p>
         </div>
       </div>
     `;
@@ -655,7 +713,7 @@ const App = {
 
       // 1. 创建播放会话
       statusEl.textContent = '正在获取播放链接...';
-      const mediaId = item.id || item.mediaItemId;
+      const mediaId = item.media_item_id || item.id || item.mediaItemId;
       if (!mediaId) {
         throw new Error('无效的媒体项 ID');
       }

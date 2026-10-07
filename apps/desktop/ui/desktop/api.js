@@ -19,7 +19,12 @@ const API = {
   // 通过 proxy_api 的 /__image__ 路径加载需要认证的图片，返回 data URI
   async proxyImage(pathOrUrl) {
     try {
-      const encoded = encodeURIComponent(pathOrUrl);
+      // 补全相对路径的 /api/v1 前缀（API 返回的路径不带 /api/v1）
+      let fullPath = pathOrUrl;
+      if (!pathOrUrl.startsWith('http') && !pathOrUrl.startsWith('/api/')) {
+        fullPath = '/api/v1' + (pathOrUrl.startsWith('/') ? pathOrUrl : '/' + pathOrUrl);
+      }
+      const encoded = encodeURIComponent(fullPath);
       const result = await window.__TAURI__.core.invoke('proxy_api', {
         method: 'GET',
         path: '/__image__?url=' + encoded,
