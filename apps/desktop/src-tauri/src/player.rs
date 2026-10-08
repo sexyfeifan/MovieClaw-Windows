@@ -30,10 +30,10 @@ fn find_mpv() -> Option<String> {
             return Some(c.to_string());
         }
     }
-    // 程序目录旁边的 mpv 子目录
+    // 程序目录：mpv 子目录、直接放 exe 旁边
     if let Ok(exe_dir) = std::env::current_exe() {
         if let Some(dir) = exe_dir.parent() {
-            for sub in &["mpv/mpv.exe", "mpv-2023/mpv.exe"] {
+            for sub in &["mpv/mpv.exe", "mpv-2023/mpv.exe", "mpv.exe", "mpv/mpv.com"] {
                 let local = dir.join(sub);
                 if local.exists() {
                     return Some(local.to_string_lossy().to_string());
@@ -252,7 +252,9 @@ pub fn launch_player(app: tauri::AppHandle, params: PlayerLaunch) -> Result<serd
         .arg("--force-window=immediate")
         .arg("--hwdec=auto-safe")
         .arg("--keep-open=no")
-        .arg("--osd-level=1");
+        .arg("--osd-level=1")
+        .arg("--no-ontop")
+        .arg("--no-terminal");
 
     if let Some(s) = start_secs {
         cmd.arg(format!("--start={}", s));

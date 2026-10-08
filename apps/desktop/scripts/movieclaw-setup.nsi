@@ -6,14 +6,14 @@
 !include "FileFunc.nsh"
 
 Name "MovieClaw Desktop"
-OutFile "..\dist\MovieClaw-Desktop-v0.2.103-Setup-x64.exe"
+OutFile "..\dist\MovieClaw-Desktop-v0.2.104-Setup-x64.exe"
 InstallDir "$LOCALAPPDATA\MovieClaw\Desktop"
 InstallDirRegKey HKCU "Software\MovieClaw\Desktop" "InstallDir"
 RequestExecutionLevel user
 Unicode True
 
 !define APP_NAME "MovieClaw Desktop"
-!define APP_VERSION "0.2.103"
+!define APP_VERSION "0.2.104"
 !define APP_PUBLISHER "MovieClaw"
 !define APP_EXE "movieclaw-desktop.exe"
 
@@ -45,8 +45,10 @@ Section "安装" SecInstall
     File "..\dist\portable\WebView2Loader.dll"
     ; 桌面 UI
     File /nonfatal /r "..\dist\portable\desktop"
-    ; mpv sidecar (如存在)
-    File /nonfatal /r "..\dist\portable\mpv"
+    ; mpv sidecar (放入 mpv 子目录)
+    SetOutPath "$INSTDIR\mpv"
+    File /nonfatal /r "..\dist\portable\mpv\*.*"
+    SetOutPath "$INSTDIR"
 
     ; 写注册表
     WriteRegStr HKCU "Software\MovieClaw\Desktop" "InstallDir" "$INSTDIR"

@@ -699,7 +699,7 @@ const App = {
         <div class="settings-card">
           <h3>关于</h3>
           <p>MovieClaw Desktop</p>
-          <p style="color:var(--text-secondary);margin-top:4px;">版本 0.2.103</p>
+          <p style="color:var(--text-secondary);margin-top:4px;">版本 0.2.104</p>
         </div>
       </div>
     `;
