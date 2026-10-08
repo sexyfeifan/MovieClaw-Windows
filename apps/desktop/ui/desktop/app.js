@@ -687,6 +687,12 @@ const App = {
 
   // ===== 海报墙渲染 =====
   renderPosterWall(container, items, { title, subtitle, libraryId, showToolbar }) {
+    // 收集所有类型用于筛选
+    const allGenres = [...new Set(items.flatMap(i => {
+      const meta = i.local_meta || i;
+      return meta.genres || [];
+    }))].sort();
+
     const toolbarHtml = showToolbar ? `
       <div class="wall-toolbar">
         <div class="wall-toolbar-left">
@@ -694,6 +700,18 @@ const App = {
           <button class="wall-sort-btn" data-sort="title">标题</button>
           <button class="wall-sort-btn" data-sort="year">年份</button>
           <button class="wall-sort-btn" data-sort="rating">评分</button>
+          ${allGenres.length ? `
+            <div class="wall-genre-dropdown">
+              <button class="wall-genre-btn" id="wallGenreBtn">
+                <span id="wallGenreLabel">类型筛选</span>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="wall-genre-menu" id="wallGenreMenu" hidden>
+                <div class="wall-genre-item active" data-genre="">全部</div>
+                ${allGenres.map(g => `<div class="wall-genre-item" data-genre="${g}">${g}</div>`).join('')}
+              </div>
+            </div>
+          ` : ''}
         </div>
         <div class="wall-toolbar-right">
           <button class="wall-view-btn active" data-view="grid" title="网格">
@@ -718,24 +736,64 @@ const App = {
     if (showToolbar) this.bindWallToolbar(container, items, libraryId);
   },
 
-  // 海报墙排序工具栏
+  // 海报墙排序 + 筛选工具栏
   bindWallToolbar(container, items, libraryId) {
+    let currentGenre = '';
+    let currentSort = 'default';
+
+    const refreshGrid = () => {
+      let filtered = items;
+      if (currentGenre) {
+        filtered = items.filter(i => {
+          const meta = i.local_meta || i;
+          return (meta.genres || []).includes(currentGenre);
+        });
+      }
+      const sorted = [...filtered];
+      if (currentSort === 'title') sorted.sort((a, b) => (a.title || '').localeCompare(b.title || '', 'zh'));
+      else if (currentSort === 'year') sorted.sort((a, b) => (b.year || 0) - (a.year || 0));
+      else if (currentSort === 'rating') sorted.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+      const grid = container.querySelector('#posterGrid');
+      if (grid) {
+        grid.innerHTML = sorted.map(item => this.posterCard(item, libraryId)).join('');
+        this.bindPosterCards(container);
+      }
+    };
+
+    // 排序
     container.querySelectorAll('.wall-sort-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         container.querySelectorAll('.wall-sort-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        const sort = btn.dataset.sort;
-        const sorted = [...items];
-        if (sort === 'title') sorted.sort((a, b) => (a.title || '').localeCompare(b.title || '', 'zh'));
-        else if (sort === 'year') sorted.sort((a, b) => (b.year || 0) - (a.year || 0));
-        else if (sort === 'rating') sorted.sort((a, b) => (b.rating || 0) - (a.rating || 0));
-        const grid = container.querySelector('#posterGrid');
-        if (grid) {
-          grid.innerHTML = sorted.map(item => this.posterCard(item, libraryId)).join('');
-          this.bindPosterCards(container);
-        }
+        currentSort = btn.dataset.sort;
+        refreshGrid();
       });
     });
+
+    // 类型筛选
+    const genreBtn = container.querySelector('#wallGenreBtn');
+    const genreMenu = container.querySelector('#wallGenreMenu');
+    if (genreBtn && genreMenu) {
+      genreBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        genreMenu.hidden = !genreMenu.hidden;
+      });
+      genreMenu.querySelectorAll('.wall-genre-item').forEach(item => {
+        item.addEventListener('click', () => {
+          genreMenu.querySelectorAll('.wall-genre-item').forEach(i => i.classList.remove('active'));
+          item.classList.add('active');
+          currentGenre = item.dataset.genre;
+          const label = container.querySelector('#wallGenreLabel');
+          if (label) label.textContent = currentGenre || '类型筛选';
+          genreMenu.hidden = true;
+          refreshGrid();
+        });
+      });
+      // 点击外部关闭
+      document.addEventListener('click', (e) => {
+        if (!e.target.closest('.wall-genre-dropdown')) genreMenu.hidden = true;
+      });
+    }
   },
 
   posterCard(item, defaultLibId) {
@@ -791,7 +849,7 @@ const App = {
         <div class="settings-card">
           <h3>关于</h3>
           <p>MovieClaw Desktop</p>
-          <p style="color:var(--text-secondary);margin-top:4px;">版本 0.2.106</p>
+          <p style="color:var(--text-secondary);margin-top:4px;">版本 0.2.107</p>
         </div>
       </div>
     `;
@@ -855,7 +913,7 @@ const App = {
 
       // 打开内置播放器
       loading.hidden = true;
-      Player.open(item.title || 'MovieClaw', streamUrl, subtitleUrls, startMs);
+      Player.open(item.title || 'MovieClaw', streamUrl, subtitleUrls, startMs, session);
 
     } catch (e) {
       console.error('Playback error:', e);

@@ -733,6 +733,17 @@ img:not([loading]) {
   transform: translate(-50%, -50%) scale(1);
 }
 
+/* 章节标记 */
+.player-chapter-mark {
+  position: absolute;
+  top: -1px;
+  width: 2px;
+  height: calc(100% + 2px);
+  background: rgba(255,255,255,0.35);
+  pointer-events: none;
+  z-index: 2;
+}
+
 .player-controls-row {
   display: flex;
   align-items: center;
@@ -803,6 +814,196 @@ img:not([loading]) {
   color: rgba(255,255,255,0.7);
   margin-left: 6px;
   font-variant-numeric: tabular-nums;
+}
+
+.player-speed-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.85);
+}
+
+/* 设置面板 */
+.player-settings-panel {
+  position: absolute;
+  bottom: 70px;
+  right: 18px;
+  z-index: 30;
+  width: 300px;
+  max-height: 380px;
+  background: rgba(20, 20, 24, 0.95);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 14px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.player-settings-panel[hidden] {
+  display: none !important;
+}
+
+.player-settings-tabs {
+  display: flex;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  padding: 0 4px;
+}
+
+.player-settings-tab {
+  flex: 1;
+  padding: 12px 0;
+  border: none;
+  background: transparent;
+  color: rgba(255,255,255,0.5);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  position: relative;
+  transition: color 0.15s;
+}
+
+.player-settings-tab:hover {
+  color: rgba(255,255,255,0.8);
+}
+
+.player-settings-tab.active {
+  color: #fff;
+}
+
+.player-settings-tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 20%;
+  right: 20%;
+  height: 2px;
+  background: var(--accent, #2997ff);
+  border-radius: 1px;
+}
+
+.player-settings-content {
+  overflow-y: auto;
+  padding: 8px 0;
+  flex: 1;
+}
+
+.player-settings-content::-webkit-scrollbar {
+  width: 4px;
+}
+
+.player-settings-content::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.15);
+  border-radius: 2px;
+}
+
+.player-settings-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  cursor: pointer;
+  transition: background 0.12s;
+  gap: 10px;
+}
+
+.player-settings-item:hover {
+  background: rgba(255,255,255,0.08);
+}
+
+.player-settings-item.active {
+  background: rgba(41, 151, 255, 0.15);
+}
+
+.player-settings-item .item-label {
+  font-size: 13px;
+  color: rgba(255,255,255,0.85);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.player-settings-item .item-info {
+  font-size: 11px;
+  color: rgba(255,255,255,0.4);
+  white-space: nowrap;
+}
+
+.player-settings-item .item-check {
+  width: 18px;
+  height: 18px;
+  color: var(--accent, #2997ff);
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.player-settings-item.active .item-check {
+  opacity: 1;
+}
+
+/* 倍速面板 */
+.player-speed-panel {
+  position: absolute;
+  bottom: 70px;
+  right: 72px;
+  z-index: 30;
+  background: rgba(20, 20, 24, 0.95);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 12px;
+  overflow: hidden;
+  min-width: 100px;
+}
+
+.player-speed-panel[hidden] {
+  display: none !important;
+}
+
+.player-speed-option {
+  padding: 10px 18px;
+  font-size: 13px;
+  color: rgba(255,255,255,0.7);
+  cursor: pointer;
+  text-align: center;
+  transition: background 0.12s;
+}
+
+.player-speed-option:hover {
+  background: rgba(255,255,255,0.08);
+}
+
+.player-speed-option.active {
+  color: var(--accent, #2997ff);
+  font-weight: 600;
+}
+
+/* 跳过片头/片尾 */
+.player-skip-btn {
+  position: absolute;
+  bottom: 90px;
+  right: 24px;
+  z-index: 25;
+  padding: 10px 22px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.15);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.player-skip-btn:hover {
+  background: rgba(255,255,255,0.25);
+}
+
+.player-skip-btn[hidden] {
+  display: none !important;
 }
 
 /* ===== 详情页 ===== */
@@ -1504,6 +1705,79 @@ img:not([loading]) {
 
 .wall-view-btn.active {
   color: var(--text);
+}
+
+/* 类型筛选下拉 */
+.wall-genre-dropdown {
+  position: relative;
+  display: inline-block;
+}
+
+.wall-genre-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.wall-genre-btn:hover {
+  background: var(--glass-bg-hover);
+  border-color: var(--glass-border-strong);
+}
+
+.wall-genre-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  min-width: 160px;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--surface-raised);
+  border: 1px solid var(--glass-border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  z-index: 50;
+  padding: 4px 0;
+}
+
+.wall-genre-menu[hidden] {
+  display: none !important;
+}
+
+.wall-genre-menu::-webkit-scrollbar {
+  width: 4px;
+}
+
+.wall-genre-menu::-webkit-scrollbar-thumb {
+  background: var(--glass-border);
+  border-radius: 2px;
+}
+
+.wall-genre-item {
+  padding: 8px 14px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.wall-genre-item:hover {
+  background: var(--glass-bg-hover);
+  color: var(--text);
+}
+
+.wall-genre-item.active {
+  color: var(--accent);
+  font-weight: 500;
 }
 
 /* ===== 登录页 ===== */

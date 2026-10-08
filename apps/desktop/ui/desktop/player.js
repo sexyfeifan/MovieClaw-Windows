@@ -10,6 +10,7 @@ const Player = {
   init() {
     this.video = document.getElementById('playerVideo');
     if (!this.video) return;
+    this.initSettings();
 
     // 播放/暂停
     document.getElementById('btnPlayPause')?.addEventListener('click', () => this.togglePlay());
@@ -63,7 +64,13 @@ const Player = {
     document.getElementById('playerBack')?.addEventListener('click', () => this.close());
 
     // 视频事件
-    this.video.addEventListener('timeupdate', () => this.updateProgress());
+    this.video.addEventListener('timeupdate', () => {
+      this.updateProgress();
+      this.checkSegments();
+    });
+    this.video.addEventListener('loadedmetadata', () => {
+      this.renderChapters(this.sessionData?.chapters);
+    });
     this.video.addEventListener('progress', () => this.updateBuffer());
     this.video.addEventListener('play', () => {
       this.showIcon('pause');
@@ -118,8 +125,281 @@ const Player = {
     });
   },
 
+  // ===== 设置面板 =====
+  sessionData: null,   // 播放会话完整数据
+
+  initSettings() {
+    // 设置按钮
+    document.getElementById('btnSettings')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.toggleSettings();
+    });
+
+    // 倍速按钮
+    document.getElementById('btnSpeed')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.toggleSpeedPanel();
+    });
+
+    // 设置标签页切换
+    document.querySelectorAll('.player-settings-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.player-settings-tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        this.renderSettingsTab(tab.dataset.tab);
+      });
+    });
+
+    // 倍速选项
+    document.querySelectorAll('.player-speed-option').forEach(opt => {
+      opt.addEventListener('click', () => {
+        const speed = parseFloat(opt.dataset.speed);
+        if (this.video) this.video.playbackRate = speed;
+        document.querySelectorAll('.player-speed-option').forEach(o => o.classList.remove('active'));
+        opt.classList.add('active');
+        const label = document.getElementById('speedLabel');
+        if (label) label.textContent = speed + 'x';
+        this.hideSpeedPanel();
+      });
+    });
+
+    // 点击外部关闭面板
+    document.getElementById('playerView')?.addEventListener('click', (e) => {
+      if (!e.target.closest('.player-settings-panel') && !e.target.closest('#btnSettings')) {
+        this.hideSettings();
+      }
+      if (!e.target.closest('.player-speed-panel') && !e.target.closest('#btnSpeed')) {
+        this.hideSpeedPanel();
+      }
+    });
+
+    // 跳过按钮
+    document.getElementById('playerSkipBtn')?.addEventListener('click', () => this.skipSegment());
+  },
+
+  toggleSettings() {
+    const panel = document.getElementById('playerSettingsPanel');
+    if (panel.hidden) {
+      panel.hidden = false;
+      this.hideSpeedPanel();
+      this.renderSettingsTab('subtitles');
+      // 更新激活的标签页
+      document.querySelectorAll('.player-settings-tab').forEach(t => t.classList.remove('active'));
+      document.querySelector('.player-settings-tab[data-tab="subtitles"]')?.classList.add('active');
+    } else {
+      panel.hidden = true;
+    }
+  },
+
+  hideSettings() {
+    const panel = document.getElementById('playerSettingsPanel');
+    if (panel) panel.hidden = true;
+  },
+
+  toggleSpeedPanel() {
+    const panel = document.getElementById('playerSpeedPanel');
+    if (panel.hidden) {
+      panel.hidden = false;
+      this.hideSettings();
+    } else {
+      panel.hidden = true;
+    }
+  },
+
+  hideSpeedPanel() {
+    const panel = document.getElementById('playerSpeedPanel');
+    if (panel) panel.hidden = true;
+  },
+
+  renderSettingsTab(tabName) {
+    const content = document.getElementById('playerSettingsContent');
+    if (!content) return;
+
+    const session = this.sessionData;
+    const decision = session?.decision || {};
+
+    if (tabName === 'subtitles') {
+      const subs = decision.subtitles || [];
+      const subUrls = session?.subtitle_urls || [];
+      let html = `
+        <div class="player-settings-item" data-sub-index="-1" onclick="Player.selectSubtitle(-1)">
+          <span class="item-label">关闭字幕</span>
+          <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
+        </div>
+      `;
+      html += subs.map((sub, i) => {
+        const label = sub.title || sub.language || `字幕 ${i + 1}`;
+        const badges = [];
+        if (sub.is_ai) badges.push('AI');
+        if (sub.is_forced) badges.push('强制');
+        if (sub.kind === 'ass') badges.push('ASS');
+        else if (sub.kind === 'pgs') badges.push('PGS');
+        return `
+          <div class="player-settings-item" data-sub-index="${i}" onclick="Player.selectSubtitle(${i})">
+            <span class="item-label">${label}</span>
+            <span class="item-info">${badges.join(' · ')}</span>
+            <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
+          </div>
+        `;
+      }).join('');
+      if (!subs.length) html = '<div style="padding:20px;text-align:center;color:rgba(255,255,255,0.4);font-size:13px">无可用字幕</div>';
+      content.innerHTML = html;
+    }
+
+    else if (tabName === 'audio') {
+      const tracks = decision.audio_tracks || [];
+      const currentRef = decision.audio?.track_ref;
+      let html = tracks.map(t => {
+        const label = t.language || `音轨 ${t.ref}`;
+        const info = [t.codec, t.channels ? t.channels + 'ch' : ''].filter(Boolean).join(' · ');
+        return `
+          <div class="player-settings-item ${t.ref === currentRef ? 'active' : ''}" onclick="Player.selectAudio('${t.ref}')">
+            <span class="item-label">${label}${t.is_default ? ' (默认)' : ''}</span>
+            <span class="item-info">${info}</span>
+            <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
+          </div>
+        `;
+      }).join('');
+      if (!tracks.length) html = '<div style="padding:20px;text-align:center;color:rgba(255,255,255,0.4);font-size:13px">无可用音轨</div>';
+      content.innerHTML = html;
+    }
+
+    else if (tabName === 'quality') {
+      const source = session?.source || {};
+      const video = decision.video || {};
+      const tier = decision.tier;
+      const html = `
+        <div class="player-settings-item active">
+          <span class="item-label">自动（推荐）</span>
+          <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
+        </div>
+        <div style="padding:12px 16px;border-top:1px solid rgba(255,255,255,0.06)">
+          <div style="font-size:11px;color:rgba(255,255,255,0.35);margin-bottom:8px">当前画质信息</div>
+          ${source.resolution ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:4px">源：${source.resolution} · ${source.video_codec || ''} · ${source.hdr || ''}</div>` : ''}
+          ${video.height ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:4px">输出：${video.height}p${video.action === 'copy' ? ' (直通)' : ' (转码)'}</div>` : ''}
+          ${tier != null ? `<div style="font-size:12px;color:rgba(255,255,255,0.6)">档位：${tier}</div>` : ''}
+          ${source.bit_rate ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-top:4px">码率：${(source.bit_rate / 1000000).toFixed(1)} Mbps</div>` : ''}
+        </div>
+      `;
+      content.innerHTML = html;
+    }
+
+    else if (tabName === 'speed') {
+      const speeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
+      const current = this.video?.playbackRate || 1;
+      content.innerHTML = speeds.map(s => `
+        <div class="player-settings-item ${s === current ? 'active' : ''}" onclick="Player.setSpeed(${s})">
+          <span class="item-label">${s}x${s === 1 ? ' (正常)' : ''}</span>
+          <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
+        </div>
+      `).join('');
+    }
+  },
+
+  selectSubtitle(index) {
+    if (!this.video) return;
+    // 禁用所有字幕轨
+    for (let i = 0; i < this.video.textTracks.length; i++) {
+      this.video.textTracks[i].mode = 'disabled';
+    }
+    // 启用选中轨
+    if (index >= 0 && index < this.video.textTracks.length) {
+      this.video.textTracks[index].mode = 'showing';
+    }
+    // 更新选中态
+    document.querySelectorAll('#playerSettingsContent .player-settings-item').forEach(el => {
+      el.classList.toggle('active', parseInt(el.dataset.subIndex) === index);
+    });
+  },
+
+  selectAudio(ref) {
+    // HTML5 video 不支持动态音轨切换（多音轨文件）
+    // 对于 HLS.js 可以通过 audioTracks 切换
+    if (this.hls && this.hls.audioTracks) {
+      const idx = this.hls.audioTracks.findIndex(t => t.id === ref || t.name === ref);
+      if (idx >= 0) this.hls.audioTrack = idx;
+    }
+    // 更新选中态
+    document.querySelectorAll('#playerSettingsContent .player-settings-item').forEach(el => {
+      el.classList.remove('active');
+    });
+    event?.target?.closest('.player-settings-item')?.classList.add('active');
+    this.hideSettings();
+  },
+
+  setSpeed(rate) {
+    if (this.video) this.video.playbackRate = rate;
+    const label = document.getElementById('speedLabel');
+    if (label) label.textContent = rate + 'x';
+    document.querySelectorAll('.player-speed-option').forEach(o => {
+      o.classList.toggle('active', parseFloat(o.dataset.speed) === rate);
+    });
+    this.hideSettings();
+    this.hideSpeedPanel();
+  },
+
+  // ===== 跳过片头/片尾 =====
+  currentSegments: [],
+  currentSkipIndex: -1,
+
+  initSegments(segments) {
+    this.currentSegments = segments || [];
+    this.currentSkipIndex = -1;
+    const btn = document.getElementById('playerSkipBtn');
+    if (btn) btn.hidden = true;
+  },
+
+  checkSegments() {
+    if (!this.video || !this.currentSegments.length) return;
+    const curMs = this.video.currentTime * 1000;
+    const btn = document.getElementById('playerSkipBtn');
+    if (!btn) return;
+
+    let showBtn = false;
+    for (let i = 0; i < this.currentSegments.length; i++) {
+      const seg = this.currentSegments[i];
+      if (curMs >= seg.start_ms && curMs < seg.end_ms) {
+        showBtn = true;
+        this.currentSkipIndex = i;
+        btn.textContent = seg.type === 'intro' ? '跳过片头' : seg.type === 'outro' ? '跳过片尾' : '跳过此段';
+        break;
+      }
+    }
+    btn.hidden = !showBtn;
+  },
+
+  skipSegment() {
+    if (this.currentSkipIndex < 0 || !this.video) return;
+    const seg = this.currentSegments[this.currentSkipIndex];
+    if (seg) {
+      this.video.currentTime = seg.end_ms / 1000 + 0.5;
+    }
+    const btn = document.getElementById('playerSkipBtn');
+    if (btn) btn.hidden = true;
+    this.currentSkipIndex = -1;
+  },
+
+  // ===== 章节标记 =====
+  renderChapters(chapters) {
+    const seek = document.getElementById('playerSeek');
+    if (!seek || !chapters?.length) return;
+    // 清除旧的章节标记
+    seek.querySelectorAll('.player-chapter-mark').forEach(el => el.remove());
+    const dur = this.video?.duration;
+    if (!dur) return;
+    chapters.forEach(ch => {
+      const pct = (ch.start_ms / 1000 / dur) * 100;
+      if (pct < 0 || pct > 100) return;
+      const mark = document.createElement('div');
+      mark.className = 'player-chapter-mark';
+      mark.style.left = pct + '%';
+      mark.title = ch.title || '';
+      seek.appendChild(mark);
+    });
+  },
+
   // 打开播放器并加载流
-  open(title, streamUrl, subtitles, startMs) {
+  open(title, streamUrl, subtitles, startMs, sessionData) {
     const view = document.getElementById('playerView');
     const titleEl = document.getElementById('playerTitle');
     const loading = document.getElementById('playerLoading');
@@ -131,6 +411,11 @@ const Player = {
     if (loadingText) loadingText.textContent = '正在加载...';
 
     view.hidden = false;
+    this.sessionData = sessionData || null;
+
+    // 初始化片段/章节
+    this.initSegments(sessionData?.segments);
+    // 渲染字幕轨信息到 settings（更新可用状态）
 
     // 清理旧的 HLS 实例
     if (this.hls) { this.hls.destroy(); this.hls = null; }
