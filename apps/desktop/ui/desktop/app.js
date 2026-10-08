@@ -142,6 +142,23 @@ const App = {
     document.getElementById('btnClose')?.addEventListener('click', () => {
       if (window.__TAURI__) window.__TAURI__.window.getCurrentWindow().close();
     });
+
+    // 键盘快捷键
+    document.addEventListener('keydown', (e) => {
+      // Esc: 从详情页返回
+      if (e.key === 'Escape') {
+        if (this.currentPage === 'detail') {
+          e.preventDefault();
+          this.navigate('home');
+        }
+      }
+      // Ctrl+F: 聚焦搜索框
+      if (e.key === 'f' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        searchInput.focus();
+        searchInput.select();
+      }
+    });
   },
 
   async loadSidebarData() {
@@ -252,21 +269,27 @@ const App = {
         API.listLibraryItems(this.libraries[0]?.id, { limit: 12, sort: 'added_at', order: 'desc' }).catch(() => []),
         API.listLibraryItems(this.libraries[0]?.id, { limit: 12, sort: 'rating', order: 'desc' }).catch(() => []),
         API.listLibraryItems(this.libraries[0]?.id, { limit: 12, sort: 'release_date', order: 'desc' }).catch(() => []),
+        // 继续观看：有进度的条目
+        API.listLibraryItems(this.libraries[0]?.id, { limit: 20, sort: 'last_played', order: 'desc' }).catch(() => []),
       ]);
 
       const unwrap = (r) => this.unwrapItems(r);
       const allItems = unwrap(shelves[0]);
       const topItems = unwrap(shelves[1]);
       const newItems = unwrap(shelves[2]);
+      const continueItems = unwrap(shelves[3]).filter(i => i.progress_percent > 0 && i.progress_percent < 95);
 
       // 选一部高分影片做英雄横幅
       const heroItem = topItems[0] || allItems[0];
 
-      const shelfData = [
+      const shelfData = [];
+      if (continueItems.length) shelfData.push({ title: '继续观看', items: continueItems });
+      shelfData.push(
         { title: '最近添加', items: allItems },
         { title: '高分精选', items: topItems },
         { title: '最新上映', items: newItems },
-      ].filter(s => s.items && s.items.length > 0);
+      );
+      const validShelves = shelfData.filter(s => s.items && s.items.length > 0);
 
       if (shelfData.length === 0) {
         container.innerHTML = '<div class="page-loading"><div style="color:var(--text-secondary)">暂无内容</div></div>';
@@ -299,14 +322,22 @@ const App = {
       ` : '';
 
       const defaultLibId = this.libraries[0]?.id;
-      container.innerHTML = heroHtml + shelfData.map(shelf => `
+      container.innerHTML = heroHtml + validShelves.map(shelf => `
         <div class="shelf-section">
           <div class="shelf-header" data-shelf-title="${shelf.title}">
             <h2 class="shelf-title">${shelf.title}</h2>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-secondary)"><polyline points="9 18 15 12 9 6"/></svg>
           </div>
-          <div class="shelf-row">
-            ${shelf.items.map(item => this.posterCard(item, defaultLibId)).join('')}
+          <div class="shelf-wrapper">
+            <button class="shelf-arrow shelf-arrow-left" data-dir="-1" aria-label="向左">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+            </button>
+            <div class="shelf-row">
+              ${shelf.items.map(item => this.posterCard(item, defaultLibId)).join('')}
+            </div>
+            <button class="shelf-arrow shelf-arrow-right" data-dir="1" aria-label="向右">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+            </button>
           </div>
         </div>
       `).join('');
@@ -325,6 +356,17 @@ const App = {
       }
 
       this.bindPosterCards(container);
+
+      // 横排滚动箭头
+      container.querySelectorAll('.shelf-arrow').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const row = btn.closest('.shelf-wrapper')?.querySelector('.shelf-row');
+          if (row) {
+            const dir = parseInt(btn.dataset.dir);
+            row.scrollBy({ left: dir * row.clientWidth * 0.75, behavior: 'smooth' });
+          }
+        });
+      });
     } catch (e) {
       console.error('Render home error:', e);
       container.innerHTML = `<div class="page-loading"><div style="color:var(--text-secondary)">加载失败: ${e.message || e}</div></div>`;
@@ -356,6 +398,7 @@ const App = {
         title: lib?.name || '媒体库',
         subtitle: `${items.length} 个项目`,
         libraryId,
+        showToolbar: true,
       });
     } catch (e) {
       console.error('Render library error:', e);
@@ -429,13 +472,18 @@ const App = {
             <h1 class="page-title">搜索结果</h1>
             <span class="page-subtitle">"${query}"</span>
           </div>
-          <div class="page-loading"><div style="color:var(--text-secondary)">没有找到匹配的内容</div></div>
+          <div class="empty-state">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" style="opacity:0.3"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <p>没有找到与 "${query}" 匹配的内容</p>
+            <span>试试其他关键词</span>
+          </div>
         `;
         return;
       }
       this.renderPosterWall(container, items, {
         title: `"${query}" 的搜索结果`,
         subtitle: `${items.length} 个结果`,
+        showToolbar: true,
       });
     } catch (e) {
       container.innerHTML = '<div class="page-loading"><div style="color:var(--text-secondary)">搜索失败: ' + (e.message || e) + '</div></div>';
@@ -464,6 +512,9 @@ const App = {
           <div class="detail-hero-bg">
             <img src="${resolveUrl(backdropRaw)}" alt="" style="opacity:0;transition:opacity 0.4s" data-raw="${backdropRaw}" onload="this.style.opacity='1'" onerror="imgFallback(this, this.dataset.raw)">
           </div>
+          <button class="detail-back-btn" id="btnBack" title="返回 (Esc)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+          </button>
           <div class="detail-hero-info">
             <h1 class="detail-title">${info.title}</h1>
             <div class="detail-meta">
@@ -561,6 +612,10 @@ const App = {
       }
 
       // 绑定事件
+      document.getElementById('btnBack')?.addEventListener('click', () => {
+        this.navigate('home');
+      });
+
       document.getElementById('btnPlay')?.addEventListener('click', () => {
         this.startPlayback({ ...info, id: info.media_item_id, title: info.title });
       });
@@ -631,19 +686,56 @@ const App = {
   },
 
   // ===== 海报墙渲染 =====
-  renderPosterWall(container, items, { title, subtitle, libraryId }) {
+  renderPosterWall(container, items, { title, subtitle, libraryId, showToolbar }) {
+    const toolbarHtml = showToolbar ? `
+      <div class="wall-toolbar">
+        <div class="wall-toolbar-left">
+          <button class="wall-sort-btn active" data-sort="default">默认</button>
+          <button class="wall-sort-btn" data-sort="title">标题</button>
+          <button class="wall-sort-btn" data-sort="year">年份</button>
+          <button class="wall-sort-btn" data-sort="rating">评分</button>
+        </div>
+        <div class="wall-toolbar-right">
+          <button class="wall-view-btn active" data-view="grid" title="网格">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+          </button>
+        </div>
+      </div>
+    ` : '';
     container.innerHTML = `
       <div class="page-header">
         <h1 class="page-title">${title}</h1>
         <span class="page-subtitle">${subtitle}</span>
       </div>
+      ${toolbarHtml}
       <div class="poster-wall">
-        <div class="poster-grid">
+        <div class="poster-grid" id="posterGrid">
           ${items.map(item => this.posterCard(item, libraryId)).join('')}
         </div>
       </div>
     `;
     this.bindPosterCards(container);
+    if (showToolbar) this.bindWallToolbar(container, items, libraryId);
+  },
+
+  // 海报墙排序工具栏
+  bindWallToolbar(container, items, libraryId) {
+    container.querySelectorAll('.wall-sort-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        container.querySelectorAll('.wall-sort-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        const sort = btn.dataset.sort;
+        const sorted = [...items];
+        if (sort === 'title') sorted.sort((a, b) => (a.title || '').localeCompare(b.title || '', 'zh'));
+        else if (sort === 'year') sorted.sort((a, b) => (b.year || 0) - (a.year || 0));
+        else if (sort === 'rating') sorted.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+        const grid = container.querySelector('#posterGrid');
+        if (grid) {
+          grid.innerHTML = sorted.map(item => this.posterCard(item, libraryId)).join('');
+          this.bindPosterCards(container);
+        }
+      });
+    });
   },
 
   posterCard(item, defaultLibId) {
@@ -699,44 +791,28 @@ const App = {
         <div class="settings-card">
           <h3>关于</h3>
           <p>MovieClaw Desktop</p>
-          <p style="color:var(--text-secondary);margin-top:4px;">版本 0.2.104</p>
+          <p style="color:var(--text-secondary);margin-top:4px;">版本 0.2.106</p>
         </div>
       </div>
     `;
   },
 
-  // ===== 播放 =====
+  // ===== 播放（内置 HTML5 播放器） =====
   async startPlayback(item) {
-    const overlay = document.getElementById('playerOverlay');
-    const statusEl = overlay.querySelector('.player-overlay-status');
-    const title = document.getElementById('playerTitle');
-    title.textContent = item.title || '正在播放...';
-    statusEl.textContent = '正在准备播放...';
-    overlay.hidden = false;
+    const loadingText = document.getElementById('playerLoadingText');
+    const loading = document.getElementById('playerLoading');
+    const playerView = document.getElementById('playerView');
 
-    // 20 秒超时兜底
-    const timeout = setTimeout(() => {
-      statusEl.textContent = '播放超时，请检查服务器连接';
-      setTimeout(() => { overlay.hidden = true; }, 3000);
-    }, 20000);
+    // 显示加载状态
+    playerView.hidden = false;
+    loading.hidden = false;
+    if (loadingText) loadingText.textContent = '正在获取播放链接...';
 
     try {
-      // 0. 检查 API 状态
-      statusEl.textContent = '正在检查 API 状态...';
-      if (!API.baseUrl) {
-        throw new Error('未配置服务器地址，请重新连接');
-      }
-      console.log('API base URL:', API.baseUrl);
-      console.log('Tauri available:', !!window.__TAURI__);
-      console.log('Tauri http available:', !!window.__TAURI__?.http?.fetch);
+      if (!API.baseUrl) throw new Error('未配置服务器地址');
 
-      // 1. 创建播放会话
-      statusEl.textContent = '正在获取播放链接...';
       const mediaId = item.media_item_id || item.id || item.mediaItemId;
-      if (!mediaId) {
-        throw new Error('无效的媒体项 ID');
-      }
-      console.log('Media item ID:', mediaId);
+      if (!mediaId) throw new Error('无效的媒体项 ID');
 
       const body = {
         media_item_id: mediaId,
@@ -746,9 +822,9 @@ const App = {
           containers: ['mp4', 'hls-fmp4'],
           video: [],
           audio: [],
-          mse: 'none',
+          mse: 'managed',
           is_mobile: false,
-          native_hls: false,
+          native_hls: true,
         },
         client: 'web',
         attempt_id: Date.now().toString(36) + Math.random().toString(36).slice(2),
@@ -756,67 +832,39 @@ const App = {
       if (item.seasonNumber != null) body.season_number = item.seasonNumber;
       if (item.episodeNumber != null) body.episode_number = item.episodeNumber;
 
-      console.log('Playback request body:', JSON.stringify(body));
-      const sessionResp = await API.request('/playback/sessions', {
-        method: 'POST',
-        body,
-      });
-      console.log('Playback response:', sessionResp);
-
+      const sessionResp = await API.request('/playback/sessions', { method: 'POST', body });
       const session = sessionResp?.data || sessionResp;
 
-      // 2. 检查决策
       if (session?.decision && session.decision.outcome !== 'plan') {
         throw new Error('播放不可用: ' + (session.decision.reason || session.decision.outcome));
       }
+      if (!session?.stream_url) throw new Error('服务器未返回播放地址');
 
-      if (!session?.stream_url) {
-        throw new Error('服务器未返回播放地址 (stream_url)');
-      }
-
-      // 3. 处理流地址
+      // 处理流地址
       const origin = API.baseUrl;
       const streamUrl = session.stream_url.startsWith('http')
         ? session.stream_url
         : origin + (session.stream_url.startsWith('/api/') ? session.stream_url : '/api/v1' + (session.stream_url.startsWith('/') ? session.stream_url : '/' + session.stream_url));
-      console.log('Stream URL:', streamUrl);
 
       const subtitleUrls = (session.subtitle_urls || []).map(s =>
         s.startsWith('http') ? s : origin + (s.startsWith('/api/') ? s : '/api/v1' + (s.startsWith('/') ? s : '/' + s))
       );
 
-      // 4. 启动 mpv
-      statusEl.textContent = '正在启动播放器...';
       const isSessionTimeline = session.session_id && session.timeline === 'session';
-      const mpvStartMs = isSessionTimeline ? null : (session.start_ms > 0 ? session.start_ms : null);
+      const startMs = isSessionTimeline ? null : (session.start_ms > 0 ? session.start_ms : null);
 
-      if (!window.__TAURI__) {
-        throw new Error('Tauri API 不可用');
-      }
-
-      const result = await window.__TAURI__.core.invoke('launch_player', {
-        params: {
-          stream_url: streamUrl,
-          subtitle_urls: subtitleUrls.length > 0 ? subtitleUrls : null,
-          start_ms: mpvStartMs,
-          title: item.title || 'MovieClaw',
-        },
-      });
-      console.log('Player launched:', result);
-      statusEl.textContent = '播放器已启动';
+      // 打开内置播放器
+      loading.hidden = true;
+      Player.open(item.title || 'MovieClaw', streamUrl, subtitleUrls, startMs);
 
     } catch (e) {
       console.error('Playback error:', e);
-      const msg = e.message || String(e);
-      statusEl.textContent = '播放失败: ' + msg;
-      clearTimeout(timeout);
-      // 显示详细错误 8 秒
-      setTimeout(() => { overlay.hidden = true; }, 8000);
-      return;
+      if (loadingText) loadingText.textContent = '播放失败: ' + (e.message || e);
+      setTimeout(() => {
+        playerView.hidden = true;
+        loading.hidden = true;
+      }, 5000);
     }
-
-    clearTimeout(timeout);
-    setTimeout(() => { overlay.hidden = true; }, 1500);
   },
 };
 
