@@ -225,6 +225,7 @@ const Player = {
     this.video = document.getElementById('playerVideo');
     if (!this.video) return;
     this.initSettings();
+    this.initInfoPanel();
 
     // 播放/暂停
     document.getElementById('btnPlayPause')?.addEventListener('click', () => this.togglePlay());
@@ -384,7 +385,12 @@ const Player = {
         case 'ArrowDown': e.preventDefault(); this.video.volume = Math.max(0, this.video.volume - 0.1); this.updateVolumeIcon(); break;
         case 'm': this.toggleMute(); break;
         case 'f': this.toggleFullscreen(); break;
-        case 'Escape': if (!document.fullscreenElement) this.close(); break;
+        case 'Escape':
+          if (document.fullscreenElement) break;
+          // 诊断面板开着时 Esc 先关面板，再关播放器
+          if (!document.getElementById('playerInfoPanel')?.hidden) { this.hideInfoPanel(); break; }
+          this.close();
+          break;
       }
     });
   },
@@ -473,6 +479,219 @@ const Player = {
   hideSpeedPanel() {
     const panel = document.getElementById('playerSpeedPanel');
     if (panel) panel.hidden = true;
+  },
+
+  // ===== 实时速度徽标 + 播放诊断面板（右键打开）=====
+  // 口径对齐 web 端（lib/player/bandwidth.ts 的 LoadingMeter 与
+  // components/player/diagnostics-panel.tsx 的「源 → 处理」层次）
+
+  initInfoPanel() {
+    // 播放区域内右键 = 诊断面板；拦截掉 WebView 默认菜单
+    document.getElementById('playerView')?.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      this.toggleInfoPanel();
+    });
+    document.getElementById('playerInfoClose')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.hideInfoPanel();
+    });
+    document.getElementById('playerSpeedBadge')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.toggleInfoPanel();
+    });
+  },
+
+  toggleInfoPanel() {
+    const panel = document.getElementById('playerInfoPanel');
+    if (!panel) return;
+    if (panel.hidden) {
+      panel.hidden = false;
+      this._renderInfoPanel();
+      clearInterval(this._infoTimer);
+      this._infoTimer = setInterval(() => this._renderInfoPanel(), 500);
+    } else {
+      this.hideInfoPanel();
+    }
+  },
+
+  hideInfoPanel() {
+    const panel = document.getElementById('playerInfoPanel');
+    if (panel) panel.hidden = true;
+    clearInterval(this._infoTimer);
+    this._infoTimer = null;
+  },
+
+  // 分片字节：速度徽标与面板的数据源。ProxyHlsLoader 一次性交付整片，字节在
+  // FRAG_LOADED 一步到位；每片另记「实收字节/耗时」作为带宽峰值样本
+  attachNetHooks(hls) {
+    hls.on(Hls.Events.FRAG_LOADED, (_, data) => {
+      const n = this._net;
+      const st = data && data.frag && data.frag.stats;
+      if (!n || !st || !st.loaded) return;
+      n.bytes += st.loaded;
+      const dur = st.loading && st.loading.end > st.loading.start ? st.loading.end - st.loading.start : 0;
+      if (dur > 0) {
+        n.frags.push({ at: performance.now(), bps: (st.loaded * 8 * 1000) / dur });
+        if (n.frags.length > 60) n.frags.splice(0, n.frags.length - 60);
+      }
+    });
+  },
+
+  startNetMeter() {
+    this.stopNetMeter();
+    const badge = document.getElementById('playerSpeedBadge');
+    if (badge) { badge.hidden = false; badge.textContent = '↓ —'; }
+    this._netTimer = setInterval(() => this._tickNetMeter(), 500);
+  },
+
+  stopNetMeter() {
+    clearInterval(this._netTimer);
+    this._netTimer = null;
+    const badge = document.getElementById('playerSpeedBadge');
+    if (badge) badge.hidden = true;
+  },
+
+  _tickNetMeter() {
+    const n = this._net;
+    if (!n) return;
+    const now = performance.now();
+    n.points.push({ at: now, bytes: n.bytes });
+    // 窗口起点：至少早 1.75s（2s 窗口留 250ms 给计时器抖动）的最后一个点；
+    // 起播不满窗口时用最早的点，但至少隔 900ms——sampleLoadingMeter 同款逻辑，
+    // 计数倒退（换了取流对象）时从头量，不许出现负速度
+    const last = n.points[n.points.length - 2];
+    if (last && n.bytes < last.bytes) n.points = [{ at: now, bytes: n.bytes }];
+    const cutoff = now - 1750;
+    let ref = -1;
+    for (let i = n.points.length - 1; i >= 0; i--) {
+      if (n.points[i].at <= cutoff) { ref = i; break; }
+    }
+    if (ref < 0 && now - n.points[0].at >= 900) ref = 0;
+    if (ref >= 0) {
+      const base = n.points[ref];
+      const dt = now - base.at;
+      n.bps = dt > 0 ? ((n.bytes - base.bytes) * 8 * 1000) / dt : null;
+      n.points = n.points.slice(ref);
+    }
+    const badge = document.getElementById('playerSpeedBadge');
+    if (badge) {
+      badge.hidden = false;
+      badge.textContent = '↓ ' + (this.formatNetSpeed(n.bps) || '—');
+    }
+    if (!document.getElementById('playerInfoPanel')?.hidden) this._renderInfoPanel();
+  },
+
+  // bps → 「3.2 MB/s」：1024 进位，MB/s 而非 Mbps（用户对网速的直觉来自下载条，
+  // 换 Mbps 会让人以为快了八倍）——同 web bandwidth.ts formatBandwidth
+  formatNetSpeed(bps) {
+    if (bps == null || !isFinite(bps) || bps < 0) return null;
+    const bytesPerSec = bps / 8;
+    const mb = bytesPerSec / (1024 * 1024);
+    if (mb >= 1) return mb.toFixed(1) + ' MB/s';
+    const kb = bytesPerSec / 1024;
+    if (kb < 1) return '0 KB/s';
+    return Math.round(kb) + ' KB/s';
+  },
+
+  _renderInfoPanel() {
+    const body = document.getElementById('playerInfoBody');
+    if (!body) return;
+    const s = this.sessionData || {};
+    const d = s.decision || {};
+    const src = s.source || {};
+    const v = this.video;
+    const n = this._net || {};
+    const mbps = (bps) => (bps ? (bps / 1e6).toFixed(bps >= 1e7 ? 0 : 1) + ' Mbps' : null);
+    const TIER = { 0: '原文件直出', 1: '换壳直通', 2: '换壳 + 转音轨', 3: '硬件转码', 4: '软件转码' };
+    const HW = { videotoolbox: 'VideoToolbox', vaapi: 'VAAPI', qsv: 'Intel QSV', nvenc: 'NVENC' };
+    const READY = ['无媒体', '元数据', '可播放', '可播放且有数据', '可持续播放'];
+    const NETST = ['空闲', '加载中', '已加载', '无资源'];
+    const sec = (title, lines) => `<div class="player-info-sec"><div class="sec-title">${title}</div>${lines.filter(Boolean).join('')}</div>`;
+    const srcLine = (t) => (t ? `<div class="src">${t}</div>` : '');
+    const actLine = (t, alert) => (t ? `<div class="act${alert ? ' alert' : ''}">${t}</div>` : '');
+
+    // —— 流媒体：源容器 → 处理方式 ——
+    const container = (src.container || d.container || '未知').toUpperCase();
+    const streamTarget = d.tier === 0 ? '原文件直出' : `HLS · fMP4（${TIER[d.tier] ?? '未知档位'}）`;
+
+    // —— 视频：源规格 → 这次怎么处理的 ——
+    const fps = src.frame_rate ? `${Number(src.frame_rate.toFixed(3))} fps` : null;
+    const videoSrc = [src.resolution, src.video_codec && src.video_codec.toUpperCase(), src.hdr, fps].filter(Boolean).join(' · ');
+    let videoAction = null;
+    if (d.video) {
+      videoAction = d.video.action === 'copy' ? '直通'
+        : `转码（${(d.video.codec || 'h264').toUpperCase()}${d.video.height ? ` ${d.video.height}p` : ''} · ${s.hw_backend ? (HW[s.hw_backend] || s.hw_backend) : '软件'}${d.video.tone_map ? ' · HDR 转 SDR' : ''}${d.video.bitrate_cap_bps ? ` · 按线路限 ${mbps(d.video.bitrate_cap_bps)}` : ''}）`;
+    }
+    // 实测行：输出分辨率 + 掉帧（掉帧率 >2% 标红：能解但解不动，该降档了）
+    let perfLine = null;
+    let dropAlert = false;
+    if (v && v.videoWidth) {
+      const bits = [`输出 ${v.videoWidth}×${v.videoHeight}`];
+      try {
+        const q = v.getVideoPlaybackQuality && v.getVideoPlaybackQuality();
+        if (q) {
+          // 标准属性名是 droppedVideoFrames（droppedFrames 不存在，会渲染成 undefined）
+          bits.push(`掉帧 ${q.droppedVideoFrames ?? 0} / ${q.totalVideoFrames ?? 0}`);
+          dropAlert = (q.totalVideoFrames ?? 0) > 0 && (q.droppedVideoFrames ?? 0) / q.totalVideoFrames > 0.02;
+        }
+      } catch (_) { /* 环境无 playback quality API 时只报分辨率 */ }
+      perfLine = bits.join(' · ');
+    }
+
+    // —— 音频：这次放的那条轨 → 处理 ——
+    const activeTrack = (d.audio_tracks || []).find((t) => t.ref === (d.audio && d.audio.track_ref));
+    const audioSrc = activeTrack
+      ? [activeTrack.language, activeTrack.codec && activeTrack.codec.toUpperCase(), activeTrack.channels ? `${activeTrack.channels} 声道` : null]
+          .filter(Boolean).join(' ') + (activeTrack.is_default ? '（默认）' : '')
+      : null;
+    let audioAction = null;
+    if (d.audio) {
+      audioAction = d.audio.action === 'copy' ? '直通'
+        : `转码（${(d.audio.codec || 'aac').toUpperCase()}${d.audio.channels ? ` ${d.audio.channels} 声道` : ''}${d.audio.downmix ? ' · 已降混' : ''}）`;
+    }
+
+    // —— 传输：此刻的实测读数 ——
+    const trans = [];
+    let peak = null;
+    if (n.frags && n.frags.length) {
+      const recent = n.frags.filter((f) => performance.now() - f.at < 30000);
+      if (recent.length) peak = Math.max(...recent.map((f) => f.bps));
+    }
+    trans.push(['↓ ' + (this.formatNetSpeed(n.bps) || '—'), peak ? `带宽峰值 ${this.formatNetSpeed(peak)}` : null].filter(Boolean).join(' · '));
+    let ahead = 0;
+    if (v) {
+      for (let i = 0; i < v.buffered.length; i++) {
+        if (v.currentTime >= v.buffered.start(i) - 0.15 && v.currentTime <= v.buffered.end(i)) {
+          ahead = v.buffered.end(i) - v.currentTime;
+          break;
+        }
+      }
+      trans.push(`缓冲 ${ahead.toFixed(1)} 秒 · 播放头 ${v.currentTime.toFixed(1)} 秒${isFinite(v.duration) && v.duration > 0 ? ` / ${v.duration.toFixed(0)} 秒` : ''}`);
+    }
+    const hls = this.hls;
+    if (hls && hls.levels && hls.currentLevel >= 0 && hls.levels[hls.currentLevel]) {
+      const lv = hls.levels[hls.currentLevel];
+      // 服务端 fMP4 playlist 不带 RESOLUTION/BANDWIDTH（实测 attrs 为空）：有元数据才报，
+      // 单档又没元数据时整行省略——分辨率在「输出」行、处理方式在视频节已经摆了
+      const bits = [lv.height ? `${lv.height}p` : null, lv.bitrate ? mbps(lv.bitrate) : null].filter(Boolean);
+      if (bits.length || hls.levels.length > 1) {
+        trans.push(`档位 ${[...bits, hls.levels.length > 1 ? `${hls.levels.length} 档可选` : null].filter(Boolean).join(' · ')}`);
+      }
+      if (lv.details) trans.push(`播放列表 ${lv.details.live ? '直播流（边播边给）' : '点播（VOD）'}`);
+    }
+    if (v) trans.push(`${READY[v.readyState] ?? `readyState ${v.readyState}`} · ${NETST[v.networkState] ?? `networkState ${v.networkState}`} · ${v.paused ? '已暂停' : v.seeking ? '定位中' : '播放中'}`);
+    trans.push(`会话 ${s.session_id || '无（直出）'}`);
+
+    body.innerHTML = [
+      sec('流媒体', [srcLine([container, mbps(src.bit_rate)].filter(Boolean).join(' · ')), actLine(streamTarget),
+        d.degraded_from != null ? actLine('上一档播放失败，自动降档而来', true) : '']),
+      sec('视频', [srcLine(videoSrc), actLine(videoAction), perfLine ? `<div class="act${dropAlert ? ' alert' : ''}">${perfLine}</div>` : '']),
+      sec('音频', [srcLine(audioSrc), actLine(audioAction)]),
+      sec('传输', trans.map((t) => `<div>${t}</div>`)),
+    ].join('');
+
+    const reasonEl = document.getElementById('playerInfoReason');
+    if (reasonEl) reasonEl.textContent = d.reason || '';
   },
 
   renderSettingsTab(tabName) {
@@ -739,6 +958,8 @@ const Player = {
           });
           this.hls.loadSource(streamUrl);
           this.hls.attachMedia(this.video);
+          this.attachNetHooks(this.hls);
+          this.startNetMeter();
           this.hls.on(Hls.Events.MANIFEST_PARSED, () => {
             this.video.currentTime = currentTime;
             this.video.play().catch(() => {});
@@ -864,6 +1085,11 @@ const Player = {
     clearTimeout(this._stuckTimer);
     this._everPlayed = false;
 
+    // 实时速度：累计字节 + 2 秒滑动窗口（口径对齐 web bandwidth.ts 的 LoadingMeter）
+    this._net = { bytes: 0, points: [], bps: null, frags: [] };
+    this.hideInfoPanel();
+    this.stopNetMeter(); // 原生直链没有分片钩子，徽标保持隐藏，由 hls 分支的 startNetMeter 点亮
+
     const isHls = streamUrl.includes('.m3u8') || streamUrl.includes('/hls');
 
     if (isHls && window.Hls && Hls.isSupported()) {
@@ -890,6 +1116,8 @@ const Player = {
       });
       this.hls.loadSource(streamUrl);
       this.hls.attachMedia(this.video);
+      this.attachNetHooks(this.hls);
+      this.startNetMeter();
       this.hls.on(Hls.Events.MANIFEST_PARSED, () => {
         if (startMs) this.video.currentTime = startMs / 1000;
         this.video.play().catch(() => {});
@@ -961,6 +1189,8 @@ const Player = {
     this.stopProgressReporting();
     this.stopSessionPing();
     clearTimeout(this._stuckTimer);
+    this.stopNetMeter();
+    this.hideInfoPanel();
     // 通知服务端结束会话，立即释放直通/转码槽位（否则要等 180s 空闲回收，
     // 连播几部就把 4/4 槽位占满 → 后续播放全 503）
     if (this.sessionId) {

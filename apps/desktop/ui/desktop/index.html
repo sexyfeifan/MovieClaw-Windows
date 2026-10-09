@@ -96,6 +96,19 @@
     <div class="player-center-btn" id="playerCenterBtn">
       <svg width="48" height="48" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
     </div>
+    <!-- 实时速度徽标：独立于控制栏显隐（控制条淡出时也要能看速度），点击打开诊断面板 -->
+    <button id="playerSpeedBadge" class="player-speed-badge" hidden title="实时下载速度，点击查看播放信息">↓ —</button>
+    <!-- 播放诊断面板（右键切换）：源 → 处理 两层，信息层次对标 Emby（web 端 diagnostics-panel 同款） -->
+    <div class="player-info-panel" id="playerInfoPanel" hidden>
+      <div class="player-info-head">
+        <span>播放信息</span>
+        <button id="playerInfoClose" class="player-info-close" aria-label="关闭播放信息">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="player-info-body" id="playerInfoBody"></div>
+      <div class="player-info-reason" id="playerInfoReason"></div>
+    </div>
     <!-- 底部控制栏 -->
     <div class="player-controls" id="playerControls">
       <div class="player-seek" id="playerSeek">
