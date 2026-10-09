@@ -67,14 +67,13 @@ fn find_mpv() -> Option<String> {
             return Some(p);
         }
     }
-    // PATH
-    if let Ok(out) = Command::new("where").arg("mpv.exe").output() {
-        if out.status.success() {
-            if let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next() {
-                let line = line.trim();
-                if !line.is_empty() && std::path::Path::new(line).exists() {
-                    return Some(line.to_string());
-                }
+    // PATH — 直接扫文件系统，不 spawn `where`：GUI 进程里 spawn 控制台程序会新建
+    // conhost，实测 5.47s/次（起播白白多等 5 秒）；同机独立进程只要 83ms
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let p = dir.join("mpv.exe");
+            if p.is_file() {
+                return Some(p.to_string_lossy().to_string());
             }
         }
     }

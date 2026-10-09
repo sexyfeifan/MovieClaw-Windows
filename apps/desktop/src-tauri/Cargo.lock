@@ -2220,7 +2220,7 @@ dependencies = [
 
 [[package]]
 name = "movieclaw-desktop"
-version = "0.2.109"
+version = "0.2.110"
 dependencies = [
  "open",
  "raw-window-handle",

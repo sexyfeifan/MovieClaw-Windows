@@ -723,7 +723,20 @@ const Player = {
         if (this.hls) { this.hls.destroy(); this.hls = null; }
         const isHls = streamUrl.includes('.m3u8') || streamUrl.includes('/hls');
         if (isHls && window.Hls && Hls.isSupported()) {
-          this.hls = new Hls({ maxBufferLength: 30, loader: window.__TAURI__ ? ProxyHlsLoader : undefined });
+          this.hls = new Hls({
+            maxBufferLength: 60,
+            maxMaxBufferLength: 60,
+            // 与主路径一致：TTFB 盖过服务端 ensure_segment 30s 等待
+            fragLoadPolicy: {
+              default: {
+                maxTimeToFirstByteMs: 45000,
+                maxLoadTimeMs: 120000,
+                timeoutRetry: { maxNumRetry: 4, retryDelayMs: 0, maxRetryDelayMs: 0 },
+                errorRetry: { maxNumRetry: 6, retryDelayMs: 1000, maxRetryDelayMs: 8000 },
+              },
+            },
+            loader: window.__TAURI__ ? ProxyHlsLoader : undefined,
+          });
           this.hls.loadSource(streamUrl);
           this.hls.attachMedia(this.video);
           this.hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -855,9 +868,24 @@ const Player = {
 
     if (isHls && window.Hls && Hls.isSupported()) {
       this.hls = new Hls({
-        maxBufferLength: 30,
-        loader: window.__TAURI__ ? ProxyHlsLoader : undefined,
+        // 对齐 web 引擎（apps/web/lib/player/engine.ts）的起播配置
+        maxBufferLength: 60,
         maxMaxBufferLength: 60,
+        // 必须显式给起播位置，不能留默认(-1)：EVENT playlist（转码/重封装会话）
+        // 没有 ENDLIST，hls.js 当直播从「直播边缘」起播——续播时服务端已 burst
+        // 出几十秒就会从错误位置开播。会话相对制传 0（续播由服务端 -ss 决定，
+        // 流头即续播点）；非会话流传文件内续播秒数。
+        startPosition: startMs ? startMs / 1000 : 0,
+        // 分片超时要盖过服务端 ensure_segment 按需等待（最长 30s）：默认 20s
+        // TTFB 会在服务端即将给出分片前掐掉重发，慢转码场景反复空转
+        fragLoadPolicy: {
+          default: {
+            maxTimeToFirstByteMs: 45000,
+            maxLoadTimeMs: 120000,
+            timeoutRetry: { maxNumRetry: 4, retryDelayMs: 0, maxRetryDelayMs: 0 },
+            errorRetry: { maxNumRetry: 6, retryDelayMs: 1000, maxRetryDelayMs: 8000 },
+          },
+        },
         loader: window.__TAURI__ ? ProxyHlsLoader : undefined,
       });
       this.hls.loadSource(streamUrl);
