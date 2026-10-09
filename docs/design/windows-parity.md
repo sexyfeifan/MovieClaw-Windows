@@ -137,7 +137,7 @@ Windows 现状：HTML5 `<video>` + hls.js（`ProxyHlsLoader` 走 Rust `/__stream
 | 8.12 | 音频：E-AC-3 JOC Atmos 直通能力声明、ac3/flac/alac/aac/mp3；native 音轨就地切换 / 流媒体换会话 | HTML5 无法直通；mpv 路径 d3d11va 硬解可直通 | 依赖 8.1/8.13 |
 | 8.13 | HDR：`NSScreen` EDR → `hdrPassthrough`；色调映射交系统 | `hdr_passthrough: true` 写死；需 DXGI HDR 查询 | 缺真值探测 |
 | 8.14 | 原盘：ISO 字节流 / 原盘目录（`playbackFileDiscList`） | 无 | 缺 |
-| 8.15 | — | mpv IPC stub（`send_mpv_command_embedded`）、`resize_embedded_player` 无人调用、mpv 路径不设 sessionId | 自债（mpv 路径不可控） |
+| 8.15 | — | ~~mpv IPC stub、`resize_embedded_player` 无人调用~~（已清）；mpv 路径仍不设 sessionId | 自债（mpv 路径不回抛进度） |
 
 ## 9. macOS-only → Windows 对等实现（平台层）
 
@@ -159,8 +159,8 @@ Windows 现状：HTML5 `<video>` + hls.js（`ProxyHlsLoader` 走 Rust `/__stream
 
 ## 10. Windows 自身代码未完成项（自债，非对齐差距）
 
-1. `send_mpv_command_embedded` 空桩（无 seek/音量/暂停控制）
-2. `resize_embedded_player`/`set_embedded_player_visible` 注册未调用（mpv 窗口不跟随缩放/全屏）
+1. ~~`send_mpv_command_embedded` 空桩（无 seek/音量/暂停控制）~~ → 已清（1c2bce0b，真 JSON IPC）
+2. ~~`resize_embedded_player`/`set_embedded_player_visible` 注册未调用~~ → 已清（1c2bce0b，resize/fullscreenchange 已挂）
 3. `update_available`/`update_check_result` 事件无监听（更新提示永不出现）
 4. 字幕延迟仅 UI 未应用渲染
 5. bootstrap 首启 / removeAccount 无 UI
@@ -173,14 +173,15 @@ Windows 现状：HTML5 `<video>` + hls.js（`ProxyHlsLoader` 走 Rust `/__stream
 12. 播放结束回抛缺失（Mac `.playbackStopReported` 链路）
 13. `app.js` 会话后 `start_ms` 归并把显式 0 塌成 null（player.js 已在边界兜底，根因未清）
 14. quality-switch HLS 无 ERROR handler；embedded-mpv 成功路径不设 sessionId；updater.rs 字节切片潜在 panic
+15. mpv EOF 处理：`--keep-open=no` 到尾卸载文件、`time-pos`/`eof-reached`/`duration` 全变 unavailable，近尾 seek 后 UI 会卡住不动。另：网络 MKV 重定位期间这几个属性短暂 unavailable，UI 靠乐观值 + 轮询纠正（不误报，但 seek 落定前进度条不动）
 
 ---
 
 ## 分期实施建议
 
 **P0 — 播放性能对等**（用户核心诉求「同等或接近的播放性能」）
-1. 能力上报分级：mpv/原文件路径报 universal → tier-0 原文件直出（8.1）→ 验证：4K DV 片诊断面板 tier=原文件直出
-2. mpv IPC 补全 + 窗口跟随（10.1/10.2）→ 验证：mpv 路径可暂停/seek/音量
+1. ✓ 能力上报分级：mpv/原文件路径报 universal → tier-0 原文件直出（8.1）→ 验证：4K DV 片诊断面板 tier=原文件直出 —— 已达成（9c098ead）
+2. ✓ mpv IPC 补全 + 窗口跟随（10.1/10.2）→ 验证：mpv 路径可暂停/seek/音量 —— 已达成（1c2bce0b）
 3. 详情页 `PlaybackPreconnect.warm` + 起播链提前建控（8.2）→ 验证：起播耗时基准对比
 4. 看门狗闭环：丢帧/卡顿触发降档 + 画质建议卡（8.4、7.8）→ 验证：构造卡顿场景出卡片
 
