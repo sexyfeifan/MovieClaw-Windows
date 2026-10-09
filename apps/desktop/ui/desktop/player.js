@@ -203,6 +203,28 @@ async function getCapabilitySnapshot() {
 }
 window.getCapabilitySnapshot = getCapabilitySnapshot;
 
+// ===== 全解码引擎（嵌入式 mpv）的能力申报（对齐 macOS PlayerCapability.native()）=====
+// mpv 直读原文件、硬解不了的编码由它本机软解，申报 universal：服务端直接给档 0
+// 原文件直连，不再为一路用不上的换封装/转码起 ffmpeg（NAS 冷启动白花 1.6 秒）。
+// 编码/容器清单只在服务端不认 universal 时起作用（老服务端），按 mpv 实际能解的报。
+// 音频只报「能原样装进 fMP4 分片」的编码（服务端 FMP4_COPY_AUDIO_CODECS）：报了
+// TrueHD，老服务端会计划「换壳成 HLS fMP4 并原样拷 TrueHD」，ffmpeg 的 MP4 封装
+// 不支持 TrueHD，转码进程启动即失败（macOS《蜘蛛侠》实测同款教训）。
+// 不报 disc_image/disc_folder：嵌入式 mpv 不装载盘内结构，目录清单它吃不下。
+function getUniversalCapabilitySnapshot() {
+  return {
+    video: ['h264', 'hevc', 'av1', 'vp9', 'vp8', 'mpeg2video', 'mpeg4', 'vc1']
+      .map(codec => ({ codec, max_height: 2160, smooth: true, power_efficient: codec === 'h264' || codec === 'hevc' })),
+    audio: ['aac', 'ac3', 'eac3', 'dts', 'flac', 'alac', 'opus', 'mp3']
+      .map(codec => ({ codec, max_channels: 8 })),
+    containers: ['mp4', 'hls-fmp4', 'mkv', 'webm', 'ts', 'm2ts', 'avi'],
+    hdr_passthrough: true,
+    mse: 'full', is_mobile: false, native_hls: false,
+    universal: true,
+  };
+}
+window.getUniversalCapabilitySnapshot = getUniversalCapabilitySnapshot;
+
 const Player = {
   video: null,
   hls: null,
@@ -897,7 +919,12 @@ const Player = {
 
   currentQuality: 0, // 0=原画, 否则 maxHeight
 
-  selectQuality(maxHeight) {
+  async selectQuality(maxHeight) {
+    // mpv 会话不走这条重协商（下方是 HTML5 的加载链）：mpv IPC 补全前点了不生效
+    if (window.__MOVIECLAW_MPV_ACTIVE) {
+      this.hideSettings();
+      return;
+    }
     this.currentQuality = maxHeight;
     // 如果 session data 存在，重新请求播放会话
     if (this.sessionData?.media_item_id && typeof App !== 'undefined') {
@@ -908,27 +935,22 @@ const Player = {
       if (loading) loading.hidden = false;
       if (loadingText) loadingText.textContent = '正在切换画质...';
 
-      // 重新协商 session (带 max_height)
+      // 重新协商 session：能力按当前引擎如实申报，画质上限放请求顶层 max_height。
+      // 原来把 universal:true 和 video:[{max_height}] 塞进 capability 是两处错位：
+      // universal 分支直接给档 0 原文件（上限整个失效），video[] 里的 max_height
+      // 服务端也不读（读的是请求顶层，decide.py 的 max_height 参数）
       const mediaId = this.sessionData.media_item_id;
-      API.request('/playback/sessions', {
-        method: 'POST',
-        body: {
+      try {
+        const capability = await getCapabilitySnapshot();
+        const body = {
           media_item_id: mediaId,
-          capability: {
-            universal: true,
-            hdr_passthrough: maxHeight === 0,
-            containers: ['mp4', 'hls-fmp4'],
-            video: maxHeight > 0 ? [{ max_height: maxHeight }] : [],
-            audio: [],
-            mse: 'managed',
-            is_mobile: false,
-            native_hls: true,
-          },
+          capability,
           client: 'web',
           start_ms: Math.floor(currentTime * 1000),
           attempt_id: Date.now().toString(36) + Math.random().toString(36).slice(2),
-        },
-      }).then(resp => {
+        };
+        if (maxHeight > 0) body.max_height = maxHeight;
+        const resp = await API.request('/playback/sessions', { method: 'POST', body });
         const session = resp?.data || resp;
         if (!session?.stream_url) throw new Error('切换画质失败');
         const origin = API.baseUrl;
@@ -973,11 +995,11 @@ const Player = {
             if (loading) loading.hidden = true;
           }, { once: true });
         }
-      }).catch(e => {
+      } catch (e) {
         console.error('Quality switch failed:', e);
         if (loadingText) loadingText.textContent = '切换画质失败: ' + (e.message || e);
         setTimeout(() => { if (loading) loading.hidden = true; }, 2000);
-      });
+      }
     }
     // 更新 UI
     document.querySelectorAll('#playerSettingsContent .player-settings-item').forEach(el => {
@@ -1189,6 +1211,12 @@ const Player = {
   close() {
     // 作废仍在途的 startPlayback：否则请求回来晚一步会把新界面覆盖成旧影片
     if (typeof App !== 'undefined') App._playbackSeq = (App._playbackSeq || 0) + 1;
+    // mpv 会话结束（含切回 HTML5 的场景）：标志不清会让 selectQuality 一直拒接画质切换；
+    // 顺手收掉 mpv，否则 startPlayback 开新片时旧 mpv 还压在画面上
+    if (window.__MOVIECLAW_MPV_ACTIVE) {
+      window.__MOVIECLAW_MPV_ACTIVE = false;
+      if (window.__TAURI__?.core?.invoke) window.__TAURI__.core.invoke('stop_embedded_player').catch(() => {});
+    }
     // 上报最终进度
     this.reportPlaybackStop();
     this.stopProgressReporting();

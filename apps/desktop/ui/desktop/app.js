@@ -916,8 +916,9 @@ const App = {
       // ---- 起播 ----
       const playUnit = (startMs, season, ep) => {
         if (isMovie) {
-          // library_id 必传：startPlayback 自动选集用它查详情判断 kind
-          this.startPlayback({ media_item_id: mediaId, title: info.title, library_id: params.libraryId, startMs });
+          // library_id 必传：startPlayback 自动选集用它查详情判断 kind；
+          // files 也带上：能力申报分级要用它判片源吃不吃得下，省一次详情请求
+          this.startPlayback({ media_item_id: mediaId, title: info.title, library_id: params.libraryId, startMs, files: info.files });
           return;
         }
         const useSeason = season ?? st.season;
@@ -938,6 +939,7 @@ const App = {
           seasonNumber: useSeason,
           episodeNumber: useEp.episode_number,
           startMs,
+          files: info.files,
         });
       };
 
@@ -1797,11 +1799,31 @@ const App = {
       }
       if (!alive()) return;
 
+      // ---- 能力申报分级（对齐 macOS PlayerCapability.native()）----
+      // mpv 在场且这单片源 HTML5 啃不动 → 报 universal 换 tier-0 原文件直出，交给 mpv；
+      // 否则报浏览器真值，服务端据此直通/换壳/转码。报了 universal 就必须真让 mpv 播：
+      // 档 0 给的是裸文件地址，HTML5 啃不动 mkv/ISO
+      const mpvReady = await this.hasEmbeddedPlayer();
+      let wantsMpv = false;
+      if (mpvReady && !item.__forceHtml5) {
+        // 详情页起播已把 files 带在 item 上（省一次详情请求）；别的入口没有就现查
+        let files = item.files;
+        if (!files) {
+          try {
+            const d = await API.getItemDetail(item.library_id || this.libraries[0]?.id, mediaId);
+            files = (d?.data || d)?.files;
+          } catch (_) { /* 查不到片源元数据就不报 universal，按浏览器真值走 */ }
+        }
+        const unitFile = this.pickUnitFile(files, item.seasonNumber, item.episodeNumber);
+        wantsMpv = !!unitFile && this.needsNativePlayer(unitFile, unitFile.audio_streams);
+      }
+      item.__universalClaim = wantsMpv;
+
       const body = {
         media_item_id: mediaId,
         // 真实解码能力（探测一次后缓存）：报空数组会让服务端判定浏览器
         // 什么都不支持 → 所有影片全量转码，起播慢、个别文件决策卡死
-        capability: await getCapabilitySnapshot(),
+        capability: wantsMpv ? getUniversalCapabilitySnapshot() : await getCapabilitySnapshot(),
         client: 'web',
         attempt_id: Date.now().toString(36) + Math.random().toString(36).slice(2),
       };
@@ -1865,10 +1887,13 @@ const App = {
       if (session.season_number == null) session.season_number = item.seasonNumber ?? null;
       if (session.episode_number == null) session.episode_number = item.episodeNumber ?? null;
 
-      // 检测是否需要嵌入式 mpv 播放器（杜比视界/全景声/MKV 等）
+      // 起播引擎：申报了 universal 的一定要 mpv 播（裸文件 HTML5 啃不动），
+      // 其余按会话给出的片源特征判断（与改前一致）。
+      // __forceHtml5 是上一轮 mpv 没起来的重谈：这回一律 HTML5，别再试一遍 mpv
       const source = session.source || {};
       const decision = session.decision || {};
-      const needsNative = this.needsNativePlayer(source, decision);
+      const needsNative = !item.__forceHtml5
+        && (wantsMpv || (mpvReady && this.needsNativePlayer(source, decision.audio_tracks || [])));
 
       if (needsNative && window.__TAURI__) {
         loading.hidden = true;
@@ -1955,16 +1980,20 @@ const App = {
     this.showAutoNextCard(next);
   },
 
-  // 检测是否需要原生播放器（杜比/全景声/MKV/ISO 等）
-  needsNativePlayer(source, decision) {
+  // 这单片源 HTML5 是否啃不动（DV/全景声/TrueHD/MKV/冷门编码）→ 要原生引擎。
+  // audioTracks 形状两用：detail.files[].audio_streams（codec+profile）和
+  // decision.audio_tracks（只有 codec）。触发词常在 profile 里——
+  // 实测 3301 是 codec:"dts" + profile:"DTS-HD MA + DTS:X"，4425 是
+  // codec:"eac3" + profile:"Dolby Digital Plus + Dolby Atmos"，
+  // 只看 codec 两条都漏，只剩容器规则兜底
+  needsNativePlayer(source, audioTracks) {
     // 杜比视界
     const hdr = (source.hdr || '').toLowerCase();
     if (hdr.includes('dolby') || hdr.includes('dv') || hdr.includes('dovi')) return true;
-    // 全景声/TrueHD
-    const audioTracks = decision.audio_tracks || [];
-    for (const t of audioTracks) {
-      const codec = (t.codec || '').toLowerCase();
-      if (codec.includes('truehd') || codec.includes('atmos') || codec.includes('dts-hd') || codec.includes('dtshd')) return true;
+    // 全景声/TrueHD/DTS-HD
+    for (const t of audioTracks || []) {
+      const text = `${t.codec || ''} ${t.profile || ''}`.toLowerCase();
+      if (text.includes('truehd') || text.includes('atmos') || text.includes('dts-hd') || text.includes('dtshd') || text.includes('dts:x')) return true;
     }
     // 不支持的容器
     const container = (source.container || '').toLowerCase();
@@ -1973,6 +2002,31 @@ const App = {
     const vcodec = (source.video_codec || '').toLowerCase();
     if (['vp9', 'vc-1', 'vc1', 'mpeg2', 'mpeg-2', 'theora'].includes(vcodec)) return true;
     return false;
+  },
+
+  // 嵌入式 mpv 在不在（只查路径，不启动进程）。结果缓存住：起播热路径上不能
+  // 每次都走一遍 Tauri invoke
+  async hasEmbeddedPlayer() {
+    if (this._mpvReady == null) {
+      this._mpvReady = !!(window.__TAURI__?.core?.invoke)
+        ? await window.__TAURI__.core.invoke('has_embedded_player').catch(() => false)
+        : false;
+    }
+    return this._mpvReady;
+  },
+
+  // 从 detail.files 挑出这一集/这一部实际要播的那一路（in_place 的）。
+  // 电影的 season/episode 是 0/0，剧集按季集号对
+  pickUnitFile(files, seasonNumber, episodeNumber) {
+    const inPlace = (files || []).filter(f => f && f.state === 'in_place');
+    if (!inPlace.length) return null;
+    const wantEp = seasonNumber != null && episodeNumber != null
+      && !(Number(seasonNumber) === 0 && Number(episodeNumber) === 0);
+    if (!wantEp) return inPlace[0];
+    return inPlace.find(f =>
+      Number(f.season_number) === Number(seasonNumber) &&
+      Number(f.episode_number) === Number(episodeNumber)
+    ) || null;
   },
 
   // 打开嵌入式 mpv 播放器
@@ -2013,12 +2067,16 @@ const App = {
         height: Math.round(rect.height * scale),
       });
 
+      // 会话切到 mpv：画质重协商是 HTML5 那条链，selectQuality 据此不接
+      window.__MOVIECLAW_MPV_ACTIVE = true;
+
       // 显示控制栏（复用现有 UI）
       Player.showControls();
       Player.autoHideControls();
 
       // 关闭按钮 → 停止嵌入式播放器
       document.getElementById('playerBack')?.addEventListener('click', async () => {
+        window.__MOVIECLAW_MPV_ACTIVE = false;
         await window.__TAURI__.core.invoke('stop_embedded_player').catch(() => {});
         playerView.hidden = true;
         if (video) video.style.display = '';
@@ -2026,9 +2084,18 @@ const App = {
 
     } catch (e) {
       console.error('Embedded player failed:', e);
-      // 回退到 HTML5 播放器（恢复被隐藏的 video 元素）
+      window.__MOVIECLAW_MPV_ACTIVE = false;
+      // 恢复被隐藏的 video 元素
       const v = document.getElementById('playerVideo');
       if (v) v.style.display = '';
+      // 申报了 universal 但 mpv 没起来：档 0 给的是裸文件地址，HTML5 啃不动，
+      // 不能就地拿这个 URL 交给 <video>。标 __forceHtml5 重谈一次，
+      // 这回如实报浏览器能力，服务端给能播的换壳/转码流
+      if (item.__universalClaim) {
+        item.__universalClaim = false;
+        item.__forceHtml5 = true;
+        return this.startPlayback(item);
+      }
       Player.open(item.title || 'MovieClaw', streamUrl, subtitleUrls, startMs, session);
     }
   },

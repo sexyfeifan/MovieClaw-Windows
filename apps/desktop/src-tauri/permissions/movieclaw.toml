@@ -44,6 +44,11 @@ description = "Allows reading the configured server URL"
 commands.allow = ["get_server_url"]
 
 [[permission]]
+identifier = "allow-has-embedded-player"
+description = "Allows checking whether an embedded mpv player is available"
+commands.allow = ["has_embedded_player"]
+
+[[permission]]
 identifier = "allow-launch-embedded-player"
 description = "Allows launching the embedded mpv player"
 commands.allow = ["launch_embedded_player"]
@@ -91,6 +96,7 @@ permissions = [
     "allow-open-release-page",
     "allow-proxy-api",
     "allow-get-server-url",
+    "allow-has-embedded-player",
     "allow-launch-embedded-player",
     "allow-resize-embedded-player",
     "allow-set-embedded-player-visible",

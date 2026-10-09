@@ -180,6 +180,7 @@ fn main() {
             api_proxy::proxy_api,
             get_main_window_hwnd,
             lan_discovery::discover_servers,
+            player_embedded::has_embedded_player,
             player_embedded::launch_embedded_player,
             player_embedded::resize_embedded_player,
             player_embedded::set_embedded_player_visible,

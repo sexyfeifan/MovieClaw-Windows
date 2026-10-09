@@ -13,6 +13,7 @@ mod win32 {
     type HMENU = isize;
     type LPCWSTR = *const u16;
     type LPVOID = *mut core::ffi::c_void;
+    type WNDPROC = Option<unsafe extern "system" fn(HWND, u32, usize, isize) -> isize>;
 
     pub const WS_CHILD: u32 = 0x40000000;
     pub const WS_VISIBLE: u32 = 0x10000000;
@@ -20,6 +21,20 @@ mod win32 {
     pub const WS_CLIPCHILDREN: u32 = 0x02000000;
     pub const SWP_NOZORDER: u32 = 0x0004;
     pub const SWP_SHOWWINDOW: u32 = 0x0040;
+
+    #[repr(C)]
+    pub struct WNDCLASSW {
+        pub style: u32,
+        pub lpfnWndProc: WNDPROC,
+        pub cbClsExtra: i32,
+        pub cbWndExtra: i32,
+        pub hInstance: HINSTANCE,
+        pub hIcon: isize,
+        pub hCursor: isize,
+        pub hbrBackground: isize,
+        pub lpszMenuName: LPCWSTR,
+        pub lpszClassName: LPCWSTR,
+    }
 
     #[link(name = "user32")]
     extern "system" {
@@ -48,6 +63,13 @@ mod win32 {
         ) -> i32;
         pub fn ShowWindow(hWnd: HWND, nCmdShow: i32) -> i32;
         pub fn DestroyWindow(hWnd: HWND) -> i32;
+        pub fn DefWindowProcW(hWnd: HWND, Msg: u32, wParam: usize, lParam: isize) -> isize;
+        pub fn RegisterClassW(lpWndClass: *const WNDCLASSW) -> u16;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn GetModuleHandleW(lpModuleName: LPCWSTR) -> HINSTANCE;
     }
 }
 
@@ -59,6 +81,36 @@ static MPV_PIPE_ID: AtomicU32 = AtomicU32::new(0);
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
+    DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
+/// 注册 mpv 宿主子窗口类（进程内一次）。CreateWindowExW 用自定义类必须先注册，
+/// 否则返回 NULL，launch 只能以「创建视频子窗口失败」告终。返回模块句柄作 hInstance。
+fn ensure_host_class() -> isize {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    let hinst = unsafe { GetModuleHandleW(std::ptr::null()) };
+    INIT.call_once(|| {
+        let class_name = wide("MovieClawMpvHost");
+        let wc = WNDCLASSW {
+            style: 0,
+            lpfnWndProc: Some(host_wnd_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: hinst,
+            hIcon: 0,
+            hCursor: 0,
+            hbrBackground: 0,
+            lpszMenuName: std::ptr::null(),
+            lpszClassName: class_name.as_ptr(),
+        };
+        // 返回 0 且类已存在时算成功（重复注册同一类名）
+        unsafe { RegisterClassW(&wc) };
+    });
+    hinst
 }
 
 fn find_mpv() -> Option<String> {
@@ -112,6 +164,14 @@ fn find_mpv() -> Option<String> {
     None
 }
 
+/// 嵌入式 mpv 是否可用（只查路径，不启动进程）。
+/// 起播前先问一句：能力申报要据此决定报不报 universal（全解码）——
+/// mpv 不在场却报了 universal，服务端会把 HTML5 放不了的原片直通过来
+#[tauri::command]
+pub fn has_embedded_player() -> bool {
+    find_mpv().is_some()
+}
+
 /// 启动嵌入式 mpv 播放器
 /// parent_hwnd: Tauri 主窗口 HWND
 /// x, y, width, height: 视频区域在父窗口中的位置
@@ -135,6 +195,7 @@ pub fn launch_embedded_player(
     // 创建子窗口
     let class_name = wide("MovieClawMpvHost");
     let window_name = wide("MovieClaw Video");
+    let hinst = ensure_host_class();
 
     let child_hwnd = unsafe {
         CreateWindowExW(
@@ -148,7 +209,7 @@ pub fn launch_embedded_player(
             height,
             parent_hwnd as *mut _,
             0,
-            0,
+            hinst,
             std::ptr::null_mut(),
         )
     };

@@ -29,6 +29,7 @@
     "allow-open-release-page",
     "allow-proxy-api",
     "allow-get-server-url",
+    "allow-has-embedded-player",
     "allow-launch-embedded-player",
     "allow-resize-embedded-player",
     "allow-set-embedded-player-visible",
