@@ -489,7 +489,14 @@ const App = {
           const banner = document.getElementById('heroBanner');
           const heroId = banner?.dataset.heroId;
           const item = allHeroItems.find(i => i.media_item_id == heroId) || heroItem;
-          this.startPlayback({ media_item_id: item.media_item_id, title: item.title });
+          // 继续观看的剧集项自带季/集号，直接传：不传会自动选到第一季第一未看集而非续播点
+          this.startPlayback({
+            media_item_id: item.media_item_id,
+            title: item.title,
+            library_id: item.library_id ?? defaultLibId,
+            seasonNumber: item.season_number,
+            episodeNumber: item.episode_number,
+          });
         });
         document.getElementById('heroDetailBtn')?.addEventListener('click', () => {
           const banner = document.getElementById('heroBanner');
@@ -825,7 +832,9 @@ const App = {
       });
 
       document.getElementById('btnPlay')?.addEventListener('click', () => {
-        this.startPlayback({ media_item_id: info.media_item_id, title: info.title });
+        // library_id 必传：startPlayback 自动选集用它查详情判断 kind，
+        // 缺失时回退 libraries[0]（电影库）→ 剧集详情 404 → 被当电影处理 → 会话 404
+        this.startPlayback({ media_item_id: info.media_item_id, title: info.title, library_id: params.libraryId });
       });
 
       // 收藏/已看 — 使用 /playback/marks API
