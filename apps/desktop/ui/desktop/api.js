@@ -176,8 +176,10 @@ const API = {
   },
 
   // 会话结束
+  // 服务端是 DELETE /playback/sessions/{id}（playback.py stop_playback_session）；
+  // 原先 POST .../stop 恒 405，会话只能等 180s 空闲回收，直通槽位被占满后 503
   sessionStop(sessionId) {
-    return this.request(`/playback/sessions/${sessionId}/stop`, { method: 'POST' });
+    return this.request(`/playback/sessions/${sessionId}`, { method: 'DELETE' });
   },
 
   // 继续观看列表

@@ -1322,10 +1322,15 @@ const App = {
   },
 
   // ===== 播放（内置 HTML5 播放器） =====
-  async startPlayback(item) {
+  async startPlayback(item, isRetry) {
     // 连点/返回竞态：新请求立即作废旧请求（清掉上一部的播放器状态），
     // 后续每个 await 之后用 alive() 检查，旧请求回来不再碰界面
     Player.close();
+    if (!isRetry) {
+      // 全新播放：清掉上一轮的降档记录（web-player.md §6.3 的 failed_tiers 回路）
+      this._failedTiers = [];
+      this._contentFailures = 0;
+    }
     const seq = (this._playbackSeq = (this._playbackSeq || 0) + 1);
     const alive = () => this._playbackSeq === seq;
 
@@ -1391,6 +1396,8 @@ const App = {
       };
       if (item.seasonNumber != null) body.season_number = Number(item.seasonNumber);
       if (item.episodeNumber != null) body.episode_number = Number(item.episodeNumber);
+      // 上几档播失败了：带上让服务端跳过它们换下一档（decide.py 降档回路）
+      if (this._failedTiers && this._failedTiers.length) body.failed_tiers = this._failedTiers;
 
       // 获取续播位置
       try {
@@ -1466,6 +1473,62 @@ const App = {
         loading.hidden = true;
       }, 5000);
     }
+  },
+
+  // 首帧前播放失败（解不了 / 无数据）→ failed_tiers 降档回路（web-player.md §6.3）：
+  // 把当前档记入失败集合重开会话，服务端跳过它们换下一档；连败两次直接一步到兜底转码档。
+  // 典型场景：直通重封装产出的 init.mp4 hvcC 缺参数集（源片 CodecPrivate 为空），
+  // 浏览器 MSE 拒收 → 换转码档重新编码即可修复
+  onPlaybackContentFailed(reason) {
+    const view = document.getElementById('playerView');
+    if (view && view.hidden) return; // 用户已关闭播放器，不再重试
+    const sd = Player.sessionData;
+    // 同一次播放的重复上报必须静默忽略（hls 同帧连发多个 buffer fatal、destroy 尾声再报一次）：
+    // 第一个已发起降档重试，若后续重复走 _showPlaybackError → Player.close() 会推进
+    // _playbackSeq，把刚发起的重试在首个 await 处作废（2026-10-09 真机：3 个 fatal
+    // 挤掉唯一一次重试，重试的会话 POST 根本没发出去）
+    if (sd && sd.__contentFailed) return;
+    if (!sd) {
+      this._showPlaybackError(reason);
+      return;
+    }
+    sd.__contentFailed = true;
+    const tier = sd.decision && typeof sd.decision.tier === 'number' ? sd.decision.tier : null;
+    if (tier === null) {
+      this._showPlaybackError(reason);
+      return;
+    }
+    const failed = new Set(this._failedTiers || []);
+    failed.add(tier);
+    this._contentFailures = (this._contentFailures || 0) + 1;
+    if (this._contentFailures >= 2) {
+      for (let t = 0; t < 4; t += 1) failed.add(t);
+    }
+    if (tier >= 4) {
+      this._showPlaybackError(reason + '（已尝试所有播放方式）');
+      return;
+    }
+    this._failedTiers = [...failed].sort((a, b) => a - b);
+    const loadingText = document.getElementById('playerLoadingText');
+    if (loadingText) loadingText.textContent = '正在切换播放方式...';
+    this.startPlayback({
+      media_item_id: sd.media_item_id,
+      title: Player.currentTitle,
+      library_id: sd.library_id,
+      seasonNumber: sd.season_number,
+      episodeNumber: sd.episode_number,
+    }, true);
+  },
+
+  // 终态错误展示：清掉播放器与服务端会话，但保持错误文字可见
+  _showPlaybackError(reason) {
+    Player.close();
+    const view = document.getElementById('playerView');
+    const loading = document.getElementById('playerLoading');
+    const loadingText = document.getElementById('playerLoadingText');
+    if (view) view.hidden = false;
+    if (loading) loading.hidden = false;
+    if (loadingText) loadingText.textContent = '播放失败: ' + reason;
   },
 
   // 播放结束 → 自动下一集

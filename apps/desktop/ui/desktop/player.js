@@ -350,12 +350,18 @@ const Player = {
       if (loading) loading.hidden = false;
     });
     this.video.addEventListener('playing', () => {
+      this._everPlayed = true;
       const loading = document.getElementById('playerLoading');
       if (loading) loading.hidden = true;
     });
     this.video.addEventListener('error', () => {
       const text = document.getElementById('playerLoadingText');
       const loading = document.getElementById('playerLoading');
+      // 首帧前解不了（浏览器不认该格式/编码）→ 走 failed_tiers 降档回路换转码
+      if (!this._everPlayed && typeof App !== 'undefined' && App.onPlaybackContentFailed) {
+        App.onPlaybackContentFailed('无法解码该视频格式');
+        return;
+      }
       if (text) text.textContent = '播放失败: 无法解码该视频格式';
       if (loading) loading.hidden = false;
     });
@@ -842,6 +848,8 @@ const Player = {
 
     // 清理旧的 HLS 实例
     if (this.hls) { this.hls.destroy(); this.hls = null; }
+    clearTimeout(this._stuckTimer);
+    this._everPlayed = false;
 
     const isHls = streamUrl.includes('.m3u8') || streamUrl.includes('/hls');
 
@@ -860,7 +868,15 @@ const Player = {
       });
       this.hls.on(Hls.Events.ERROR, (_, data) => {
         if (data.fatal) {
-          if (loadingText) loadingText.textContent = '播放失败: ' + (data.details || 'HLS 流加载错误');
+          const details = String(data.details || '');
+          // 首帧前的 buffer* 错误 = 视频初始化数据本身解不了（如直通重封装的
+          // hvcC 缺参数集）→ 交给 App 走 failed_tiers 降档回路换转码重来
+          if (!this._everPlayed && details.startsWith('buffer') &&
+              typeof App !== 'undefined' && App.onPlaybackContentFailed) {
+            setTimeout(() => App.onPlaybackContentFailed(details), 0);
+            return;
+          }
+          if (loadingText) loadingText.textContent = '播放失败: ' + (details || 'HLS 流加载错误');
           if (loading) loading.hidden = false;
         }
       });
@@ -872,6 +888,21 @@ const Player = {
         this.video.play().catch(() => {});
       }, { once: true });
     }
+
+    // 卡死兜底：服务端转码产出不出数据（如 ffmpeg 中途崩了）时首帧永远不来，
+    // 35 秒后明确报错/降档，而不是无限停在「正在加载...」。
+    // readyState>=2 = 数据其实到了（如自动播放被浏览器拦下），不算内容失败
+    this._stuckTimer = setTimeout(() => {
+      if (this._everPlayed || (this.video && this.video.readyState >= 2)) return;
+      const lt = loadingText ? loadingText.textContent : '';
+      if (lt && lt.startsWith('播放失败')) return; // 已有明确错误，不覆盖
+      if (typeof App !== 'undefined' && App.onPlaybackContentFailed) {
+        App.onPlaybackContentFailed('视频数据加载超时');
+      } else if (loadingText) {
+        loadingText.textContent = '播放失败: 视频数据加载超时，请稍后重试';
+        if (loading) loading.hidden = false;
+      }
+    }, 35000);
 
     // 字幕
     if (subtitles && subtitles.length) {
@@ -901,6 +932,13 @@ const Player = {
     this.reportPlaybackStop();
     this.stopProgressReporting();
     this.stopSessionPing();
+    clearTimeout(this._stuckTimer);
+    // 通知服务端结束会话，立即释放直通/转码槽位（否则要等 180s 空闲回收，
+    // 连播几部就把 4/4 槽位占满 → 后续播放全 503）
+    if (this.sessionId) {
+      API.sessionStop(this.sessionId).catch(() => {});
+      this.sessionId = null;
+    }
     this.destroyJassub();
 
     const view = document.getElementById('playerView');
@@ -1115,6 +1153,10 @@ const Player = {
     API.reportProgress(this.mediaItemId, 'stop', posMs, durMs, this.seasonNumber, this.episodeNumber).catch(() => {});
     this.stopProgressReporting();
     this.stopSessionPing();
+    if (this.sessionId) {
+      API.sessionStop(this.sessionId).catch(() => {});
+      this.sessionId = null;
+    }
     if (durMs > 0 && posMs / durMs >= 0.9) {
       if (typeof App !== 'undefined' && App.onPlaybackEnded) {
         App.onPlaybackEnded(this.sessionData);

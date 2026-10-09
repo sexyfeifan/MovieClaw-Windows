@@ -93,13 +93,17 @@ pub async fn proxy_api(
             let status = resp.status();
             capture_cookies_from_headers(&resp);
             let text = resp.into_string().unwrap_or_default();
-            eprintln!("[proxy_api] Response {}: {}", status, &text[..text.len().min(100)]);
+            // 日志截断必须按字符：按字节切会在中文错误体中间劈开 UTF-8，
+            // panic 后 Tauri invoke 永不返回 → 前端 45s 超时（2026-10-09 真机事故）
+            let snippet: String = text.chars().take(60).collect();
+            eprintln!("[proxy_api] Response {}: {}", status, snippet);
             Ok(ProxyResponse { status, body: text })
         }
         Err(ureq::Error::Status(code, resp)) => {
             capture_cookies_from_headers(&resp);
             let text = resp.into_string().unwrap_or_default();
-            eprintln!("[proxy_api] Error {}: {}", code, &text[..text.len().min(100)]);
+            let snippet: String = text.chars().take(60).collect();
+            eprintln!("[proxy_api] Error {}: {}", code, snippet);
             Ok(ProxyResponse { status: code, body: text })
         }
         Err(e) => {
