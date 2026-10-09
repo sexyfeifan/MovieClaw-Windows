@@ -1085,6 +1085,11 @@ const Player = {
     clearTimeout(this._stuckTimer);
     this._everPlayed = false;
 
+    // 复用的 <video> 会把上一次的播放位置当成「默认起播位置」带进新源
+    // （readyState=0 时 currentTime 读到的就是它，removeAttribute/load 也清不掉），
+    // 「从头播放」(startMs=0/null) 必须在这里显式归位，否则从旧位置接着放
+    if (this.video) this.video.currentTime = (startMs || 0) / 1000;
+
     // 实时速度：累计字节 + 2 秒滑动窗口（口径对齐 web bandwidth.ts 的 LoadingMeter）
     this._net = { bytes: 0, points: [], bps: null, frags: [] };
     this.hideInfoPanel();

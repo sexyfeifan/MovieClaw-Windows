@@ -127,6 +127,11 @@ const API = {
     return this.request(`/collections/${id}/items`);
   },
 
+  // 系列合集：「已有 N / 共 M」与逐部缺片名单（详情页的作品系列行）
+  getCollectionSeries(id) {
+    return this.request(`/collections/${id}/series`);
+  },
+
   // ===== 搜索 =====
   search(query) {
     return this.request(`/search/library?q=${encodeURIComponent(query)}`);
@@ -194,15 +199,21 @@ const API = {
 
   // 收藏/已看 标记
   // GET 响应: { played, is_favorite, unplayed_count }
-  // POST body: { media_item_id, played?, favorite? }
-  getMarks(mediaItemId) {
-    return this.request(`/playback/marks?media_item_id=${mediaItemId}`);
+  // POST body: { media_item_id, played?, favorite?, season_number?, episode_number? }
+  // 不带季集 = 整个条目（电影 / 整剧），带季集 = 单集（详情页头图标的就是这一集）
+  getMarks(mediaItemId, seasonNumber, episodeNumber) {
+    let qs = `?media_item_id=${mediaItemId}`;
+    if (seasonNumber != null) qs += `&season_number=${seasonNumber}`;
+    if (episodeNumber != null) qs += `&episode_number=${episodeNumber}`;
+    return this.request(`/playback/marks${qs}`);
   },
 
-  setMarks(mediaItemId, { played, favorite }) {
+  setMarks(mediaItemId, { played, favorite, seasonNumber, episodeNumber }) {
     const body = { media_item_id: mediaItemId };
     if (played !== undefined) body.played = played;
     if (favorite !== undefined) body.favorite = favorite;
+    if (seasonNumber != null) body.season_number = seasonNumber;
+    if (episodeNumber != null) body.episode_number = episodeNumber;
     return this.request('/playback/marks', { method: 'POST', body });
   },
 

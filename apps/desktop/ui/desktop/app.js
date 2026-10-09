@@ -35,6 +35,29 @@ function imgFallback(imgEl, rawUrl) {
   });
 }
 
+// 「12:34」/「1:02:33」——与 Apple 端 Formatters.clock 同一口径（详情页续播按钮）
+function fmtClock(ms) {
+  const total = Math.floor((ms || 0) / 1000);
+  const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
+}
+
+// 「48 分钟」「2 小时 12 分钟」——同 Apple 端 Formatters.runtime
+function fmtRuntime(minutes) {
+  if (!minutes || minutes <= 0) return '';
+  const h = Math.floor(minutes / 60), m = minutes % 60;
+  if (!h) return `${m} 分钟`;
+  return m > 0 ? `${h} 小时 ${m} 分钟` : `${h} 小时`;
+}
+
+// 「58.3 GB」——版本行的文件大小
+function fmtBytes(bytes) {
+  if (!bytes && bytes !== 0) return '';
+  const gb = bytes / 1024 / 1024 / 1024;
+  if (gb >= 1) return `${gb.toFixed(1)} GB`;
+  return `${Math.round(bytes / 1024 / 1024)} MB`;
+}
+
 const App = {
   currentPage: 'home',
   libraries: [],
@@ -706,21 +729,38 @@ const App = {
   },
 
   // ===== 详情页 =====
+  // 版式对齐 macOS（apps/apple MacItemDetailView，docs/design/macos-app.md §4.4）：
+  // 头图 = Logo、年份类型片长与画质小标签、第几集、三行简介、写明「继续 第 1 季
+  // 第 3 集 · 12:34」的主按钮与「从头播放」，右下角浮「导演 / 主演」；
+  // 下面 = 分集横排 → 系列 → 演职员 → 合集 → 信息。头图讲的那一集与下面浏览的
+  // 那一季是两套状态：换季只换分集横排。
   async renderDetail(container, params) {
     container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
     try {
       const resp = await API.getItemDetail(params.libraryId, params.itemId);
       const info = resp?.data || resp;
       const meta = info.local_meta || {};
-
+      const isMovie = info.kind !== 'tv';
       const genres = meta.genres || [];
       const plot = meta.plot || '';
       const runtime = meta.runtime_minutes || null;
-      const rating = meta.rating || null;
-      const directors = meta.directors || [];
-      const actors = meta.actors || [];
-      const posterRaw = info.poster_url || info.backdrop_url || '';
+      const mediaId = info.media_item_id;
+
+      const inPlace = (info.files || []).filter(f => f.state === 'in_place');
+      const badges = this.bestMediaBadges(inPlace);
+      const cast = this.castPeople(meta);
       const backdropRaw = info.backdrop_url || info.poster_url || '';
+      const logoRaw = info.logo_url || '';
+      const seasonCount = (info.seasons || []).filter(s => s > 0).length;
+
+      const st = {
+        season: null, episode: null,      // 头图正讲的那一集
+        browseSeason: null, browseEpisodes: [], episodesLoading: false,
+        watched: null,                    // 头图单元的续播点（PlaybackStateView）
+        favorite: false, marking: false,
+      };
+
+      const canPlay = () => (isMovie ? inPlace.length > 0 : st.episode?.owned === true);
 
       container.innerHTML = `
         <div class="detail-hero">
@@ -730,149 +770,349 @@ const App = {
           <button class="detail-back-btn" id="btnBack" title="返回 (Esc)">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
           </button>
-          <div class="detail-hero-info">
-            <h1 class="detail-title">${info.title}</h1>
-            <div class="detail-meta">
-              ${info.year ? `<span>${info.year}</span>` : ''}
-              ${genres.length ? `<span>${genres.slice(0, 3).join(' / ')}</span>` : ''}
-              ${runtime ? `<span>${runtime} 分钟</span>` : ''}
-            </div>
-            <div class="detail-actions">
-              <button class="btn-play" id="btnPlay">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                <span>播放</span>
-              </button>
-              <button class="btn-icon" id="btnFavorite" title="收藏">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                  <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
-                </svg>
-              </button>
-              <button class="btn-icon" id="btnMarkWatched" title="标记已看">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                  <circle cx="12" cy="12" r="10"/><polyline points="9 12 11 14 15 10"/>
-                </svg>
-              </button>
-            </div>
+          <div class="detail-stage">
+            <div class="detail-stage-main" id="detailStage"></div>
+            ${this.detailCreditsHtml(cast)}
           </div>
         </div>
         <div class="detail-body">
-          <div class="detail-layout">
-            <div class="detail-content">
-              ${plot ? `<p class="detail-overview">${plot}</p>` : ''}
-
-              ${info.seasons?.length ? `
-                <div class="detail-section">
-                  <h3>剧集</h3>
-                  <div class="season-selector">
-                    ${info.seasons.map((s, i) => `<button class="season-pill ${i === 0 ? 'active' : ''}" data-season="${s}">第 ${s} 季</button>`).join('')}
-                  </div>
-                  <div class="episode-grid" id="episodeGrid">
-                    <div class="page-loading"><div class="spinner"></div></div>
-                  </div>
+          <div class="detail-body-bg"><img src="${resolveUrl(backdropRaw)}" alt="" data-raw="${backdropRaw}" onerror="imgFallback(this, this.dataset.raw)"></div>
+          <div class="detail-lower">
+            <div id="detailSeasonArea"></div>
+            <div id="detailSeriesArea"></div>
+            ${cast.length ? this.shelfHtml('演职员', null, 'cast-row', cast.map(p => this.personCardHtml(p)).join('')) : ''}
+            ${info.collections?.length ? `
+              <div class="detail-section">
+                <h2 class="shelf-title">所属合集</h2>
+                <div class="collection-chips">
+                  ${info.collections.map(c => `<a class="collection-chip" data-collection-id="${c.id}" href="#">${c.name}</a>`).join('')}
                 </div>
-              ` : ''}
-
-              ${info.collections?.length ? `
-                <div class="detail-section">
-                  <h3>所属合集</h3>
-                  <div class="collection-chips">
-                    ${info.collections.map(c => `<a class="collection-chip" data-collection-id="${c.id}" href="#">${c.name}</a>`).join('')}
-                  </div>
-                </div>
-              ` : ''}
-            </div>
-
-            <aside class="detail-sidebar">
-              <div class="detail-info-block">
-                <h4>影片信息</h4>
-                ${info.original_title ? `<div class="info-row"><span class="info-label">原名</span><span>${info.original_title}</span></div>` : ''}
-                ${info.year ? `<div class="info-row"><span class="info-label">年份</span><span>${info.year}</span></div>` : ''}
-                ${genres.length ? `<div class="info-row"><span class="info-label">类型</span><span>${genres.join(' / ')}</span></div>` : ''}
-                ${runtime ? `<div class="info-row"><span class="info-label">片长</span><span>${runtime} 分钟</span></div>` : ''}
-                ${directors.length ? `<div class="info-row"><span class="info-label">导演</span><span>${directors.join(' / ')}</span></div>` : ''}
-                ${rating ? `<div class="info-row"><span class="info-label">评分</span><span class="rating-score">${rating.toFixed(1)}</span></div>` : ''}
-                ${info.files?.length ? `<div class="info-row"><span class="info-label">文件</span><span>${info.files.length} 个</span></div>` : ''}
               </div>
-              ${actors.length ? `
-                <div class="detail-info-block" style="margin-top:16px">
-                  <h4>主演</h4>
-                  <div class="cast-list">
-                    ${actors.slice(0, 8).map(p => `
-                      <div class="cast-item" ${p.person_id || p.id ? `data-person-id="${p.person_id || p.id}"` : ''} style="cursor:${p.person_id || p.id ? 'pointer' : 'default'}">
-                        ${p.thumb_url ? `<img src="${resolveUrl(p.thumb_url)}" alt="" class="cast-avatar" style="opacity:0;transition:opacity 0.3s" onload="this.style.opacity='1'" onerror="this.style.display='none'">` : '<div class="cast-avatar cast-avatar-placeholder"></div>'}
-                        <div>
-                          <div class="cast-name">${p.name}</div>
-                          <div class="cast-role">${p.role || ''}</div>
-                        </div>
-                      </div>
-                    `).join('')}
-                  </div>
-                </div>
-              ` : ''}
-            </aside>
+            ` : ''}
+            ${this.detailInfoHtml(info, meta, inPlace, isMovie, seasonCount)}
           </div>
         </div>
       `;
 
-      // 加载剧集
-      if (info.seasons?.length) {
-        this.loadEpisodes(container, params.libraryId, params.itemId, info.seasons[0], info.title);
-        container.querySelectorAll('.season-pill').forEach(pill => {
-          pill.addEventListener('click', () => {
-            container.querySelectorAll('.season-pill').forEach(p => p.classList.remove('active'));
-            pill.classList.add('active');
-            this.loadEpisodes(container, params.libraryId, params.itemId, parseInt(pill.dataset.season), info.title);
+      // ---- 头图（Logo / 画质标签 / 第几集 / 简介 / 按钮）----
+      const renderStage = () => {
+        const ep = st.episode;
+        const overview = (isMovie ? plot : (ep?.overview || plot) || '').trim();
+        const position = st.watched?.position_ms || 0;
+        const finished = st.watched?.played || false;
+        const playable = canPlay();
+        const resumable = playable && position > 0;
+        const verb = resumable ? '继续' : finished ? '重新播放' : '播放';
+        const unit = !isMovie && ep
+          ? (st.season === 0 ? `特别篇第 ${ep.episode_number} 集` : `第 ${st.season} 季第 ${ep.episode_number} 集`)
+          : null;
+        const parts = [verb, unit, resumable ? fmtClock(position) : null].filter(Boolean);
+        const label = parts.length > 2 ? `${parts[0]} ${parts[1]} · ${parts[2]}` : parts.join(' ');
+        const metaLine = [
+          info.year || null,
+          ...genres.slice(0, 2),
+          isMovie
+            ? (runtime ? fmtRuntime(runtime) : null)
+            : (seasonCount >= 2 ? `共 ${seasonCount} 季` : null),
+        ].filter(Boolean).join(' · ');
+        const hint = playable ? '' : (isMovie
+          ? '片源已移除，暂时不能播放'
+          : ((info.seasons || []).length ? '这一集还没有片源，在下面挑别的集' : '这部剧还没有可播放的分集'));
+
+        document.getElementById('detailStage').innerHTML = `
+          ${logoRaw
+            ? `<img class="detail-logo" src="${resolveUrl(logoRaw)}" alt="${info.title}" data-raw="${logoRaw}"
+                 onerror="if (!this.dataset.retried) document.getElementById('detailTitleFallback').style.display=''; imgFallback(this, this.dataset.raw)"
+                 onload="document.getElementById('detailTitleFallback').style.display='none'">
+               <h1 class="detail-title" id="detailTitleFallback" style="display:none">${info.title}</h1>`
+            : `<h1 class="detail-title">${info.title}</h1>`}
+          ${metaLine || badges.length ? `
+            <div class="detail-meta">
+              ${metaLine ? `<span class="detail-meta-text">${metaLine}</span>` : ''}
+              ${badges.map(b => `<span class="quality-badge${b.filled ? '' : ' outlined'}">${b.text}</span>`).join('')}
+            </div>
+          ` : ''}
+          ${!isMovie && ep ? `<div class="detail-episode-line">${this.episodeLine(st.season, ep)}</div>` : ''}
+          ${overview ? `<p class="detail-hero-overview">${overview}</p>` : ''}
+          ${hint ? `<div class="detail-hint">${hint}</div>` : ''}
+          <div class="detail-actions">
+            ${playable ? `
+              <button class="btn-play" id="btnPlay">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                <span>${label}</span>
+              </button>
+              ${resumable ? `
+                <button class="btn-secondary" id="btnRestart" title="从头播放">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                  <span>从头播放</span>
+                </button>
+              ` : ''}
+            ` : ''}
+            <button class="btn-icon ${st.favorite ? 'active' : ''}" id="btnFavorite" title="${st.favorite ? '取消收藏' : '收藏'}">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+              </svg>
+            </button>
+            ${playable ? `
+              <button class="btn-icon ${finished ? 'active' : ''}" id="btnMarkWatched" title="${finished ? '标为未看' : '标为已看'}">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <circle cx="12" cy="12" r="10"/><polyline points="9 12 11 14 15 10"/>
+                </svg>
+              </button>
+            ` : ''}
+          </div>
+        `;
+        document.getElementById('btnPlay')?.addEventListener('click', () => playUnit(null));
+        document.getElementById('btnRestart')?.addEventListener('click', () => playUnit(0));
+        document.getElementById('btnFavorite')?.addEventListener('click', () => toggleFavorite());
+        document.getElementById('btnMarkWatched')?.addEventListener('click', () => togglePlayed());
+      };
+
+      // ---- 续播点 / 收藏 / 已看 ----
+      const loadUnitResume = async () => {
+        try {
+          const resp2 = await API.getResume(
+            mediaId,
+            isMovie ? null : st.season,
+            isMovie ? null : st.episode?.episode_number,
+          );
+          st.watched = resp2?.data || resp2 || null;
+        } catch (_) { st.watched = null; }
+        renderStage();
+      };
+
+      const toggleFavorite = async () => {
+        if (st.marking) return;
+        st.marking = true;
+        const next = !st.favorite;
+        st.favorite = next;
+        renderStage();
+        try {
+          const resp2 = await API.setMarks(mediaId, { favorite: next });
+          st.favorite = (resp2?.data || resp2)?.is_favorite ?? next;
+        } catch (e) {
+          console.error('Favorite toggle failed:', e);
+          st.favorite = !next;
+        }
+        st.marking = false;
+        renderStage();
+      };
+
+      const togglePlayed = async () => {
+        if (st.marking || !canPlay()) return;
+        st.marking = true;
+        try {
+          await API.setMarks(mediaId, {
+            played: !(st.watched?.played || false),
+            seasonNumber: isMovie ? null : st.season,
+            episodeNumber: isMovie ? null : st.episode?.episode_number,
+          });
+          await loadUnitResume();
+          if (!isMovie && st.season != null) await loadBrowse(st.season);
+        } catch (e) { console.error('Mark watched failed:', e); }
+        st.marking = false;
+      };
+
+      // ---- 起播 ----
+      const playUnit = (startMs, season, ep) => {
+        if (isMovie) {
+          // library_id 必传：startPlayback 自动选集用它查详情判断 kind
+          this.startPlayback({ media_item_id: mediaId, title: info.title, library_id: params.libraryId, startMs });
+          return;
+        }
+        const useSeason = season ?? st.season;
+        const useEp = ep || st.episode;
+        if (!useEp || !(ep ? useEp.owned : canPlay())) return;
+        // 桌面端没有「播放结束」回抛：点哪一集头图就跟着讲哪一集，
+        // 关掉播放器回来状态始终一致（Mac 是播完后才改讲）
+        if (ep && (ep !== st.episode || useSeason !== st.season)) {
+          st.season = useSeason;
+          st.episode = useEp;
+          loadUnitResume();
+          renderEpisodeShelf(); // 头图跟到这一集，横排的舞台环也要跟着挪
+        }
+        this.startPlayback({
+          media_item_id: mediaId,
+          title: `${info.title} S${useSeason}E${useEp.episode_number}`,
+          library_id: params.libraryId,
+          seasonNumber: useSeason,
+          episodeNumber: useEp.episode_number,
+          startMs,
+        });
+      };
+
+      // ---- 分集横排（标题 + 「共 N 集 · 已看 · 缺」）----
+      const renderEpisodeShelf = () => {
+        const area = document.getElementById('detailSeasonArea');
+        if (!area) return;
+        const eps = st.browseEpisodes;
+        const playedCount = eps.filter(e => e.played).length;
+        const missingCount = eps.filter(e => !e.owned).length;
+        const summary = (!st.episodesLoading && eps.length)
+          ? [`共 ${eps.length} 集`, playedCount ? `已看 ${playedCount} 集` : null, missingCount ? `缺 ${missingCount} 集` : null].filter(Boolean).join(' · ')
+          : null;
+        const cards = st.episodesLoading
+          ? '<div class="page-loading"><div class="spinner"></div></div>'
+          : (eps.length
+            ? eps.map(ep => this.episodeCardHtml(ep, st, runtime)).join('')
+            : '<div style="color:var(--text-secondary);padding:20px;">暂无剧集信息</div>');
+        area.innerHTML = `
+          ${(info.seasons || []).length > 1 ? `
+            <div class="season-selector">
+              ${(info.seasons || []).map(s => `<button class="season-pill ${s === st.browseSeason ? 'active' : ''}" data-season="${s}">${s === 0 ? '特别篇' : `第 ${s} 季`}</button>`).join('')}
+            </div>
+          ` : ''}
+          ${this.shelfHtml(st.browseSeason === 0 ? '特别篇' : `第 ${st.browseSeason} 季`, summary, 'episode-row', cards)}
+        `;
+        area.querySelectorAll('.season-pill').forEach(pill => {
+          pill.addEventListener('click', () => loadBrowse(parseInt(pill.dataset.season, 10)));
+        });
+        area.querySelectorAll('.episode-card').forEach(card => {
+          const ep = eps.find(e => e.episode_number === parseInt(card.dataset.episodeNumber, 10));
+          if (ep) card.addEventListener('click', () => selectEpisode(st.browseSeason, ep));
+        });
+        area.querySelectorAll('.episode-play-btn').forEach(btn => {
+          btn.addEventListener('click', e => {
+            e.stopPropagation();
+            const ep = eps.find(e2 => e2.episode_number === parseInt(btn.dataset.episodeNumber, 10));
+            if (ep) playUnit(null, st.browseSeason, ep);
           });
         });
+        area.querySelectorAll('.shelf-arrow').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const row = btn.closest('.shelf-wrapper')?.querySelector('.shelf-row');
+            if (row) row.scrollBy({ left: parseInt(btn.dataset.dir, 10) * row.clientWidth * 0.75, behavior: 'smooth' });
+          });
+        });
+        // 头图正讲的那一集滚进视野
+        const stageCard = area.querySelector('.episode-card.stage');
+        if (stageCard) stageCard.scrollIntoView({ inline: 'start', block: 'nearest' });
+      };
+
+      // 点分集卡：头图改讲这一集（续播点随单元重取），不起播；起播走悬停播放键或头图按钮
+      const selectEpisode = (season, ep) => {
+        if (!ep?.owned) return;
+        st.season = season;
+        st.episode = ep;
+        loadUnitResume();
+        renderEpisodeShelf();
+      };
+
+      const loadBrowse = async (seasonNumber) => {
+        st.browseSeason = seasonNumber;
+        st.browseEpisodes = [];
+        st.episodesLoading = true;
+        renderEpisodeShelf();
+        try {
+          const resp2 = await API.getItemEpisodes(params.libraryId, mediaId, seasonNumber);
+          const data = resp2?.data || resp2 || {};
+          st.browseEpisodes = (data.episodes || data || []).slice();
+        } catch (e) {
+          console.error('Load episodes failed:', e);
+        }
+        st.episodesLoading = false;
+        renderEpisodeShelf();
+      };
+
+      // ---- 初始化 ----
+      // 收藏是整片级（Mac 头图那颗心也是）；已看/续播跟着头图那一集走
+      try {
+        const marksResp = await API.getMarks(mediaId);
+        st.favorite = !!(marksResp?.data || marksResp)?.is_favorite;
+      } catch (_) {}
+
+      if (isMovie) {
+        await loadUnitResume();
+      } else {
+        // 「接下来继续」里那一集优先；否则第一个有片源的季（综艺常只收了最新一季）
+        let preferred = null;
+        try {
+          const upNextResp = await API.getUpNext();
+          const upNext = (upNextResp?.data || upNextResp || []).find(
+            x => x.media_item_id === mediaId && x.kind === 'tv',
+          );
+          if (upNext) preferred = { season: upNext.season_number, episode: upNext.episode_number };
+        } catch (_) {}
+        const ownedSeasons = new Set(inPlace.map(f => f.season_number));
+        const seasons = info.seasons || [];
+        const start = (preferred && seasons.includes(preferred.season) ? preferred.season : null)
+          ?? seasons.find(s => s > 0 && ownedSeasons.has(s))
+          ?? seasons.find(s => ownedSeasons.has(s))
+          ?? seasons.find(s => s > 0)
+          ?? seasons[0];
+        if (start != null) {
+          st.season = start;
+          await loadBrowse(start);
+          const eps = st.browseEpisodes;
+          st.episode = (preferred?.season === start ? eps.find(e => e.episode_number === preferred.episode && e.owned) : null)
+            || this.resumeEpisode(eps)
+            || eps[0]
+            || null;
+          await loadUnitResume();
+          renderEpisodeShelf();
+        } else {
+          renderStage();
+        }
       }
 
-      // 绑定事件
+      // ---- 电影的作品系列 ----
+      if (isMovie && info.series_collection_id) {
+        try {
+          const resp2 = await API.getCollectionSeries(info.series_collection_id);
+          const series = resp2?.data || resp2;
+          if (series?.available && (series.parts || []).length > 1) {
+            const area = document.getElementById('detailSeriesArea');
+            area.innerHTML = this.shelfHtml(
+              series.series_name || info.series_name || '系列',
+              `已有 ${series.owned_count} / 共 ${series.total}`,
+              'series-row',
+              series.parts.map(part => this.seriesCardHtml(part, mediaId, params.libraryId)).join(''),
+            );
+            area.querySelectorAll('.series-card[data-item-id]').forEach(card => {
+              card.addEventListener('click', () => {
+                const id = parseInt(card.dataset.itemId, 10);
+                if (id && id !== mediaId) this.navigate('detail', { libraryId: params.libraryId, itemId: id });
+              });
+            });
+            area.querySelectorAll('.shelf-arrow').forEach(btn => {
+              btn.addEventListener('click', () => {
+                const row = btn.closest('.shelf-wrapper')?.querySelector('.shelf-row');
+                if (row) row.scrollBy({ left: parseInt(btn.dataset.dir, 10) * row.clientWidth * 0.75, behavior: 'smooth' });
+              });
+            });
+          }
+        } catch (e) { console.error('Load series failed:', e); }
+      }
+
+      // ---- 事件绑定 ----
       document.getElementById('btnBack')?.addEventListener('click', () => {
         this.goBack();
       });
 
-      document.getElementById('btnPlay')?.addEventListener('click', () => {
-        // library_id 必传：startPlayback 自动选集用它查详情判断 kind，
-        // 缺失时回退 libraries[0]（电影库）→ 剧集详情 404 → 被当电影处理 → 会话 404
-        this.startPlayback({ media_item_id: info.media_item_id, title: info.title, library_id: params.libraryId });
+      // 合集 → 合集海报墙（原先只有 href="#"，点了没有反应）
+      container.querySelectorAll('.collection-chip').forEach(chip => {
+        chip.addEventListener('click', e => {
+          e.preventDefault();
+          const id = chip.dataset.collectionId;
+          if (id) this.navigate('collection', { collectionId: id });
+        });
       });
 
-      // 收藏/已看 — 使用 /playback/marks API
-      // GET 响应: { played: bool, is_favorite: bool, unplayed_count: int|null }
-      // POST body: { media_item_id, played?, favorite? }
-      const mediaId = info.media_item_id;
-      let marks = { is_favorite: false, played: false };
-      try {
-        const marksResp = await API.getMarks(mediaId);
-        marks = marksResp?.data || marksResp || {};
-      } catch (_) {}
-
-      if (marks.is_favorite) document.getElementById('btnFavorite')?.classList.add('active');
-      if (marks.played) document.getElementById('btnMarkWatched')?.classList.add('active');
-
-      document.getElementById('btnFavorite')?.addEventListener('click', async () => {
-        const btn = document.getElementById('btnFavorite');
-        const wasActive = btn.classList.contains('active');
-        try {
-          await API.setMarks(mediaId, { favorite: !wasActive });
-          btn.classList.toggle('active');
-        } catch (e) { console.error('Favorite toggle failed:', e); }
-      });
-
-      document.getElementById('btnMarkWatched')?.addEventListener('click', async () => {
-        const btn = document.getElementById('btnMarkWatched');
-        const wasActive = btn.classList.contains('active');
-        try {
-          await API.setMarks(mediaId, { played: !wasActive });
-          btn.classList.toggle('active');
-        } catch (e) { console.error('Mark watched failed:', e); }
-      });
-
-      // 演员点击 → 人物页
-      container.querySelectorAll('.cast-item[data-person-id]').forEach(item => {
-        item.addEventListener('click', () => {
-          const pid = item.dataset.personId;
+      // 演职员 → 人物页（TMDB 影人 id）
+      container.querySelectorAll('.person-card[data-person-id]').forEach(card => {
+        card.addEventListener('click', () => {
+          const pid = card.dataset.personId;
           if (pid) this.navigate('person', { personId: pid });
+        });
+      });
+
+      // 演职员横排的滚动箭头（这排是静态渲染的，没走 loadBrowse）
+      container.querySelectorAll('.detail-lower .shelf-arrow').forEach(btn => {
+        if (btn.dataset.bound) return;
+        btn.dataset.bound = '1';
+        btn.addEventListener('click', () => {
+          const row = btn.closest('.shelf-wrapper')?.querySelector('.shelf-row');
+          if (row) row.scrollBy({ left: parseInt(btn.dataset.dir, 10) * row.clientWidth * 0.75, behavior: 'smooth' });
         });
       });
 
@@ -882,49 +1122,211 @@ const App = {
     }
   },
 
-  // 加载某一季的剧集
-  async loadEpisodes(container, libraryId, itemId, seasonNumber, showTitle) {
-    const grid = document.getElementById('episodeGrid');
-    if (!grid) return;
-    grid.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
-    try {
-      const resp = await API.request(`/libraries/${libraryId}/items/${itemId}/episodes?season_number=${seasonNumber}`);
-      const data = resp?.data || resp;
-      const episodes = data?.episodes || data || [];
-      if (!episodes.length) {
-        grid.innerHTML = '<div style="color:var(--text-secondary);padding:20px;">暂无剧集信息</div>';
-        return;
-      }
-      grid.innerHTML = episodes.map(ep => `
-        <div class="episode-card" data-episode-number="${ep.episode_number}" data-season="${seasonNumber}">
-          <div class="episode-art">
-            ${ep.still_url ? `<img src="${resolveUrl(ep.still_url)}" alt="" data-raw="${ep.still_url}" onerror="imgFallback(this, this.dataset.raw)">` : ''}
-            <div class="episode-num">E${ep.episode_number}</div>
-            ${ep.progress_percent ? `<div class="episode-progress"><div class="episode-progress-fill" style="width:${ep.progress_percent}%"></div></div>` : ''}
-            ${ep.played ? '<div class="episode-played"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="9 12 11 14 15 10"/></svg></div>' : ''}
-          </div>
-          <div class="episode-info">
-            <div class="episode-title">${ep.name || '第 ' + ep.episode_number + ' 集'}</div>
-            <div class="episode-subtitle">${ep.air_date || ''}</div>
-          </div>
-        </div>
-      `).join('');
+  // 一季里「接着看的那一集」：看了一半的 → 第一集没看过的 → 第一集（同 Mac resumeEpisode）
+  resumeEpisode(episodes) {
+    const owned = (episodes || []).filter(e => e.owned);
+    return owned.find(e => e.position_ms > 0) || owned.find(e => !e.played) || owned[0] || (episodes || [])[0] || null;
+  },
 
-      grid.querySelectorAll('.episode-card').forEach(card => {
-        card.addEventListener('click', () => {
-          const epNum = card.dataset.episodeNumber;
-          this.startPlayback({
-            media_item_id: itemId,
-            title: `${showTitle} S${seasonNumber}E${epNum}`,
-            seasonNumber: parseInt(seasonNumber),
-            episodeNumber: parseInt(epNum),
-          });
-        });
-      });
-    } catch (e) {
-      console.error('Load episodes failed:', e);
-      grid.innerHTML = '<div style="color:var(--text-secondary);padding:20px;">加载剧集失败</div>';
+  // 「第 2 季 第 6 集 · 集名」（同 Mac MacStageInfo.episodeLine）：TMDB 没起名字的集不重复写
+  episodeLine(season, ep) {
+    const number = season === 0 ? `特别篇 第 ${ep.episode_number} 集` : `第 ${season} 季 第 ${ep.episode_number} 集`;
+    const name = (ep.name || '').trim();
+    if (!name || /^(第\s*\d+\s*集|Episode\s*\d+)$/i.test(name)) return number;
+    return `${number} · ${name}`;
+  },
+
+  // 画质小标签：在位文件里各挑最好的一档（同 Mac MacMediaBadge.best）
+  bestMediaBadges(files) {
+    const resHeight = raw => {
+      const s = String(raw || '').trim().toLowerCase();
+      if (s === '8k') return 4320;
+      if (s === '4k' || s === 'uhd') return 2160;
+      if (s === '2k') return 1440;
+      const n = s.replace(/[^0-9]/g, '');
+      return n ? parseInt(n, 10) : 0;
+    };
+    const badges = [];
+    const best = Math.max(0, ...files.map(f => resHeight(f.resolution)));
+    if (best >= 4320) badges.push({ text: '8K', filled: true });
+    else if (best >= 2160) badges.push({ text: '4K', filled: true });
+    else if (best >= 720) badges.push({ text: 'HD', filled: true });
+    const hdrPriority = ['Dolby Vision', 'HDR10+', 'HDR10', 'HLG', 'HDR'];
+    const hdrs = files.map(f => f.hdr).filter(Boolean)
+      .sort((a, b) => (hdrPriority.indexOf(a) + 1 || 99) - (hdrPriority.indexOf(b) + 1 || 99));
+    if (hdrs.length) {
+      const hdr = hdrs[0];
+      badges.push({ text: hdr === 'Dolby Vision' ? 'DOLBY VISION' : hdr.toUpperCase(), filled: false });
     }
+    const audio = files.flatMap(f => f.audio_streams || []);
+    const described = audio.map(a => [a.profile, a.title, a.codec].filter(Boolean).join(' ').toLowerCase());
+    if (described.some(s => s.includes('atmos'))) {
+      badges.push({ text: 'DOLBY ATMOS', filled: false });
+    } else if (described.some(s => s.includes('dts:x') || s.includes('dts-x'))) {
+      badges.push({ text: 'DTS:X', filled: false });
+    } else {
+      const channels = Math.max(0, ...audio.map(a => a.channels || 0));
+      if (channels >= 6) badges.push({ text: channels >= 8 ? '7.1' : '5.1', filled: false });
+    }
+    return badges;
+  },
+
+  // 演职员：导演在前（结构化 person 关系优先，没有退回姓名），演员跟着（同 Mac castPeople）
+  castPeople(meta) {
+    const people = [];
+    const credits = meta.director_credits || [];
+    if (credits.length) {
+      credits.forEach(d => people.push({ name: d.name, role: '导演', avatar: d.thumb_url, personId: d.tmdb_person_id }));
+    } else {
+      [...new Set(meta.directors || [])].forEach(n => people.push({ name: n, role: '导演', avatar: null, personId: null }));
+    }
+    (meta.actors || []).forEach(a => people.push({
+      name: a.name,
+      role: (a.role || '').trim() ? `饰 ${a.role}` : '',
+      avatar: a.thumb_url,
+      personId: a.tmdb_person_id,
+    }));
+    return people;
+  },
+
+  // 头图右下角的演职员：「导演 某某」「主演 某某、某某」（同 Apple TV App）
+  detailCreditsHtml(cast) {
+    const directors = cast.filter(p => p.role === '导演');
+    const actors = cast.filter(p => p.role !== '导演');
+    const line = (label, names) => (names.length
+      ? `<div class="credit-line"><span class="credit-label">${label}</span><span class="credit-names">${names.join('、')}</span></div>`
+      : '');
+    const html = line('导演', directors.slice(0, 1).map(p => p.name)) + line('主演', actors.slice(0, 3).map(p => p.name));
+    return html ? `<div class="detail-credits">${html}</div>` : '';
+  },
+
+  // 横排货架（同 Mac MacShelf）：标题 + 说明小字 + 一排卡
+  shelfHtml(title, detail, rowClass, cardsHtml) {
+    return `
+      <div class="detail-section">
+        <div class="shelf-header">
+          <h2 class="shelf-title">${title}</h2>
+          ${detail ? `<span class="shelf-detail">${detail}</span>` : ''}
+        </div>
+        <div class="shelf-wrapper">
+          <button class="shelf-arrow shelf-arrow-left" data-dir="-1" aria-label="向左">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+          </button>
+          <div class="shelf-row ${rowClass}">${cardsHtml}</div>
+          <button class="shelf-arrow shelf-arrow-right" data-dir="1" aria-label="向右">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
+      </div>
+    `;
+  },
+
+  // 分集卡（同 Mac MacEpisodeCard）：剧照 + 已看角标 + 左下「看到 mm:ss / ▶ 片长」压进度条，
+  // 悬停浮出播放键；下面第几集、集名、三行简介、首播日期（缺集写「缺集」并置灰）
+  episodeCardHtml(ep, st, runtimeMinutes) {
+    const inProgress = ep.position_ms > 0;
+    const bandText = inProgress ? `看到 ${fmtClock(ep.position_ms)}` : (runtimeMinutes ? `▶ ${fmtRuntime(runtimeMinutes)}` : '');
+    const isStage = !!st.episode && ep.owned && st.browseSeason === st.season
+      && ep.episode_number === st.episode.episode_number;
+    return `
+      <div class="episode-card ${ep.owned ? '' : 'missing'} ${isStage ? 'stage' : ''}" data-episode-number="${ep.episode_number}">
+        <div class="episode-art">
+          ${ep.still_url ? `<img src="${resolveUrl(ep.still_url)}" alt="" data-raw="${ep.still_url}" onerror="imgFallback(this, this.dataset.raw)">` : ''}
+          ${ep.played ? `
+            <div class="episode-watched">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="5 13 10 18 19 6"/></svg>
+              已看
+            </div>
+          ` : ''}
+          ${ep.owned ? `
+            <div class="episode-hover">
+              <button class="episode-play-btn" data-episode-number="${ep.episode_number}" title="播放">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              </button>
+            </div>
+          ` : ''}
+          ${bandText || inProgress ? `
+            <div class="episode-band">
+              ${bandText ? `<div class="episode-band-text">${bandText}</div>` : ''}
+              ${inProgress && ep.progress_percent ? `<div class="episode-progress"><div class="episode-progress-fill" style="width:${ep.progress_percent}%"></div></div>` : ''}
+            </div>
+          ` : ''}
+        </div>
+        <div class="episode-info">
+          <div class="episode-ep">第 ${ep.episode_number} 集</div>
+          <div class="episode-title">${ep.name || '第 ' + ep.episode_number + ' 集'}</div>
+          <div class="episode-overview">${ep.overview || ''}</div>
+          <div class="episode-subtitle">${ep.owned ? (ep.air_date ? String(ep.air_date).slice(0, 10) : '') : '缺集'}</div>
+        </div>
+      </div>
+    `;
+  },
+
+  // 演职员一格（同 Mac MacPersonCard）：圆头像 + 姓名 + 身份；有 TMDB 影人 id 的点进人物页
+  personCardHtml(p) {
+    return `
+      <div class="person-card" ${p.personId ? `data-person-id="${p.personId}"` : ''}>
+        ${p.avatar
+          ? `<img class="person-card-avatar" src="${resolveUrl(p.avatar)}" alt="" data-raw="${p.avatar}" onerror="this.style.visibility='hidden'">`
+          : '<div class="person-card-avatar person-card-avatar-placeholder"></div>'}
+        <div class="person-card-name">${p.name}</div>
+        <div class="person-card-role">${p.role || ''}</div>
+      </div>
+    `;
+  },
+
+  // 系列里的一部：本片标「本片」、没入库的置灰标「未入库」（同 Mac seriesShelf）
+  seriesCardHtml(part, currentId, libraryId) {
+    const current = part.media_item_id === currentId;
+    const missing = part.media_item_id == null;
+    return `
+      <div class="series-card ${missing ? 'missing' : ''}" ${part.media_item_id != null ? `data-item-id="${part.media_item_id}"` : ''} data-library-id="${libraryId}">
+        <div class="series-art">
+          ${part.poster_url ? `<img src="${resolveUrl(part.poster_url)}" alt="" data-raw="${part.poster_url}" onerror="imgFallback(this, this.dataset.raw)">` : ''}
+          ${current ? '<div class="series-badge">本片</div>' : missing ? '<div class="series-badge">未入库</div>' : ''}
+        </div>
+        <div class="series-title">${part.title}</div>
+        <div class="series-year">${part.release_date ? String(part.release_date).slice(0, 4) : ''}</div>
+      </div>
+    `;
+  },
+
+  // 页底信息（同 Apple Music 专辑页的发行信息）：事实 + 电影的在位版本
+  detailInfoHtml(info, meta, inPlace, isMovie, seasonCount) {
+    const facts = [];
+    if (info.original_title && info.original_title !== info.title) facts.push(['原名', info.original_title]);
+    if (info.year) facts.push(['年份', String(info.year)]);
+    if ((meta.genres || []).length) facts.push(['类型', meta.genres.join(' / ')]);
+    if (meta.rating) facts.push(['评分', Number(meta.rating).toFixed(1)]);
+    if (isMovie) {
+      if (meta.runtime_minutes > 0) facts.push(['片长', fmtRuntime(meta.runtime_minutes)]);
+    } else if (seasonCount > 0) {
+      facts.push(['季数', `${seasonCount} 季`]);
+    }
+    const inPlaceSize = inPlace.reduce((n, f) => n + (f.size_bytes || 0), 0);
+    facts.push(['文件', inPlace.length ? `${inPlace.length} 个 · ${fmtBytes(inPlaceSize)}` : '没有在位的文件']);
+    const versions = isMovie ? inPlace.map(f => [
+      f.resolution,
+      f.video_codec ? String(f.video_codec).toUpperCase() : null,
+      f.hdr,
+      fmtBytes(f.size_bytes),
+    ].filter(Boolean).join(' · ')) : [];
+    return `
+      <div class="detail-section detail-info">
+        <h2 class="shelf-title">信息</h2>
+        <div class="detail-info-cols">
+          <div class="detail-info-grid">
+            ${facts.map(([k, v]) => `<div class="info-row"><span class="info-label">${k}</span><span class="info-value">${v}</span></div>`).join('')}
+          </div>
+          ${versions.length ? `
+            <div class="detail-versions">
+              <div class="info-label">版本</div>
+              ${versions.map(v => `<div class="version-line">${v}</div>`).join('')}
+            </div>
+          ` : ''}
+        </div>
+      </div>
+    `;
   },
 
   // ===== 海报墙渲染 =====
@@ -1408,14 +1810,19 @@ const App = {
       // 上几档播失败了：带上让服务端跳过它们换下一档（decide.py 降档回路）
       if (this._failedTiers && this._failedTiers.length) body.failed_tiers = this._failedTiers;
 
-      // 获取续播位置
-      try {
-        const resumeResp = await API.getResume(mediaId, item.seasonNumber, item.episodeNumber);
-        const resume = resumeResp?.data || resumeResp;
-        if (resume?.position_ms > 0) {
-          body.start_ms = resume.position_ms;
-        }
-      } catch (_) { /* 无续播位置 */ }
+      // 续播位置：详情页「从头播放」带 startMs=0 必须显式传——缺省时
+      // 服务端会自己按观看记录续播（playback.py resolved_start_ms）
+      if (item.startMs != null) {
+        body.start_ms = item.startMs;
+      } else {
+        try {
+          const resumeResp = await API.getResume(mediaId, item.seasonNumber, item.episodeNumber);
+          const resume = resumeResp?.data || resumeResp;
+          if (resume?.position_ms > 0) {
+            body.start_ms = resume.position_ms;
+          }
+        } catch (_) { /* 无续播位置 */ }
+      }
       if (!alive()) return;
 
       // 服务端个别文件的决策/转码准备可能极慢：45 秒无响应给出明确错误，

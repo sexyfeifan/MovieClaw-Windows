@@ -1179,50 +1179,116 @@ img:not([loading]) {
   transform: scale(0.92);
 }
 
-.detail-hero-info {
+/* 头图舞台：左侧 Logo/文案/按钮，右下角演职员（同 Mac MacStageInfo + stageCredits） */
+.detail-stage {
   position: absolute;
   bottom: 0;
   left: 0;
   right: 0;
   padding: 40px 32px 28px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 32px;
+}
+
+.detail-stage-main {
+  max-width: 640px;
+  min-width: 0;
+}
+
+.detail-logo {
+  display: block;
+  max-width: 320px;
+  max-height: 84px;
+  object-fit: contain;
+  object-position: left bottom;
+  margin-bottom: 18px;
+  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.45));
 }
 
 .detail-title {
   font-size: 32px;
   font-weight: 700;
   letter-spacing: -0.02em;
-  margin-bottom: 10px;
+  margin-bottom: 18px;
 }
 
 .detail-meta {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin-bottom: 18px;
+  margin-bottom: 10px;
 }
 
-.detail-meta span + span::before {
-  content: '';
-  display: inline-block;
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  background: var(--text-tertiary);
-  margin-right: 8px;
-  vertical-align: middle;
+.detail-meta-text {
+  font-size: 15px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.92);
 }
 
+/* 实心 = 分辨率档，描边 = HDR/音频（同 Mac MacMediaBadge） */
 .quality-badge {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.06em;
   padding: 2px 6px;
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.15);
-  color: var(--text);
-  vertical-align: middle;
+  background: #fff;
+  color: #000;
+}
+
+.quality-badge.outlined {
+  background: transparent;
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+}
+
+.detail-episode-line {
+  font-size: 14px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.85);
+  margin-bottom: 8px;
+}
+
+.detail-hero-overview {
+  font-size: 14px;
+  line-height: 1.55;
+  color: rgba(255, 255, 255, 0.82);
+  max-width: 560px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-bottom: 18px;
+}
+
+.detail-hint {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+  margin-bottom: 12px;
+}
+
+.detail-credits {
+  flex-shrink: 0;
+  max-width: 300px;
+  padding-bottom: 6px;
+  text-align: right;
+}
+
+.credit-line {
+  font-size: 12px;
+  line-height: 1.7;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.credit-label {
+  color: rgba(255, 255, 255, 0.6);
+  margin-right: 6px;
 }
 
 .detail-actions {
@@ -1311,36 +1377,156 @@ img:not([loading]) {
   border-color: var(--accent);
 }
 
-/* 详情页布局 */
-.detail-layout {
+/* 货架标题旁的说明小字（「共 8 集 · 已看 2 集」） */
+.shelf-detail {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-left: 2px;
+}
+
+/* 系列里的一部（同 Mac seriesShelf） */
+.series-row .series-card {
+  flex: 0 0 168px;
+  width: 168px;
+  scroll-snap-align: start;
+}
+
+.series-card {
+  cursor: default;
+}
+
+.series-card[data-item-id] {
+  cursor: pointer;
+}
+
+.series-card.missing {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.series-art {
+  position: relative;
+  aspect-ratio: 2 / 3;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface-inset);
+}
+
+.series-art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.series-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  background: rgba(0, 0, 0, 0.65);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.series-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-top: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.series-year {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 2px;
+}
+
+/* 演职员一格（同 Mac MacPersonCard，圆头像 92） */
+.cast-row .person-card {
+  flex: 0 0 120px;
+  width: 120px;
+  scroll-snap-align: start;
+}
+
+.person-card {
   display: flex;
-  gap: 32px;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 4px;
+  cursor: default;
+}
+
+.person-card[data-person-id] {
+  cursor: pointer;
+}
+
+.person-card-avatar {
+  width: 92px;
+  height: 92px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--surface-inset);
+  margin-bottom: 10px;
+}
+
+.person-card-avatar-placeholder {
+  border: 1px solid var(--glass-border);
+}
+
+.person-card-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.person-card-role {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 2px;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 信息（同 Apple Music 专辑页的发行信息） */
+.detail-info-cols {
+  display: flex;
+  gap: 48px;
   align-items: flex-start;
 }
 
-.detail-content {
+.detail-info-grid {
   flex: 1;
   min-width: 0;
+  max-width: 560px;
 }
 
-.detail-sidebar {
-  width: 300px;
+.info-value {
+  color: var(--text);
+}
+
+.detail-versions {
   flex-shrink: 0;
-  position: sticky;
-  top: 20px;
 }
 
-.detail-info-block {
-  background: var(--surface-raised);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-lg);
-  padding: 20px;
+.detail-versions .info-label {
+  margin-bottom: 8px;
 }
 
-.detail-info-block h4 {
-  font-size: 13px;
-  font-weight: 650;
-  margin-bottom: 14px;
+.version-line {
+  font-size: 12px;
+  line-height: 1.8;
   color: var(--text);
 }
 
@@ -1358,50 +1544,166 @@ img:not([loading]) {
   flex-shrink: 0;
 }
 
-.info-row-cast {
-  flex-direction: column;
-  gap: 8px;
+/* 分集卡（同 Mac MacEpisodeCard：剧照 + 已看角标 + 悬停播放 + 左下进度条） */
+.episode-row .episode-card {
+  flex: 0 0 296px;
+  width: 296px;
+  scroll-snap-align: start;
 }
 
-.cast-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+.episode-card {
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface-raised);
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s;
 }
 
-.cast-item {
+.episode-card:hover {
+  transform: scale(1.02);
+  box-shadow: var(--shadow-card-hover);
+}
+
+/* 缺集置灰且不可点（同 Mac opacity 0.45 + disabled） */
+.episode-card.missing {
+  opacity: 0.45;
+  pointer-events: none;
+  cursor: default;
+}
+
+/* 头图正讲的那一集（同 Mac stage ring 白 0.7 / 2px） */
+.episode-card.stage {
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.7);
+}
+
+.episode-art {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: var(--surface-inset);
+}
+
+.episode-art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.episode-watched {
+  position: absolute;
+  top: 8px;
+  left: 8px;
   display: flex;
   align-items: center;
-  gap: 10px;
-}
-
-.cast-avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  object-fit: cover;
-  flex-shrink: 0;
-}
-
-.cast-avatar-placeholder {
-  background: var(--surface-inset);
-  border: 1px solid var(--glass-border);
-}
-
-.cast-name {
-  font-size: 12px;
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.65);
   color: var(--text);
-  font-weight: 500;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
 }
 
-.cast-role {
+.episode-hover {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.episode-card:hover .episode-hover {
+  opacity: 1;
+}
+
+.episode-play-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.22);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.12s, transform 0.12s;
+}
+
+.episode-play-btn:hover {
+  background: rgba(255, 255, 255, 0.35);
+  transform: scale(1.06);
+}
+
+/* 左下「看到 mm:ss / ▶ 片长」压着进度条 */
+.episode-band {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 18px 10px 8px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.72));
+}
+
+.episode-band-text {
+  font-size: 11px;
+  font-weight: 500;
+  color: #fff;
+  margin-bottom: 5px;
+}
+
+.episode-progress {
+  height: 3px;
+  background: rgba(255, 255, 255, 0.28);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.episode-progress-fill {
+  height: 100%;
+  background: var(--accent);
+}
+
+.episode-info {
+  padding: 10px 12px 12px;
+}
+
+.episode-ep {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.episode-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 三行简介固定高度，卡片不参差（同 Mac overview 46pt） */
+.episode-overview {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  margin-top: 6px;
+  height: 46px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.episode-subtitle {
   font-size: 11px;
   color: var(--text-tertiary);
-}
-
-.rating-score {
-  color: var(--accent);
-  font-weight: 600;
+  margin-top: 6px;
 }
 
 /* 季选择器 */
@@ -1429,10 +1731,11 @@ img:not([loading]) {
   color: var(--text);
 }
 
+/* 选中的季白底黑字（同 Mac MacSeasonTabStyle） */
 .season-pill.active {
-  background: var(--accent-soft);
-  color: var(--accent);
-  border-color: rgba(205, 214, 230, 0.3);
+  background: #fff;
+  color: #000;
+  border-color: #fff;
 }
 
 /* 合集 chips */
@@ -1458,105 +1761,42 @@ img:not([loading]) {
   color: var(--text);
 }
 
-/* 剧集进度条 */
-.episode-progress {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: rgba(0, 0, 0, 0.45);
-  border-radius: 0 0 10px 10px;
+/* 详情页下半：虚化背景压在货架后面（同 Mac lower） */
+.detail-body {
+  position: relative;
+  padding: 28px 32px 40px;
   overflow: hidden;
 }
 
-.episode-progress-fill {
+.detail-body-bg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.detail-body-bg img {
+  width: 100%;
   height: 100%;
-  background: var(--accent);
+  object-fit: cover;
+  filter: blur(48px) saturate(1.2);
+  opacity: 0.16;
+  transform: scale(1.15);
 }
 
-.detail-body {
-  padding: 28px 32px 40px;
+.detail-body-bg::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(var(--bg-content), rgba(22, 23, 28, 0.92));
 }
 
-.detail-overview {
-  font-size: 14px;
-  line-height: 1.6;
-  color: var(--text-secondary);
-  margin-bottom: 28px;
+.detail-lower {
+  position: relative;
+  z-index: 1;
 }
 
 .detail-section {
   margin-top: 28px;
-}
-
-.detail-section h3 {
-  font-size: 17px;
-  font-weight: 650;
-  margin-bottom: 14px;
-}
-
-/* 剧集网格 */
-.episode-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 16px;
-}
-
-.episode-card {
-  border-radius: var(--radius-md);
-  overflow: hidden;
-  background: var(--surface-raised);
-  cursor: default;
-  transition: transform 0.15s, box-shadow 0.15s;
-}
-
-.episode-card:hover {
-  transform: scale(1.02);
-  box-shadow: var(--shadow-card-hover);
-}
-
-.episode-art {
-  position: relative;
-  aspect-ratio: 16 / 9;
-  background: var(--surface-inset);
-}
-
-.episode-art img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.episode-num {
-  position: absolute;
-  top: 8px;
-  left: 8px;
-  background: rgba(0, 0, 0, 0.65);
-  color: var(--text);
-  font-size: 11px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 4px;
-}
-
-.episode-info {
-  padding: 10px 12px;
-}
-
-.episode-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.episode-subtitle {
-  font-size: 11px;
-  color: var(--text-secondary);
-  margin-top: 3px;
 }
 
 /* 设置 */
@@ -1987,11 +2227,12 @@ img:not([loading]) {
 
 /* ===== 响应式 ===== */
 @media (max-width: 900px) {
-  .detail-layout {
-    flex-direction: column;
+  .detail-credits {
+    display: none;
   }
-  .detail-sidebar {
-    width: 100%;
+  .detail-logo {
+    max-width: 220px;
+    max-height: 60px;
   }
   .hero-banner {
     height: clamp(280px, 56.25vw, 82vh);
@@ -2279,9 +2520,6 @@ img:not([loading]) {
 }
 .person-works {
   padding: 0 32px 40px;
-}
-.cast-item:hover {
-  background: rgba(255,255,255,0.04);
 }
 
 /* ===== Hero 慢速缩放（仅详情页） ===== */
