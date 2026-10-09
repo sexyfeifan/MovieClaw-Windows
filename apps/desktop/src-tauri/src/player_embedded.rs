@@ -2,7 +2,7 @@
 // 通过 Win32 子窗口将 mpv 画面嵌入主窗口
 
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 // Win32 API FFI
@@ -78,6 +78,8 @@ use win32::*;
 static CHILD_HWND: AtomicIsize = AtomicIsize::new(0);
 static MPV_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 static MPV_PIPE_ID: AtomicU32 = AtomicU32::new(0);
+/// 当前 mpv 实例的 IPC 管道名（launch 时写入，stop 时清空）
+static MPV_PIPE: Mutex<Option<String>> = Mutex::new(None);
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -254,6 +256,9 @@ pub fn launch_embedded_player(
     let child = cmd.spawn().map_err(|e| format!("启动 mpv 失败: {e}"))?;
     let pid = child.id();
     *MPV_PROCESS.lock().unwrap() = Some(child);
+    // 管道名必须存下来：send_mpv_command_embedded 全靠它找到 mpv。
+    // mpv 是异步建管道的，spawn 返回时管道可能还没就绪，首条命令偶发连不上属正常
+    *MPV_PIPE.lock().unwrap() = Some(pipe_name.clone());
 
     eprintln!("[embedded-player] mpv started, pid={}, hwnd={}, pipe={}", pid, child_hwnd as isize, pipe_name);
 
@@ -314,6 +319,7 @@ pub fn stop_embedded_player() -> Result<bool, String> {
             *guard = None;
         }
     }
+    *MPV_PIPE.lock().unwrap() = None;
 
     // 销毁子窗口
     let hwnd = CHILD_HWND.swap(0, Ordering::SeqCst);
@@ -325,10 +331,69 @@ pub fn stop_embedded_player() -> Result<bool, String> {
     Ok(true)
 }
 
-/// 发送 JSON 命令到 mpv IPC 管道（通过命令行或 pipe）
+/// 发送一条命令到 mpv JSON IPC，返回 mpv 的响应对象。
+/// 协议：管道上写一行 `{"command":[...],"request_id":N}`，再按 request_id 收响应；
+/// 管道里还会混着 `{"event":...}` 异步事件，按 request_id 过滤掉
 #[tauri::command]
-pub fn send_mpv_command_embedded(_command: Vec<serde_json::Value>) -> Result<bool, String> {
-    // 简化实现：通过查找 mpv 进程的 IPC pipe 发送
-    // 这里用一个简单方法：直接返回成功（完整 IPC 需要命名管道连接）
-    Ok(true)
+pub fn send_mpv_command_embedded(command: Vec<serde_json::Value>) -> Result<serde_json::Value, String> {
+    let pipe = MPV_PIPE
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("mpv 未运行")?;
+    // 整段 IO 丢进工作线程：mpv 卡死不能把 UI 线程的 invoke 拖住
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(mpv_request_blocking(&pipe, command));
+    });
+    rx.recv_timeout(std::time::Duration::from_millis(3000))
+        .map_err(|_| "mpv IPC 超时".to_string())?
+}
+
+fn mpv_request_blocking(
+    pipe: &str,
+    command: Vec<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    use std::io::{BufRead, BufReader, Write};
+
+    static REQ_ID: AtomicU64 = AtomicU64::new(1);
+    let id = REQ_ID.fetch_add(1, Ordering::SeqCst);
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(pipe)
+        .map_err(|e| format!("连接 mpv IPC 失败: {e}"))?;
+
+    let payload = serde_json::json!({ "command": command, "request_id": id });
+    file.write_all(payload.to_string().as_bytes())
+        .and_then(|_| file.write_all(b"\n"))
+        .map_err(|e| format!("写 mpv IPC 失败: {e}"))?;
+
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = reader
+            .read_line(&mut line)
+            .map_err(|e| format!("读 mpv 响应失败: {e}"))?;
+        if n == 0 {
+            return Err("mpv IPC 已关闭".into());
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = serde_json::from_str(trimmed)
+            .map_err(|e| format!("mpv 响应解析失败: {e}"))?;
+        if v.get("request_id").and_then(|r| r.as_u64()) != Some(id) {
+            continue; // 异步事件，不是本条命令的响应
+        }
+        if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+            if err != "success" {
+                return Err(format!("mpv 命令失败: {err}"));
+            }
+        }
+        return Ok(v);
+    }
 }

@@ -2070,6 +2070,10 @@ const App = {
       // 会话切到 mpv：画质重协商是 HTML5 那条链，selectQuality 据此不接
       window.__MOVIECLAW_MPV_ACTIVE = true;
 
+      // mpv 没有 media element 也没有事件：进度/时长/暂停态靠轮询喂给 UI
+      Player.startMpvPoll();
+      Player.syncEmbeddedPlayerRect();
+
       // 显示控制栏（复用现有 UI）
       Player.showControls();
       Player.autoHideControls();

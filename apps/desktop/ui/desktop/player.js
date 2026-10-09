@@ -262,11 +262,11 @@ const Player = {
         this.isSeeking = true;
         const rect = seek.getBoundingClientRect();
         const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-        if (this.video.duration) this.video.currentTime = pct * this.video.duration;
+        if (this.engDuration()) this.engSeekTo(pct * this.engDuration());
         const onMove = (e2) => {
           const rect2 = seek.getBoundingClientRect();
           const pct2 = Math.max(0, Math.min(1, (e2.clientX - rect2.left) / rect2.width));
-          if (this.video.duration) this.video.currentTime = pct2 * this.video.duration;
+          if (this.engDuration()) this.engSeekTo(pct2 * this.engDuration());
         };
         const onUp = () => {
           this.isSeeking = false;
@@ -308,8 +308,8 @@ const Player = {
     }
 
     // 快进快退
-    document.getElementById('btnRew')?.addEventListener('click', () => { this.video.currentTime = Math.max(0, this.video.currentTime - 10); });
-    document.getElementById('btnFwd')?.addEventListener('click', () => { this.video.currentTime = Math.min(this.video.duration || 0, this.video.currentTime + 10); });
+    document.getElementById('btnRew')?.addEventListener('click', () => this.engSeekBy(-10));
+    document.getElementById('btnFwd')?.addEventListener('click', () => this.engSeekBy(10));
 
     // 下一集
     document.getElementById('btnNextEp')?.addEventListener('click', () => {
@@ -330,9 +330,7 @@ const Player = {
     const volSlider = document.getElementById('volumeSlider');
     if (volSlider) {
       volSlider.addEventListener('input', () => {
-        this.video.volume = parseFloat(volSlider.value);
-        this.video.muted = this.video.volume === 0;
-        this.updateVolumeIcon();
+        this.engSetVolume(parseFloat(volSlider.value));
       });
     }
 
@@ -401,10 +399,10 @@ const Player = {
       if (document.getElementById('playerView')?.hidden) return;
       switch (e.key) {
         case ' ': case 'k': e.preventDefault(); this.togglePlay(); break;
-        case 'ArrowLeft': e.preventDefault(); this.video.currentTime = Math.max(0, this.video.currentTime - 5); break;
-        case 'ArrowRight': e.preventDefault(); this.video.currentTime = Math.min(this.video.duration || 0, this.video.currentTime + 5); break;
-        case 'ArrowUp': e.preventDefault(); this.video.volume = Math.min(1, this.video.volume + 0.1); this.updateVolumeIcon(); break;
-        case 'ArrowDown': e.preventDefault(); this.video.volume = Math.max(0, this.video.volume - 0.1); this.updateVolumeIcon(); break;
+        case 'ArrowLeft': e.preventDefault(); this.engSeekBy(-5); break;
+        case 'ArrowRight': e.preventDefault(); this.engSeekBy(5); break;
+        case 'ArrowUp': e.preventDefault(); this.engSetVolume(this.engVolume() + 0.1); break;
+        case 'ArrowDown': e.preventDefault(); this.engSetVolume(this.engVolume() - 0.1); break;
         case 'm': this.toggleMute(); break;
         case 'f': this.toggleFullscreen(); break;
         case 'Escape':
@@ -414,6 +412,13 @@ const Player = {
           this.close();
           break;
       }
+    });
+
+    // mpv 画面是主窗口的子窗口，缩放/全屏后要手动对齐到视频区域
+    window.addEventListener('resize', () => this.syncEmbeddedPlayerRect());
+    document.addEventListener('fullscreenchange', () => {
+      // 布局要等全屏切换落定才量得准
+      requestAnimationFrame(() => this.syncEmbeddedPlayerRect());
     });
   },
 
@@ -1215,7 +1220,11 @@ const Player = {
     // 顺手收掉 mpv，否则 startPlayback 开新片时旧 mpv 还压在画面上
     if (window.__MOVIECLAW_MPV_ACTIVE) {
       window.__MOVIECLAW_MPV_ACTIVE = false;
-      if (window.__TAURI__?.core?.invoke) window.__TAURI__.core.invoke('stop_embedded_player').catch(() => {});
+      this.stopMpvPoll();
+      if (window.__TAURI__?.core?.invoke) {
+        window.__TAURI__.core.invoke('set_embedded_player_visible', { visible: false }).catch(() => {});
+        window.__TAURI__.core.invoke('stop_embedded_player').catch(() => {});
+      }
     }
     // 上报最终进度
     this.reportPlaybackStop();
@@ -1245,18 +1254,148 @@ const Player = {
     clearTimeout(this.hideTimer);
   },
 
+  // ===== 播放引擎读写 =====
+  // HTML5 会话直接读写 <video>；mpv 会话没有 media element，属性靠 IPC 轮询缓存到
+  // this.mpvState，控制命令发出即返回。调用点一律走 eng*，不用关心底下是哪个引擎。
+  mpvState: null,
+  mpvPollTimer: null,
+
+  isMpv() {
+    return !!window.__MOVIECLAW_MPV_ACTIVE;
+  },
+
+  // 发一条 mpv JSON IPC 命令。失败只记日志：mpv 退了由 stop 收尾，不该把 UI 打断
+  mpvCmd(command) {
+    if (!window.__TAURI__?.core?.invoke) return Promise.resolve(null);
+    return window.__TAURI__.core.invoke('send_mpv_command_embedded', { command })
+      .catch(e => { console.warn('[mpv]', command && command[0], (e && e.message) || e); return null; });
+  },
+
+  engPos() {
+    return this.isMpv() ? (this.mpvState ? this.mpvState.time : 0) : (this.video ? this.video.currentTime : 0);
+  },
+
+  engDuration() {
+    return this.isMpv() ? (this.mpvState ? this.mpvState.duration : 0) : (this.video ? this.video.duration || 0 : 0);
+  },
+
+  engPaused() {
+    if (this.isMpv()) return this.mpvState ? this.mpvState.paused : true;
+    return !this.video || this.video.paused;
+  },
+
+  engVolume() {
+    return this.isMpv() ? (this.mpvState ? this.mpvState.volume : 1) : (this.video ? this.video.volume : 1);
+  },
+
+  engMuted() {
+    return this.isMpv() ? !!(this.mpvState && this.mpvState.muted) : !!this.video?.muted;
+  },
+
+  // 统一收口夹取：两个引擎都只认 [0, duration]
+  engSeekTo(sec) {
+    const dur = this.engDuration();
+    const t = Math.max(0, dur ? Math.min(dur, sec) : sec);
+    if (this.isMpv()) {
+      if (this.mpvState) this.mpvState.time = t;
+      this.mpvCmd(['seek', t, 'absolute']);
+    } else if (this.video) {
+      this.video.currentTime = t;
+    }
+  },
+
+  engSeekBy(delta) {
+    this.engSeekTo(this.engPos() + delta);
+  },
+
+  engSetVolume(v) {
+    const vol = Math.max(0, Math.min(1, v));
+    if (this.isMpv()) {
+      if (this.mpvState) this.mpvState.volume = vol;
+      this.mpvCmd(['set_property', 'volume', Math.round(vol * 100)]);
+    } else if (this.video) {
+      this.video.volume = vol;
+      this.video.muted = vol === 0;
+    }
+    this.updateVolumeIcon();
+  },
+
+  engSetMuted(muted) {
+    if (this.isMpv()) {
+      if (this.mpvState) this.mpvState.muted = !!muted;
+      this.mpvCmd(['set_property', 'mute', !!muted]);
+    } else if (this.video) {
+      this.video.muted = !!muted;
+    }
+    this.updateVolumeIcon();
+  },
+
+  // mpv 不推属性事件，进度条/时间/暂停态靠轮询喂成和 HTML5 一样
+  startMpvPoll() {
+    this.stopMpvPoll();
+    this.mpvState = { time: 0, duration: 0, paused: true, volume: 1, muted: false };
+    const tick = async () => {
+      if (!this.isMpv() || !this.mpvState) return;
+      const [t, d, p] = await Promise.all([
+        this.mpvCmd(['get_property', 'time-pos']),
+        this.mpvCmd(['get_property', 'duration']),
+        this.mpvCmd(['get_property', 'pause']),
+      ]);
+      if (!this.isMpv() || !this.mpvState) return;
+      if (t && typeof t.data === 'number') this.mpvState.time = t.data;
+      if (d && typeof d.data === 'number') this.mpvState.duration = d.data;
+      if (p && typeof p.data === 'boolean') {
+        this.mpvState.paused = p.data;
+        // HTML5 的 play/pause 事件在这里不会来，图标随轮询走
+        this.showIcon(p.data ? 'play' : 'pause');
+      }
+      this.updateProgress();
+    };
+    tick();
+    this.mpvPollTimer = setInterval(tick, 500);
+  },
+
+  stopMpvPoll() {
+    if (this.mpvPollTimer) { clearInterval(this.mpvPollTimer); this.mpvPollTimer = null; }
+    this.mpvState = null;
+  },
+
+  // mpv 画面是主窗口的子窗口，不跟 HTML5 布局走：视频区域一变（缩放窗口/进全屏）得手动挪它
+  syncEmbeddedPlayerRect() {
+    if (!this.isMpv() || !window.__TAURI__?.core?.invoke) return;
+    const wrap = document.querySelector('.player-video-wrap');
+    if (!wrap) return;
+    const rect = wrap.getBoundingClientRect();
+    const scale = window.devicePixelRatio || 1;
+    window.__TAURI__.core.invoke('resize_embedded_player', {
+      x: Math.round(rect.left * scale),
+      y: Math.round(rect.top * scale),
+      width: Math.round(rect.width * scale),
+      height: Math.round(rect.height * scale),
+    }).catch(() => {});
+    window.__TAURI__.core.invoke('set_embedded_player_visible', { visible: true }).catch(() => {});
+  },
+
   togglePlay() {
-    if (!this.video) return;
-    if (this.video.paused) this.video.play().catch(() => {});
-    else this.video.pause();
+    const wasPaused = this.engPaused();
+    if (this.isMpv()) {
+      if (this.mpvState) this.mpvState.paused = !wasPaused;
+      this.mpvCmd(['set_property', 'pause', !wasPaused]);
+      // HTML5 的 play/pause 事件在 mpv 会话里不会来，图标/控制条这里补上
+      this.showIcon(wasPaused ? 'pause' : 'play');
+      if (wasPaused) { this.hideCenterBtn(); this.autoHideControls(); }
+      else { this.showCenterBtn(); this.showControls(); }
+    } else if (this.video) {
+      if (this.video.paused) this.video.play().catch(() => {});
+      else this.video.pause();
+    }
   },
 
   toggleMute() {
-    if (!this.video) return;
-    this.video.muted = !this.video.muted;
-    this.updateVolumeIcon();
+    const next = !this.engMuted();
+    this.engSetMuted(next);
     const slider = document.getElementById('volumeSlider');
-    if (slider) slider.value = this.video.muted ? 0 : this.video.volume;
+    if (slider) slider.value = next ? 0 : this.engVolume();
   },
 
   toggleFullscreen() {
@@ -1311,7 +1450,7 @@ const Player = {
 
   autoHideControls() {
     clearTimeout(this.hideTimer);
-    if (this.video && !this.video.paused) {
+    if (!this.engPaused()) {
       this.hideTimer = setTimeout(() => {
         this.hideControls();
         this.hideCenterBtn();
@@ -1320,9 +1459,10 @@ const Player = {
   },
 
   updateProgress() {
-    if (!this.video || this.isSeeking) return;
-    const cur = this.video.currentTime || 0;
-    const dur = this.video.duration || 0;
+    if (this.isSeeking) return;
+    if (!this.isMpv() && !this.video) return;
+    const cur = this.engPos();
+    const dur = this.engDuration();
     const pct = dur ? (cur / dur) * 100 : 0;
 
     const fill = document.getElementById('playerSeekFill');
@@ -1346,7 +1486,9 @@ const Player = {
   updateVolumeIcon() {
     const vol = document.getElementById('iconVol');
     const mute = document.getElementById('iconMute');
-    const isMuted = !this.video || this.video.muted || this.video.volume === 0;
+    const isMuted = this.isMpv()
+      ? (this.engMuted() || this.engVolume() === 0)
+      : (!this.video || this.video.muted || this.video.volume === 0);
     if (vol) vol.style.display = isMuted ? 'none' : '';
     if (mute) mute.style.display = isMuted ? '' : 'none';
   },
@@ -1403,19 +1545,19 @@ const Player = {
   startProgressReporting() {
     this.stopProgressReporting();
     // 发送初始 start 事件
-    if (this.video && this.mediaItemId) {
-      const posMs = Math.floor(this.video.currentTime * 1000);
-      const durMs = Math.floor((this.video.duration || 0) * 1000);
+    if (this.mediaItemId) {
+      const posMs = Math.floor(this.engPos() * 1000);
+      const durMs = Math.floor(this.engDuration() * 1000);
       API.reportProgress(this.mediaItemId, 'start', posMs, durMs, this.seasonNumber, this.episodeNumber).catch(() => {});
       this.lastProgressReport = Date.now();
     }
     this.progressTimer = setInterval(() => {
-      if (!this.video || !this.mediaItemId) return;
+      if (!this.mediaItemId) return;
       const now = Date.now();
       if (now - this.lastProgressReport < 10000) return;
       this.lastProgressReport = now;
-      const posMs = Math.floor(this.video.currentTime * 1000);
-      const durMs = Math.floor((this.video.duration || 0) * 1000);
+      const posMs = Math.floor(this.engPos() * 1000);
+      const durMs = Math.floor(this.engDuration() * 1000);
       API.reportProgress(this.mediaItemId, 'progress', posMs, durMs, this.seasonNumber, this.episodeNumber).catch(() => {});
     }, 5000);
   },
@@ -1438,9 +1580,9 @@ const Player = {
   },
 
   reportPlaybackEnd() {
-    if (!this.video || !this.mediaItemId) return;
-    const posMs = Math.floor(this.video.currentTime * 1000);
-    const durMs = Math.floor((this.video.duration || 0) * 1000);
+    if (!this.mediaItemId) return;
+    const posMs = Math.floor(this.engPos() * 1000);
+    const durMs = Math.floor(this.engDuration() * 1000);
     API.reportProgress(this.mediaItemId, 'stop', posMs, durMs, this.seasonNumber, this.episodeNumber).catch(() => {});
     this.stopProgressReporting();
     this.stopSessionPing();
@@ -1456,9 +1598,9 @@ const Player = {
   },
 
   reportPlaybackStop() {
-    if (!this.video || !this.mediaItemId) return;
-    const posMs = Math.floor(this.video.currentTime * 1000);
-    const durMs = Math.floor((this.video.duration || 0) * 1000);
+    if (!this.mediaItemId) return;
+    const posMs = Math.floor(this.engPos() * 1000);
+    const durMs = Math.floor(this.engDuration() * 1000);
     API.reportProgress(this.mediaItemId, 'stop', posMs, durMs, this.seasonNumber, this.episodeNumber).catch(() => {});
   },
 
