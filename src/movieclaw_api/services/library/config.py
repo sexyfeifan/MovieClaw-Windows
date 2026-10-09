@@ -142,7 +142,11 @@ class LibraryConfigService:
         if not cleaned:
             raise BadRequestException("至少需要一个根路径（第一个为主根，新入库落在这里）")
         for path in cleaned:
-            if not path.startswith("/"):
+            # POSIX 绝对路径 (/...) 或 Windows 绝对路径 (C:\..., \\server\share)
+            _is_abs = path.startswith("/") or (
+                len(path) >= 3 and path[1] == ":" and path[2] in ("\\", "/")
+            ) or path.startswith("\\\\")
+            if not _is_abs:
                 raise BadRequestException(f"根路径必须是绝对路径：{path}")
         if len(set(cleaned)) != len(cleaned):
             raise BadRequestException("根路径存在重复项")

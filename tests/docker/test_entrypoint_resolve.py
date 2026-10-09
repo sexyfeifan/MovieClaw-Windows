@@ -19,6 +19,12 @@ import pytest
 
 _ENTRYPOINT = Path(__file__).resolve().parents[2] / "docker" / "entrypoint.sh"
 
+# entrypoint.sh 是 bash 脚本（含 wait -n -p、readlink、ln -sfn），Windows 上
+# 无法执行；Windows 侧的启动指向解析由宿主进程自己的测试覆盖。
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="entrypoint.sh 是 bash 脚本，仅 Unix 可测"
+)
+
 # 镜像的 runtime 版本，测试里统一用 1
 _RUNTIME = "1"
 
@@ -233,9 +239,12 @@ def test_unbindable_env_port_is_kept(env_root: Path) -> None:
 # 踩空都必须安静地退回镜像基线——mclaw 不可以因为一次更新而消失。
 # ---------------------------------------------------------------------------
 
-_ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[
-    platform.machine()
-]
+# platform.machine() 的取值大小写随平台而异（Windows 返回 "AMD64"），
+# 归一到小写后再查；未识别的架构按 amd64 处理——本文件的假 CLI 只需要
+# 一个稳定的文件名，不关心真实架构。
+_ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(
+    platform.machine().lower(), "amd64"
+)
 
 
 def _fake_cli(path: Path, *, executable: bool = True) -> Path:

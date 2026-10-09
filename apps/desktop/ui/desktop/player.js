@@ -1,11 +1,225 @@
 // MovieClaw Desktop — 内置 HTML5 播放器（HLS.js + Video）
 
+// ===== 自定义 HLS Loader：走 Rust proxy_api 代理，绕过 CORS + 自动携带 Cookie =====
+// HLS.js 自定义 loader 接口：constructor / load / abort / destroy
+function ProxyHlsLoader(config) {
+  this.config = config || {};
+  // stats 必须在构造时创建：hls.js 在调用 load() 之前就执行 frag.stats = loader.stats
+  this.stats = {
+    aborted: false, loaded: 0, total: 0, retry: 0, chunkCount: 0, bwEstimate: 0,
+    loading: { start: 0, first: 0, end: 0 },
+    parsing: { start: 0, end: 0 },
+    buffering: { start: 0, end: 0 },
+  };
+  this.context = null;
+  this.callbacks = null;
+}
+
+ProxyHlsLoader.prototype.destroy = function () {
+  this.callbacks = null;
+};
+
+ProxyHlsLoader.prototype.abort = function () {
+  if (this.stats) this.stats.aborted = true;
+};
+
+ProxyHlsLoader.prototype.load = function (context, config, callbacks) {
+  this.context = context;
+  this.callbacks = callbacks;
+  // 重置字段，绝不换对象 — frag.stats 持有构造时创建的引用
+  var stats = this.stats;
+  stats.aborted = false; stats.loaded = 0; stats.total = 0; stats.retry = 0;
+  stats.chunkCount = 0; stats.bwEstimate = 0;
+  stats.loading = { start: performance.now(), first: 0, end: 0 };
+  stats.parsing = { start: 0, end: 0 };
+  stats.buffering = { start: 0, end: 0 };
+
+  var url = context.url;
+  var isBinary = context.responseType === 'arraybuffer' ||
+    /\.(ts|m4s|mp4|aac|ec3|webvtt)(\?|#|$)/i.test(url);
+
+  // 通过 Rust 流代理请求（自动携带 Cookie，绕过 CORS）
+  // 不管 url 是什么格式，统一用 /__stream__?url= 完整 URL 代理
+  var fullUrl;
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    fullUrl = url;
+  } else {
+    var base = (window.__MOVIECLAW_SERVER__ || '').replace(/\/+$/, '');
+    fullUrl = base + (url.startsWith('/') ? url : '/' + url);
+  }
+  var path = '/__stream__?url=' + encodeURIComponent(fullUrl);
+
+  var self = this;
+  window.__TAURI__.core.invoke('proxy_api', {
+    method: 'GET',
+    path: path,
+    body: null,
+  }).then(function (result) {
+    if (self.stats.aborted) return;
+    self.stats.loading.first = performance.now();
+    self.stats.loading.end = performance.now();
+
+    if (result.status !== 200) {
+      callbacks.onError({ code: result.status, text: 'HTTP ' + result.status }, self.stats, context, null);
+      return;
+    }
+
+    var responseData;
+    if (isBinary) {
+      // 二进制响应（视频分片）：base64 → ArrayBuffer
+      try {
+        var binary = atob(result.body);
+        var bytes = new Uint8Array(binary.length);
+        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        responseData = bytes.buffer;
+        self.stats.loaded = bytes.length;
+        self.stats.total = bytes.length;
+      } catch (e) {
+        callbacks.onError({ code: 0, text: 'base64 解码失败: ' + e.message }, self.stats, context, null);
+        return;
+      }
+    } else {
+      responseData = result.body;
+      self.stats.loaded = result.body.length;
+      self.stats.total = result.body.length;
+    }
+
+    callbacks.onSuccess({ url: url, data: responseData, code: result.status }, self.stats, context, null);
+  }).catch(function (err) {
+    if (self.stats.aborted) return;
+    self.stats.loading.end = performance.now();
+    console.error('[ProxyHlsLoader] failed:', url, err);
+    callbacks.onError({ code: 0, text: (err && err.message) || '代理请求失败' }, self.stats, context, null);
+  });
+};
+
+// 挂到 window 确保全局可见
+window.ProxyHlsLoader = ProxyHlsLoader;
+
+// ===== 解码能力探测（移植自 web 客户端 lib/player/capability.ts，字段与服务端 ClientCapabilityIn 对应）=====
+// 不用 canPlayType（分不清「能解」和「能流畅解」），走 mediaCapabilities.decodingInfo：
+// 探测喂 RFC 6381 全串，上报归一到家族名（服务端与 ffprobe 落库的 codec_name 比对）。
+// video/audio 报空数组 = 告诉服务端「浏览器什么都不支持」→ 所有影片全量转码，起播慢。
+// v2：hdr_passthrough 改为恒 true（Chromium 自行 tone-map），v1 缓存里
+// matchMedia 判出的 false 会让服务端拒绝 HDR 影片，必须作废
+const CAPABILITY_SCHEMA_VERSION = 2;
+const CAPABILITY_CACHE_KEY = 'movieclaw.desktop.capability';
+// 4K 一档特意用 Main 10 / 高 profile：真实 4K 片源几乎都是 10bit/高码率，用 1080p 串探出来的结论对不上
+const CAPABILITY_VIDEO_MATRIX = {
+  h264: (h) => (h >= 2160 ? 'avc1.640033' : 'avc1.640028'),
+  hevc: (h) => (h >= 2160 ? 'hvc1.2.4.L153.B0' : 'hvc1.1.6.L120.90'),
+  av1: (h) => (h >= 2160 ? 'av01.0.12M.10' : 'av01.0.08M.08'),
+  vp9: (h) => (h >= 2160 ? 'vp09.02.51.10' : 'vp09.00.41.08'),
+};
+// DTS/TrueHD 不探：没有浏览器能解，服务端一律转码
+const CAPABILITY_AUDIO_MATRIX = {
+  aac: 'mp4a.40.2', ac3: 'ac-3', eac3: 'ec-3', opus: 'opus', flac: 'flac', mp3: 'mp4a.69',
+};
+const CAPABILITY_HEIGHTS = [2160, 1440, 1080, 720];
+const CAPABILITY_CHANNELS = [8, 6, 2];
+
+function capBitrateFor(height) {
+  if (height >= 2160) return 25000000;
+  if (height >= 1440) return 14000000;
+  if (height >= 1080) return 8000000;
+  return 4000000;
+}
+
+async function capDecodingInfo(mseAvailable, kind, contentType, height, channels) {
+  const unsupported = { supported: false, smooth: false, powerEfficient: false };
+  const mc = navigator.mediaCapabilities;
+  if (!mc || !mc.decodingInfo) return unsupported;
+  // 档位都经 MSE 喂分片（media-source）；无 MSE 时才用 file 语义
+  const type = mseAvailable ? 'media-source' : 'file';
+  try {
+    const r = await mc.decodingInfo(kind === 'video'
+      ? { type, video: { contentType, width: Math.round(((height || 1080) * 16) / 9), height: height || 1080, bitrate: capBitrateFor(height || 1080), framerate: 24 } }
+      : { type, audio: { contentType, channels: String(channels || 2) } });
+    return { supported: r.supported, smooth: r.smooth, powerEfficient: r.powerEfficient };
+  } catch (_) {
+    // 非法 codec 串会抛 TypeError，语义上等同不支持
+    return unsupported;
+  }
+}
+
+let capInflight = null;
+async function getCapabilitySnapshot() {
+  // UA 哈希：浏览器升级后 codec 支持可能变化，旧缓存自动作废
+  const ua = navigator.userAgent;
+  let uaHash = 0x811c9dc5;
+  for (let i = 0; i < ua.length; i++) { uaHash ^= ua.charCodeAt(i); uaHash = Math.imul(uaHash, 0x01000193) >>> 0; }
+  uaHash = uaHash.toString(16);
+  try {
+    const raw = localStorage.getItem(CAPABILITY_CACHE_KEY);
+    if (raw) {
+      const cached = JSON.parse(raw);
+      if (cached.version === CAPABILITY_SCHEMA_VERSION && cached.uaHash === uaHash) return cached.snapshot;
+    }
+  } catch (_) { /* 存储不可用则重新探 */ }
+  if (capInflight) return capInflight;
+
+  capInflight = (async () => {
+    const w = window;
+    // ManagedMediaSource 优先（与 hls.js 实际后端一致），没有则 MediaSource
+    const mse = w.ManagedMediaSource ? 'managed' : (w.MediaSource ? 'full' : 'none');
+    const mseAvailable = mse !== 'none';
+    const nativeHls = document.createElement('video').canPlayType('application/vnd.apple.mpegurl') !== '';
+
+    const video = [];
+    for (const family of Object.keys(CAPABILITY_VIDEO_MATRIX)) {
+      let pick = null;
+      for (const height of CAPABILITY_HEIGHTS) {
+        const p = await capDecodingInfo(mseAvailable, 'video', `video/mp4; codecs="${CAPABILITY_VIDEO_MATRIX[family](height)}"`, height);
+        if (p.supported && (!pick || height > pick.max_height)) pick = { max_height: height, smooth: p.smooth, power_efficient: p.powerEfficient };
+      }
+      // 一个高度都不支持 → 该家族不出现在快照（服务端据此转码）
+      if (pick) video.push({ codec: family, ...pick });
+    }
+    const audio = [];
+    for (const family of Object.keys(CAPABILITY_AUDIO_MATRIX)) {
+      let maxChannels = null;
+      for (const channels of CAPABILITY_CHANNELS) {
+        const p = await capDecodingInfo(mseAvailable, 'audio', `audio/mp4; codecs="${CAPABILITY_AUDIO_MATRIX[family]}"`, null, channels);
+        if (p.supported && (maxChannels === null || channels > maxChannels)) maxChannels = channels;
+      }
+      if (maxChannels !== null) audio.push({ codec: family, max_channels: maxChannels });
+    }
+    // mp4 恒成立；hls-fmp4 要么 MSE（hls.js）要么原生 HLS
+    const containers = ['mp4'];
+    if (mseAvailable || nativeHls) containers.push('hls-fmp4');
+    const snapshot = {
+      video, audio, containers,
+      // 恒报 true：Chromium 自己会把 HDR tone-map 到 SDR 屏（与 macOS 自研引擎
+      // 同策略）。报 false 会让服务端接管 tone-map——服务器无 GPU 时直接拒绝播放
+      hdr_passthrough: true,
+      mse, is_mobile: false, native_hls: nativeHls,
+    };
+    try {
+      localStorage.setItem(CAPABILITY_CACHE_KEY, JSON.stringify({ version: CAPABILITY_SCHEMA_VERSION, uaHash, probedAt: new Date().toISOString(), snapshot }));
+    } catch (_) { /* 写不进只是下次再探 */ }
+    return snapshot;
+  })();
+  try { return await capInflight; } finally { capInflight = null; }
+}
+window.getCapabilitySnapshot = getCapabilitySnapshot;
+
 const Player = {
   video: null,
   hls: null,
   currentTitle: '',
   hideTimer: null,
   isSeeking: false,
+  // 进度上报 & 会话保活
+  sessionId: null,
+  mediaItemId: null,
+  seasonNumber: null,
+  episodeNumber: null,
+  progressTimer: null,
+  pingTimer: null,
+  lastProgressReport: 0,
+  // JASSUB 字幕渲染
+  jassub: null,
+  jassubTracks: [],
 
   init() {
     this.video = document.getElementById('playerVideo');
@@ -39,11 +253,54 @@ const Player = {
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
       });
+
+      // Trickplay: 悬停显示缩略图预览
+      let trickplayPreview = null;
+      seek.addEventListener('mousemove', (e) => {
+        if (!this.video?.duration) return;
+        const rect = seek.getBoundingClientRect();
+        const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        const hoverTime = pct * this.video.duration;
+
+        if (!trickplayPreview) {
+          trickplayPreview = document.createElement('div');
+          trickplayPreview.className = 'trickplay-preview';
+          seek.parentElement.appendChild(trickplayPreview);
+        }
+        const timeStr = this.formatTime(hoverTime);
+        // 尝试获取 trickplay 缩略图
+        if (this.sessionData?.trickplay_url) {
+          const thumbUrl = this.sessionData.trickplay_url + '?t=' + Math.floor(hoverTime);
+          trickplayPreview.innerHTML = `<img src="${thumbUrl}" onerror="this.style.display='none'"><div class="trickplay-time">${timeStr}</div>`;
+        } else {
+          trickplayPreview.innerHTML = `<div class="trickplay-time">${timeStr}</div>`;
+        }
+        trickplayPreview.style.display = 'block';
+        trickplayPreview.style.left = (pct * 100) + '%';
+      });
+
+      seek.addEventListener('mouseleave', () => {
+        if (trickplayPreview) trickplayPreview.style.display = 'none';
+      });
     }
 
     // 快进快退
     document.getElementById('btnRew')?.addEventListener('click', () => { this.video.currentTime = Math.max(0, this.video.currentTime - 10); });
     document.getElementById('btnFwd')?.addEventListener('click', () => { this.video.currentTime = Math.min(this.video.duration || 0, this.video.currentTime + 10); });
+
+    // 下一集
+    document.getElementById('btnNextEp')?.addEventListener('click', () => {
+      if (this.sessionData?.next_episode && typeof App !== 'undefined') {
+        const next = this.sessionData.next_episode;
+        this.close();
+        App.startPlayback({
+          media_item_id: next.media_item_id || next.id,
+          title: next.title,
+          seasonNumber: next.season_number,
+          episodeNumber: next.episode_number,
+        });
+      }
+    });
 
     // 音量
     document.getElementById('btnMute')?.addEventListener('click', () => this.toggleMute());
@@ -86,6 +343,7 @@ const Player = {
       this.showIcon('play');
       this.showCenterBtn();
       this.showControls();
+      this.reportPlaybackEnd();
     });
     this.video.addEventListener('waiting', () => {
       const loading = document.getElementById('playerLoading');
@@ -220,7 +478,7 @@ const Player = {
 
     if (tabName === 'subtitles') {
       const subs = decision.subtitles || [];
-      const subUrls = session?.subtitle_urls || [];
+      const currentOffset = this.subtitleOffset || 0;
       let html = `
         <div class="player-settings-item" data-sub-index="-1" onclick="Player.selectSubtitle(-1)">
           <span class="item-label">关闭字幕</span>
@@ -242,7 +500,18 @@ const Player = {
           </div>
         `;
       }).join('');
-      if (!subs.length) html = '<div style="padding:20px;text-align:center;color:rgba(255,255,255,0.4);font-size:13px">无可用字幕</div>';
+      // 字幕延迟调整
+      html += `
+        <div class="player-settings-item" style="cursor:default">
+          <span class="item-label">字幕延迟</span>
+          <div class="subtitle-offset-controls">
+            <button class="offset-btn" onclick="Player.adjustSubtitleOffset(-0.5)">-0.5s</button>
+            <span class="offset-value" id="subOffsetValue">${currentOffset > 0 ? '+' : ''}${currentOffset.toFixed(1)}s</span>
+            <button class="offset-btn" onclick="Player.adjustSubtitleOffset(0.5)">+0.5s</button>
+          </div>
+        </div>
+      `;
+      if (!subs.length) html = '<div style="padding:20px;text-align:center;color:rgba(255,255,255,0.4);font-size:13px">无可用字幕</div>' + html.substring(html.indexOf('<div class="player-settings-item" style="cursor:default">'));
       content.innerHTML = html;
     }
 
@@ -268,9 +537,26 @@ const Player = {
       const source = session?.source || {};
       const video = decision.video || {};
       const tier = decision.tier;
+      const currentQuality = this.currentQuality || 0; // 0=原画
       const html = `
-        <div class="player-settings-item active">
-          <span class="item-label">自动（推荐）</span>
+        <div class="player-settings-item ${currentQuality === 0 ? 'active' : ''}" onclick="Player.selectQuality(0)">
+          <span class="item-label">原画</span>
+          <span class="item-info">不压缩</span>
+          <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
+        </div>
+        <div class="player-settings-item ${currentQuality === 1080 ? 'active' : ''}" onclick="Player.selectQuality(1080)">
+          <span class="item-label">1080p</span>
+          <span class="item-info">~6 Mbps</span>
+          <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
+        </div>
+        <div class="player-settings-item ${currentQuality === 720 ? 'active' : ''}" onclick="Player.selectQuality(720)">
+          <span class="item-label">720p</span>
+          <span class="item-info">~3 Mbps</span>
+          <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
+        </div>
+        <div class="player-settings-item ${currentQuality === 480 ? 'active' : ''}" onclick="Player.selectQuality(480)">
+          <span class="item-label">480p</span>
+          <span class="item-info">~1.5 Mbps</span>
           <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
         </div>
         <div style="padding:12px 16px;border-top:1px solid rgba(255,255,255,0.06)">
@@ -298,32 +584,78 @@ const Player = {
 
   selectSubtitle(index) {
     if (!this.video) return;
-    // 禁用所有字幕轨
+    // 禁用所有 HTML5 字幕轨
     for (let i = 0; i < this.video.textTracks.length; i++) {
       this.video.textTracks[i].mode = 'disabled';
     }
-    // 启用选中轨
-    if (index >= 0 && index < this.video.textTracks.length) {
-      this.video.textTracks[index].mode = 'showing';
+
+    // 如果有 JASSUB，用它处理 ASS 字幕
+    if (this.jassub) {
+      if (index < 0) {
+        // 关闭字幕
+        this.jassub.setTrack?.(null);
+        this.jassub.freeTrack?.();
+      } else {
+        // 判断选中的是否是 ASS 字幕
+        const decision = this.sessionData?.decision || {};
+        const subs = decision.subtitles || [];
+        const sub = subs[index];
+        if (sub && (sub.kind === 'ass' || sub.kind === 'ssa')) {
+          const assIdx = this.jassubTracks.findIndex((_, i) => {
+            const s = subs.filter((s2, j) => s2 && (s2.kind === 'ass' || s2.kind === 'ssa'))[i];
+            return true;
+          });
+          // 直接加载对应的 ASS URL
+          const assUrls = (this.sessionData?.subtitle_urls || []).filter((_, i) => {
+            const s = subs[i];
+            return s && (s.kind === 'ass' || s.kind === 'ssa');
+          });
+          const assSubIdx = subs.slice(0, index + 1).filter(s => s && (s.kind === 'ass' || s.kind === 'ssa')).length - 1;
+          if (assSubIdx >= 0 && assUrls[assSubIdx]) {
+            this.jassub.setTrack?.(assUrls[assSubIdx]);
+          }
+        } else {
+          // 非 ASS 字幕：关闭 JASSUB，用 HTML5 textTracks
+          this.jassub.freeTrack?.();
+          if (index < this.video.textTracks.length) {
+            this.video.textTracks[index].mode = 'showing';
+          }
+        }
+      }
+    } else {
+      // 无 JASSUB：纯 HTML5 textTracks
+      if (index >= 0 && index < this.video.textTracks.length) {
+        this.video.textTracks[index].mode = 'showing';
+      }
     }
+
     // 更新选中态
     document.querySelectorAll('#playerSettingsContent .player-settings-item').forEach(el => {
       el.classList.toggle('active', parseInt(el.dataset.subIndex) === index);
     });
   },
 
+  subtitleOffset: 0, // 字幕延迟（秒）
+
+  adjustSubtitleOffset(delta) {
+    this.subtitleOffset = Math.max(-30, Math.min(30, this.subtitleOffset + delta));
+    const el = document.getElementById('subOffsetValue');
+    if (el) el.textContent = (this.subtitleOffset > 0 ? '+' : '') + this.subtitleOffset.toFixed(1) + 's';
+    // 应用字幕偏移（通过 track.cues 调整在 Chromium 中不直接支持，使用 CSS transform 或 video.currentTime 的替代方案）
+    // Chromium WebView2 中可用 textTracks 的 mode 切换 + track offset hack
+    // 这里先记录 offset 值，实际渲染偏移需要在 CSS 或 cue 调整中应用
+  },
+
   selectAudio(ref) {
-    // HTML5 video 不支持动态音轨切换（多音轨文件）
-    // 对于 HLS.js 可以通过 audioTracks 切换
+    // HLS.js 音轨切换
     if (this.hls && this.hls.audioTracks) {
       const idx = this.hls.audioTracks.findIndex(t => t.id === ref || t.name === ref);
       if (idx >= 0) this.hls.audioTrack = idx;
     }
     // 更新选中态
     document.querySelectorAll('#playerSettingsContent .player-settings-item').forEach(el => {
-      el.classList.remove('active');
+      el.classList.toggle('active', el.getAttribute('onclick')?.includes(`'${ref}'`));
     });
-    event?.target?.closest('.player-settings-item')?.classList.add('active');
     this.hideSettings();
   },
 
@@ -336,6 +668,82 @@ const Player = {
     });
     this.hideSettings();
     this.hideSpeedPanel();
+  },
+
+  currentQuality: 0, // 0=原画, 否则 maxHeight
+
+  selectQuality(maxHeight) {
+    this.currentQuality = maxHeight;
+    // 如果 session data 存在，重新请求播放会话
+    if (this.sessionData?.media_item_id && typeof App !== 'undefined') {
+      const currentTime = this.video ? this.video.currentTime : 0;
+      this.video?.pause();
+      const loading = document.getElementById('playerLoading');
+      const loadingText = document.getElementById('playerLoadingText');
+      if (loading) loading.hidden = false;
+      if (loadingText) loadingText.textContent = '正在切换画质...';
+
+      // 重新协商 session (带 max_height)
+      const mediaId = this.sessionData.media_item_id;
+      API.request('/playback/sessions', {
+        method: 'POST',
+        body: {
+          media_item_id: mediaId,
+          capability: {
+            universal: true,
+            hdr_passthrough: maxHeight === 0,
+            containers: ['mp4', 'hls-fmp4'],
+            video: maxHeight > 0 ? [{ max_height: maxHeight }] : [],
+            audio: [],
+            mse: 'managed',
+            is_mobile: false,
+            native_hls: true,
+          },
+          client: 'web',
+          start_ms: Math.floor(currentTime * 1000),
+          attempt_id: Date.now().toString(36) + Math.random().toString(36).slice(2),
+        },
+      }).then(resp => {
+        const session = resp?.data || resp;
+        if (!session?.stream_url) throw new Error('切换画质失败');
+        const origin = API.baseUrl;
+        const streamUrl = session.stream_url.startsWith('http')
+          ? session.stream_url
+          : origin + (session.stream_url.startsWith('/api/') ? session.stream_url : '/api/v1' + (session.stream_url.startsWith('/') ? session.stream_url : '/' + session.stream_url));
+        this.sessionData = session;
+        if (!session.media_item_id) session.media_item_id = mediaId;
+
+        // 重新加载流
+        if (this.hls) { this.hls.destroy(); this.hls = null; }
+        const isHls = streamUrl.includes('.m3u8') || streamUrl.includes('/hls');
+        if (isHls && window.Hls && Hls.isSupported()) {
+          this.hls = new Hls({ maxBufferLength: 30, loader: window.__TAURI__ ? ProxyHlsLoader : undefined });
+          this.hls.loadSource(streamUrl);
+          this.hls.attachMedia(this.video);
+          this.hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            this.video.currentTime = currentTime;
+            this.video.play().catch(() => {});
+            if (loading) loading.hidden = true;
+          });
+        } else {
+          this.video.src = streamUrl;
+          this.video.addEventListener('loadedmetadata', () => {
+            this.video.currentTime = currentTime;
+            this.video.play().catch(() => {});
+            if (loading) loading.hidden = true;
+          }, { once: true });
+        }
+      }).catch(e => {
+        console.error('Quality switch failed:', e);
+        if (loadingText) loadingText.textContent = '切换画质失败: ' + (e.message || e);
+        setTimeout(() => { if (loading) loading.hidden = true; }, 2000);
+      });
+    }
+    // 更新 UI
+    document.querySelectorAll('#playerSettingsContent .player-settings-item').forEach(el => {
+      el.classList.remove('active');
+    });
+    this.hideSettings();
   },
 
   // ===== 跳过片头/片尾 =====
@@ -412,6 +820,21 @@ const Player = {
 
     view.hidden = false;
     this.sessionData = sessionData || null;
+    this.sessionId = sessionData?.session_id || sessionData?.id || null;
+    this.mediaItemId = sessionData?.media_item_id || sessionData?.mediaItemId || null;
+    this.seasonNumber = sessionData?.season_number ?? null;
+    this.episodeNumber = sessionData?.episode_number ?? null;
+    this.lastProgressReport = 0;
+
+    // 显示/隐藏"下一集"按钮
+    const nextBtn = document.getElementById('btnNextEp');
+    if (nextBtn) {
+      nextBtn.style.display = sessionData?.next_episode ? '' : 'none';
+    }
+
+    // 启动进度上报定时器
+    this.startProgressReporting();
+    this.startSessionPing();
 
     // 初始化片段/章节
     this.initSegments(sessionData?.segments);
@@ -425,7 +848,9 @@ const Player = {
     if (isHls && window.Hls && Hls.isSupported()) {
       this.hls = new Hls({
         maxBufferLength: 30,
+        loader: window.__TAURI__ ? ProxyHlsLoader : undefined,
         maxMaxBufferLength: 60,
+        loader: window.__TAURI__ ? ProxyHlsLoader : undefined,
       });
       this.hls.loadSource(streamUrl);
       this.hls.attachMedia(this.video);
@@ -461,12 +886,23 @@ const Player = {
       });
     }
 
+    // JASSUB: 初始化 ASS 字幕渲染（如果有 ASS 类型字幕）
+    this.initJassub(subtitles, sessionData);
+
     this.showControls();
     this.autoHideControls();
   },
 
   // 关闭播放器
   close() {
+    // 作废仍在途的 startPlayback：否则请求回来晚一步会把新界面覆盖成旧影片
+    if (typeof App !== 'undefined') App._playbackSeq = (App._playbackSeq || 0) + 1;
+    // 上报最终进度
+    this.reportPlaybackStop();
+    this.stopProgressReporting();
+    this.stopSessionPing();
+    this.destroyJassub();
+
     const view = document.getElementById('playerView');
     if (view) view.hidden = true;
     if (this.hls) { this.hls.destroy(); this.hls = null; }
@@ -584,6 +1020,113 @@ const Player = {
     const isMuted = !this.video || this.video.muted || this.video.volume === 0;
     if (vol) vol.style.display = isMuted ? 'none' : '';
     if (mute) mute.style.display = isMuted ? '' : 'none';
+  },
+
+  // ===== JASSUB ASS 字幕渲染 =====
+  initJassub(subtitles, sessionData) {
+    // 清理旧的 JASSUB 实例
+    this.destroyJassub();
+
+    if (!subtitles || !subtitles.length) return;
+    if (typeof JASSUB === 'undefined') {
+      console.warn('[JASSUB] Library not loaded');
+      return;
+    }
+
+    // 查找 ASS/SSA 字幕轨
+    const decision = sessionData?.decision || {};
+    const assSubs = decision.subtitles || [];
+    const assUrls = subtitles.filter((_, i) => {
+      const sub = assSubs[i];
+      return sub && (sub.kind === 'ass' || sub.kind === 'ssa' || sub.format === 'ass' || sub.format === 'ssa');
+    });
+
+    if (!assUrls.length) return;
+
+    try {
+      // 创建 JASSUB 渲染器
+      this.jassub = new JASSUB({
+        video: this.video,
+        subContent: null, // 从 URL 加载
+        subUrl: assUrls[0],
+        availableFonts: { 'default': 'jassub-default.woff2' },
+        workerUrl: 'jassub-worker.js',
+        wasmUrl: 'jassub-worker.wasm',
+        fallbackFont: 'jassub-default.woff2',
+        debug: false,
+      });
+      this.jassubTracks = assUrls;
+      console.log('[JASSUB] Initialized with', assUrls.length, 'ASS track(s)');
+    } catch (e) {
+      console.warn('[JASSUB] Init failed:', e);
+    }
+  },
+
+  destroyJassub() {
+    if (this.jassub) {
+      try { this.jassub.destroy(); } catch (_) {}
+      this.jassub = null;
+    }
+    this.jassubTracks = [];
+  },
+
+  // ===== 进度上报 & 会话保活 =====
+  startProgressReporting() {
+    this.stopProgressReporting();
+    // 发送初始 start 事件
+    if (this.video && this.mediaItemId) {
+      const posMs = Math.floor(this.video.currentTime * 1000);
+      const durMs = Math.floor((this.video.duration || 0) * 1000);
+      API.reportProgress(this.mediaItemId, 'start', posMs, durMs, this.seasonNumber, this.episodeNumber).catch(() => {});
+      this.lastProgressReport = Date.now();
+    }
+    this.progressTimer = setInterval(() => {
+      if (!this.video || !this.mediaItemId) return;
+      const now = Date.now();
+      if (now - this.lastProgressReport < 10000) return;
+      this.lastProgressReport = now;
+      const posMs = Math.floor(this.video.currentTime * 1000);
+      const durMs = Math.floor((this.video.duration || 0) * 1000);
+      API.reportProgress(this.mediaItemId, 'progress', posMs, durMs, this.seasonNumber, this.episodeNumber).catch(() => {});
+    }, 5000);
+  },
+
+  stopProgressReporting() {
+    if (this.progressTimer) { clearInterval(this.progressTimer); this.progressTimer = null; }
+  },
+
+  startSessionPing() {
+    this.stopSessionPing();
+    if (!this.sessionId) return;
+    this.pingTimer = setInterval(() => {
+      if (!this.sessionId) return;
+      API.sessionPing(this.sessionId).catch(() => {});
+    }, 30000);
+  },
+
+  stopSessionPing() {
+    if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
+  },
+
+  reportPlaybackEnd() {
+    if (!this.video || !this.mediaItemId) return;
+    const posMs = Math.floor(this.video.currentTime * 1000);
+    const durMs = Math.floor((this.video.duration || 0) * 1000);
+    API.reportProgress(this.mediaItemId, 'stop', posMs, durMs, this.seasonNumber, this.episodeNumber).catch(() => {});
+    this.stopProgressReporting();
+    this.stopSessionPing();
+    if (durMs > 0 && posMs / durMs >= 0.9) {
+      if (typeof App !== 'undefined' && App.onPlaybackEnded) {
+        App.onPlaybackEnded(this.sessionData);
+      }
+    }
+  },
+
+  reportPlaybackStop() {
+    if (!this.video || !this.mediaItemId) return;
+    const posMs = Math.floor(this.video.currentTime * 1000);
+    const durMs = Math.floor((this.video.duration || 0) * 1000);
+    API.reportProgress(this.mediaItemId, 'stop', posMs, durMs, this.seasonNumber, this.episodeNumber).catch(() => {});
   },
 
   formatTime(secs) {

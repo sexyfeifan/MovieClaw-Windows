@@ -1,14 +1,4 @@
 [[permission]]
-identifier = "allow-launch-player"
-description = "Allows launching the media player with a stream URL"
-commands.allow = ["launch_player"]
-
-[[permission]]
-identifier = "allow-stop-player"
-description = "Allows stopping the media player"
-commands.allow = ["stop_player"]
-
-[[permission]]
 identifier = "allow-save-server-url"
 description = "Allows saving the server URL to config"
 commands.allow = ["save_server_url"]
@@ -29,11 +19,6 @@ description = "Allows probing a server for health check"
 commands.allow = ["probe_server"]
 
 [[permission]]
-identifier = "allow-send-mpv-command"
-description = "Allows sending commands to the mpv player via IPC"
-commands.allow = ["send_mpv_command"]
-
-[[permission]]
 identifier = "allow-check-for-updates"
 description = "Allows checking for software updates from GitHub"
 commands.allow = ["check_for_updates"]
@@ -49,21 +34,6 @@ description = "Allows opening the release page in browser"
 commands.allow = ["open_release_page"]
 
 [[permission]]
-identifier = "allow-show-volume-window"
-description = "Allows showing the volume control overlay window"
-commands.allow = ["show_volume_window"]
-
-[[permission]]
-identifier = "allow-hide-volume-window"
-description = "Allows hiding the volume control overlay window"
-commands.allow = ["hide_volume_window"]
-
-[[permission]]
-identifier = "allow-toggle-volume-window"
-description = "Allows toggling the volume control overlay window"
-commands.allow = ["toggle_volume_window"]
-
-[[permission]]
 identifier = "allow-proxy-api"
 description = "Allows proxying API requests to the MovieClaw server"
 commands.allow = ["proxy_api"]
@@ -74,22 +44,58 @@ description = "Allows reading the configured server URL"
 commands.allow = ["get_server_url"]
 
 [[permission]]
+identifier = "allow-launch-embedded-player"
+description = "Allows launching the embedded mpv player"
+commands.allow = ["launch_embedded_player"]
+
+[[permission]]
+identifier = "allow-resize-embedded-player"
+description = "Allows resizing the embedded player window"
+commands.allow = ["resize_embedded_player"]
+
+[[permission]]
+identifier = "allow-set-embedded-player-visible"
+description = "Allows showing/hiding the embedded player"
+commands.allow = ["set_embedded_player_visible"]
+
+[[permission]]
+identifier = "allow-stop-embedded-player"
+description = "Allows stopping the embedded player"
+commands.allow = ["stop_embedded_player"]
+
+[[permission]]
+identifier = "allow-send-mpv-command-embedded"
+description = "Allows sending commands to the embedded mpv player"
+commands.allow = ["send_mpv_command_embedded"]
+
+[[permission]]
+identifier = "allow-get-main-window-hwnd"
+description = "Allows getting the main window handle for embedding"
+commands.allow = ["get_main_window_hwnd"]
+
+[[permission]]
+identifier = "allow-discover-servers"
+description = "Allows discovering MovieClaw servers on the local network"
+commands.allow = ["discover_servers"]
+
+[[permission]]
 identifier = "default"
 description = "Default permissions for MovieClaw Desktop"
 permissions = [
-    "allow-launch-player",
-    "allow-stop-player",
     "allow-save-server-url",
     "allow-load-server-url",
     "allow-clear-server-url",
     "allow-probe-server",
-    "allow-send-mpv-command",
     "allow-check-for-updates",
     "allow-open-download-page",
     "allow-open-release-page",
-    "allow-show-volume-window",
-    "allow-hide-volume-window",
-    "allow-toggle-volume-window",
     "allow-proxy-api",
-    "allow-get-server-url"
+    "allow-get-server-url",
+    "allow-launch-embedded-player",
+    "allow-resize-embedded-player",
+    "allow-set-embedded-player-visible",
+    "allow-stop-embedded-player",
+    "allow-send-mpv-command-embedded",
+    "allow-get-main-window-hwnd",
+    "allow-discover-servers"
 ]

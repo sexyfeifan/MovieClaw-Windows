@@ -71,3 +71,8 @@ cli/LICENSE
 # CI 都现场导出；本地缺失时服务端从代码现算，编译 Go CLI 前跑一次该脚本。
 src/movieclaw_api/data/spec.json
 cli/internal/spec/data/spec.json
+
+# 打包残留：脚本变量未展开的字面量目录、根目录散落的旧发布包
+apps/desktop/$dist/
+apps/desktop/$portable/
+/MovieClaw-Desktop-*.zip

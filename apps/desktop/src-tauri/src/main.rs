@@ -2,33 +2,47 @@
 
 mod api_proxy;
 mod connect;
-mod player;
+mod lan_discovery;
+mod player_embedded;
 mod updater;
-mod volume_overlay;
 
 use tauri::Manager;
 use tauri::WebviewUrl;
 use tauri::WebviewWindowBuilder;
 
-const INJECT_SCRIPT: &str = include_str!("../../ui/inject.js");
+/// 获取主窗口 HWND
+#[tauri::command]
+fn get_main_window_hwnd(window: tauri::WebviewWindow) -> Result<isize, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        match window.window_handle() {
+            Ok(handle) => {
+                if let RawWindowHandle::Win32(win32) = handle.as_raw() {
+                    return Ok(win32.hwnd.get() as isize);
+                }
+                Err("无法获取窗口句柄".into())
+            }
+            Err(e) => Err(format!("获取窗口句柄失败: {e}")),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+        Err("仅支持 Windows".into())
+    }
+}
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // 已有实例运行时，聚焦主窗口
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_focus();
             }
         }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
-        .on_window_event(|_, event| {
-            if let tauri::WindowEvent::Destroyed = event {
-                let _ = player::stop_player();
-            }
-        })
         .setup(|app| {
-            // 启动时检查是否已有服务器配置，决定加载连接页还是桌面 UI
             let start_url = connect::load_server_url().unwrap_or_default();
             let url = if start_url.is_empty() {
                 WebviewUrl::App("connect.html".into())
@@ -36,11 +50,9 @@ fn main() {
                 WebviewUrl::App("desktop/index.html".into())
             };
 
-            // 注入服务器地址到 JS 上下文（始终注入，首次为空）
             let inject = format!(
-                "window.__MOVIECLAW_SERVER__ = {};\n{}",
-                serde_json::to_string(&start_url).unwrap(),
-                INJECT_SCRIPT
+                "window.__MOVIECLAW_SERVER__ = {};",
+                serde_json::to_string(&start_url).unwrap()
             );
 
             WebviewWindowBuilder::new(app, "main", url)
@@ -75,12 +87,9 @@ fn main() {
                             }
                         }
                         "reconnect" => {
-                            // 清除服务器配置，回到连接页
                             let _ = connect::clear_server_url();
-                            let _ = player::stop_player();
                             if let Some(w) = app.get_webview_window("main") {
                                 let _ = w.show();
-                                // 用 Tauri 内部协议加载 connect.html
                                 let _ = w.eval("window.location.href = 'http://tauri.localhost/connect.html'");
                                 let _ = w.set_focus();
                             }
@@ -121,7 +130,6 @@ fn main() {
                             });
                         }
                         "quit" => {
-                            let _ = player::stop_player();
                             app.exit(0);
                         }
                         _ => {}
@@ -166,16 +174,17 @@ fn main() {
             connect::clear_server_url,
             connect::get_server_url,
             connect::probe_server,
-            player::launch_player,
-            player::stop_player,
-            player::send_mpv_command,
             updater::check_for_updates,
             updater::open_download_page,
             updater::open_release_page,
-            volume_overlay::show_volume_window,
-            volume_overlay::hide_volume_window,
-            volume_overlay::toggle_volume_window,
             api_proxy::proxy_api,
+            get_main_window_hwnd,
+            lan_discovery::discover_servers,
+            player_embedded::launch_embedded_player,
+            player_embedded::resize_embedded_player,
+            player_embedded::set_embedded_player_visible,
+            player_embedded::stop_embedded_player,
+            player_embedded::send_mpv_command_embedded,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MovieClaw Desktop");

@@ -4,10 +4,42 @@ use std::sync::{LazyLock, Mutex};
 
 /// 存储登录后的 Cookie（session）
 static COOKIES: LazyLock<Mutex<HashMap<String, String>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+    LazyLock::new(|| Mutex::new(load_cookies_from_disk()));
+
+/// Cookie 持久化路径
+fn cookie_file_path() -> std::path::PathBuf {
+    let base = std::env::var("APPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    base.join("movieclaw-desktop").join("cookies.json")
+}
+
+/// 从磁盘加载已保存的 cookies
+fn load_cookies_from_disk() -> HashMap<String, String> {
+    let path = cookie_file_path();
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&text) {
+            eprintln!("[cookies] Loaded {} cookies from disk", map.len());
+            return map;
+        }
+    }
+    HashMap::new()
+}
+
+/// 保存 cookies 到磁盘
+fn save_cookies_to_disk(cookies: &HashMap<String, String>) {
+    let path = cookie_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string(cookies) {
+        let _ = std::fs::write(&path, json);
+    }
+}
 
 /// 代理前端 API 请求到 MovieClaw 服务器，自动携带 Cookie。
 /// 特殊路径 `/__image__?url=...` 返回图片 base64 data URI（解决 <img> 无 Cookie 401）。
+/// 特殊路径 `/__stream__?url=...` 代理 HLS 流请求（m3u8 清单 + 视频分片），自动携带 Cookie。
 #[tauri::command]
 pub async fn proxy_api(
     method: String,
@@ -20,6 +52,14 @@ pub async fn proxy_api(
         let img_path = raw.strip_prefix("url=").unwrap_or(raw);
         let decoded = urlencoding_decode(img_path);
         return fetch_image_as_data_uri(&decoded).await;
+    }
+
+    // 流代理分支（HLS m3u8/ts 分片）
+    if let Some(stripped) = path.strip_prefix("/__stream__") {
+        let raw = stripped.trim_start_matches('?');
+        let stream_url = raw.strip_prefix("url=").unwrap_or(raw);
+        let decoded = urlencoding_decode(stream_url);
+        return fetch_stream_proxy(&decoded).await;
     }
 
     let server = crate::connect::load_server_url()
@@ -126,6 +166,69 @@ async fn fetch_image_as_data_uri(path_or_url: &str) -> Result<ProxyResponse, Str
     }
 }
 
+/// 代理 HLS 流请求（m3u8 清单 + ts 分片），自动携带 Cookie，绕过 CORS
+async fn fetch_stream_proxy(url: &str) -> Result<ProxyResponse, String> {
+    let full_url = if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else {
+        let server = crate::connect::load_server_url()
+            .map_err(|e| format!("获取服务器地址失败: {e}"))?;
+        if server.is_empty() {
+            return Err("未配置服务器地址".into());
+        }
+        let base = server.trim_end_matches('/');
+        if url.starts_with('/') {
+            format!("{base}{url}")
+        } else {
+            format!("{base}/{url}")
+        }
+    };
+
+    eprintln!("[proxy_stream] GET {}", full_url);
+    let mut req = ureq::get(&full_url);
+    if let Some(ck) = cookie_header() {
+        req = req.set("Cookie", &ck);
+    }
+
+    match req.call() {
+        Ok(resp) => {
+            let status = resp.status();
+            let content_type = resp.content_type().to_string();
+            capture_cookies_from_headers(&resp);
+
+            // 二进制内容（ts/m4s/mp4 分片）→ base64
+            if content_type.contains("video")
+                || content_type.contains("audio")
+                || content_type.contains("octet-stream")
+                || content_type.contains("mp2t")
+                || content_type.contains("mp4")
+            {
+                let bytes = resp
+                    .into_reader()
+                    .bytes()
+                    .collect::<Result<Vec<u8>, _>>()
+                    .map_err(|e| format!("读取流数据失败: {e}"))?;
+                let b64 = base64_encode(&bytes);
+                Ok(ProxyResponse { status, body: b64 })
+            } else {
+                // 文本内容（m3u8 清单）→ 直接返回文本
+                let text = resp.into_string().unwrap_or_default();
+                Ok(ProxyResponse { status, body: text })
+            }
+        }
+        Err(ureq::Error::Status(code, resp)) => {
+            capture_cookies_from_headers(&resp);
+            let text = resp.into_string().unwrap_or_default();
+            eprintln!("[proxy_stream] HTTP {code} for {full_url}");
+            Ok(ProxyResponse { status: code, body: text })
+        }
+        Err(e) => {
+            eprintln!("[proxy_stream] Error: {e}");
+            Err(format!("流请求失败: {e}"))
+        }
+    }
+}
+
 /// 获取 Cookie 字符串
 fn cookie_header() -> Option<String> {
     let cookies = COOKIES.lock().unwrap();
@@ -161,6 +264,7 @@ fn store_cookie(cookie_val: &str) {
                 } else {
                     cookies.insert(name, value);
                 }
+                save_cookies_to_disk(&cookies);
             }
         }
     }

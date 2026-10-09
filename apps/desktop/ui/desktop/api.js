@@ -109,8 +109,9 @@ const API = {
     return this.request(`/libraries/${libraryId}/items/${itemId}`);
   },
 
-  getItemEpisodes(libraryId, itemId) {
-    return this.request(`/libraries/${libraryId}/items/${itemId}/episodes`);
+  getItemEpisodes(libraryId, itemId, seasonNumber) {
+    const qs = seasonNumber != null ? `?season_number=${seasonNumber}` : '';
+    return this.request(`/libraries/${libraryId}/items/${itemId}/episodes${qs}`);
   },
 
   // ===== 合集 =====
@@ -131,28 +132,76 @@ const API = {
     return this.request(`/search/library?q=${encodeURIComponent(query)}`);
   },
 
-  // ===== 播放 =====
-  startPlayback(mediaItemId, options = {}) {
-    return this.request('/playback/sessions', {
-      method: 'POST',
-      body: {
-        mediaItemId,
-        capability: { universal: true },
-        ...options,
-      },
-    });
+  // ===== 人物 =====
+  getPerson(personId) {
+    return this.request(`/people/${personId}`);
   },
 
-  reportProgress(sessionId, event, timeMs, durationMs) {
-    return this.request('/playback/progress', {
-      method: 'POST',
-      body: {
-        sessionId,
-        event,
-        timeMs,
-        durationMs,
-      },
-    });
+  getPersonCredits(personId) {
+    return this.request(`/people/${personId}/credits`);
+  },
+
+  // ===== 播放 =====
+  // 注意：此方法为备用接口，主要播放入口在 app.js 的 startPlayback
+  startPlaybackSession(body) {
+    return this.request('/playback/sessions', { method: 'POST', body });
+  },
+
+  // 进度上报
+  // POST /playback/progress body: { media_item_id, event, position_ms, duration_ms, season_number?, episode_number? }
+  // event: "start" | "progress" | "stop"
+  reportProgress(mediaItemId, event, positionMs, durationMs, seasonNumber, episodeNumber) {
+    const body = {
+      media_item_id: mediaItemId,
+      event,
+      position_ms: positionMs,
+    };
+    if (durationMs != null) body.duration_ms = durationMs;
+    if (seasonNumber != null) body.season_number = seasonNumber;
+    if (episodeNumber != null) body.episode_number = episodeNumber;
+    return this.request('/playback/progress', { method: 'POST', body });
+  },
+
+  // 续播位置
+  getResume(mediaItemId, seasonNumber, episodeNumber) {
+    const params = new URLSearchParams({ media_item_id: mediaItemId });
+    if (seasonNumber != null) params.set('season_number', seasonNumber);
+    if (episodeNumber != null) params.set('episode_number', episodeNumber);
+    return this.request(`/playback/resume?${params}`);
+  },
+
+  // 会话保活
+  sessionPing(sessionId) {
+    return this.request(`/playback/sessions/${sessionId}/ping`, { method: 'POST' });
+  },
+
+  // 会话结束
+  sessionStop(sessionId) {
+    return this.request(`/playback/sessions/${sessionId}/stop`, { method: 'POST' });
+  },
+
+  // 继续观看列表
+  getUpNext() {
+    return this.request('/playback/up-next');
+  },
+
+  // 收藏列表
+  getFavorites() {
+    return this.request('/playback/favorites');
+  },
+
+  // 收藏/已看 标记
+  // GET 响应: { played, is_favorite, unplayed_count }
+  // POST body: { media_item_id, played?, favorite? }
+  getMarks(mediaItemId) {
+    return this.request(`/playback/marks?media_item_id=${mediaItemId}`);
+  },
+
+  setMarks(mediaItemId, { played, favorite }) {
+    const body = { media_item_id: mediaItemId };
+    if (played !== undefined) body.played = played;
+    if (favorite !== undefined) body.favorite = favorite;
+    return this.request('/playback/marks', { method: 'POST', body });
   },
 
   // ===== 认证 =====
@@ -176,6 +225,34 @@ const API = {
       method: 'POST',
       body: { username, password },
     });
+  },
+
+  // 多账号
+  async listAccounts() {
+    return this.request('/auth/accounts');
+  },
+
+  async switchAccount(accountId) {
+    return this.request('/auth/accounts/switch', {
+      method: 'POST',
+      body: { account_id: accountId },
+    });
+  },
+
+  async removeAccount(accountId) {
+    return this.request('/auth/accounts/remove', {
+      method: 'POST',
+      body: { account_id: accountId },
+    });
+  },
+
+  // QR 配对
+  async getDeviceCode() {
+    return this.request('/auth/device/code');
+  },
+
+  async checkDeviceStatus(deviceCode) {
+    return this.request(`/auth/device/status?code=${encodeURIComponent(deviceCode)}`);
   },
 };
 

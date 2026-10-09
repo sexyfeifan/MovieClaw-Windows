@@ -6,14 +6,14 @@
 !include "FileFunc.nsh"
 
 Name "MovieClaw Desktop"
-OutFile "..\dist\MovieClaw-Desktop-v0.2.107-Setup-x64.exe"
+OutFile "..\dist\MovieClaw-Desktop-v0.2.109-Setup-x64.exe"
 InstallDir "$LOCALAPPDATA\MovieClaw\Desktop"
 InstallDirRegKey HKCU "Software\MovieClaw\Desktop" "InstallDir"
 RequestExecutionLevel user
 Unicode True
 
 !define APP_NAME "MovieClaw Desktop"
-!define APP_VERSION "0.2.107"
+!define APP_VERSION "0.2.109"
 !define APP_PUBLISHER "MovieClaw"
 !define APP_EXE "movieclaw-desktop.exe"
 
@@ -40,15 +40,9 @@ Section "安装" SecInstall
     ; 主程序
     File "..\dist\portable\movieclaw-desktop.exe"
     File "..\dist\portable\connect.html"
-    File "..\dist\portable\inject.js"
-    File "..\dist\portable\volume-overlay.html"
     File "..\dist\portable\WebView2Loader.dll"
     ; 桌面 UI
     File /nonfatal /r "..\dist\portable\desktop"
-    ; mpv sidecar (放入 mpv 子目录)
-    SetOutPath "$INSTDIR\mpv"
-    File /nonfatal /r "..\dist\portable\mpv\*.*"
-    SetOutPath "$INSTDIR"
 
     ; 写注册表
     WriteRegStr HKCU "Software\MovieClaw\Desktop" "InstallDir" "$INSTDIR"
@@ -76,11 +70,8 @@ SectionEnd
 Section "Uninstall"
     Delete "$INSTDIR\${APP_EXE}"
     Delete "$INSTDIR\connect.html"
-    Delete "$INSTDIR\inject.js"
-    Delete "$INSTDIR\volume-overlay.html"
     Delete "$INSTDIR\WebView2Loader.dll"
     RMDir /r "$INSTDIR\desktop"
-    RMDir /r "$INSTDIR\mpv"
     Delete "$INSTDIR\uninstall.exe"
     RMDir "$INSTDIR"
 

@@ -24,6 +24,12 @@ import pytest
 
 _ENTRYPOINT = Path(__file__).resolve().parents[2] / "docker" / "entrypoint.sh"
 
+# 本文件全程驱动 bash entrypoint.sh 与 POSIX shell 替身（chmod +x、进程组），
+# Windows 上无法执行；Windows 侧的进程监督由宿主进程自己的测试覆盖。
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="entrypoint.sh 是 bash 脚本，仅 Unix 可测"
+)
+
 
 def _write_executable(path: Path, source: str) -> None:
     """写入临时进程替身，并赋予可执行权限。"""
