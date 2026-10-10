@@ -129,12 +129,21 @@ public static class MovieClawSmokeWindow {
             Start-Sleep -Milliseconds 100
         }
         if (-not $webviewFound) { throw 'WebView2 browser process did not start' }
-        $startupTimer.Stop()
         $measurement.startupSeconds = [Math]::Round($startupTimer.Elapsed.TotalSeconds, 3)
         $webviewExecutable = $children[0].ExecutablePath
         if ($webviewExecutable -and (Test-Path $webviewExecutable)) {
             $environment.webview2.runningVersion = (Get-Item $webviewExecutable).VersionInfo.ProductVersion
         }
+        $readyPath = Join-Path $env:MOVIECLAW_DATA_DIR 'native-ready.json'
+        $readyDeadline = [DateTime]::UtcNow.AddSeconds(15)
+        while (-not (Test-Path $readyPath)) {
+            if ($script:app.HasExited) { throw 'Native app exited before the UI bridge became ready' }
+            if ([DateTime]::UtcNow -gt $readyDeadline) { throw 'Native UI bridge did not become ready within 15 seconds' }
+            Start-Sleep -Milliseconds 100
+        }
+        $measurement.bridgeReady = Get-Content $readyPath -Raw | ConvertFrom-Json -AsHashtable
+        $startupTimer.Stop()
+        $measurement.readySeconds = [Math]::Round($startupTimer.Elapsed.TotalSeconds, 3)
         $measurement.status = 'closing'
         $shutdownTimer = [System.Diagnostics.Stopwatch]::StartNew()
         $posted = [MovieClawSmokeWindow]::PostMessage($window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)

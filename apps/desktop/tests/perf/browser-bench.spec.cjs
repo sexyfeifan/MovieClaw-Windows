@@ -69,11 +69,13 @@ test('large library retains bounded DOM and restores navigation', async ({ page,
     await expect.poll(() => page.evaluate(() => App._wallPager.offset)).toBeGreaterThan((i + 1) * 60);
   }
   const metrics = await page.evaluate(() => ({ loaded: App._wallPager.offset,
-    retainedItems: App._wallPager.items.length,
+    indexedItems: App._wallPager.items.length,
+    retainedItems: App._wallPager.items.filter(item => !item._evicted).length,
     domCards: document.querySelectorAll('#posterGrid .poster-card').length,
     images: document.querySelectorAll('#posterGrid img').length }));
   report.scenarios.largeLibrary = metrics;
   expect(metrics.loaded).toBeGreaterThanOrEqual(2400);
+  expect(metrics.retainedItems).toBeLessThanOrEqual(720);
   expect(metrics.domCards).toBeLessThanOrEqual(360);
   const itemId = await page.locator('#posterGrid .poster-card').first().getAttribute('data-item-id');
   await page.locator('#posterGrid .poster-card').first().click();

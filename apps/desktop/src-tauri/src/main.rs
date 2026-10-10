@@ -2,7 +2,11 @@
 
 mod api_proxy;
 mod connect;
+mod credential_vault;
 mod lan_discovery;
+mod media_stream;
+mod mpv_ipc;
+mod native_auth;
 mod player_embedded;
 mod updater;
 
@@ -38,6 +42,7 @@ fn finish_shutdown(app: tauri::AppHandle) {
     // dispatcher can execute main-thread tasks immediately and re-enter locks.
     std::thread::spawn(move || {
         api_proxy::cancel_all_requests();
+        media_stream::revoke_all();
         let cleanup_app = app.clone();
         if app
             .run_on_main_thread(move || {
@@ -90,6 +95,19 @@ fn complete_shutdown(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
+fn native_ready() -> Result<&'static str, String> {
+    shutdown_trace("bridge-ready");
+    if std::env::var("MOVIECLAW_DIAGNOSTICS").as_deref() == Ok("1") {
+        std::fs::write(
+            connect::config_dir().join("native-ready.json"),
+            serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"ready":true}).to_string(),
+        )
+        .map_err(|_| "无法写入启动诊断")?;
+    }
+    Ok(env!("CARGO_PKG_VERSION"))
+}
+
+#[tauri::command]
 fn get_app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
@@ -118,6 +136,7 @@ fn get_main_window_hwnd(window: tauri::WebviewWindow) -> Result<isize, String> {
 }
 
 fn main() {
+    shutdown_trace("main-start");
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
@@ -127,6 +146,7 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
         .setup(|app| {
+            shutdown_trace("setup-enter");
             let start_url = connect::load_server_url().unwrap_or_default();
             let url = if start_url.is_empty() {
                 WebviewUrl::App("connect.html".into())
@@ -134,6 +154,7 @@ fn main() {
                 WebviewUrl::App("desktop/index.html".into())
             };
 
+            shutdown_trace("window-build-started");
             WebviewWindowBuilder::new(app, "main", url)
                 .title("MovieClaw")
                 .inner_size(1280.0, 800.0)
@@ -141,9 +162,11 @@ fn main() {
                 .center()
                 .decorations(false)
                 .build()?;
+            shutdown_trace("window-built");
 
             // 系统托盘图标
             {
+                shutdown_trace("tray-started");
                 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
                 use tauri::menu::{Menu, MenuItem};
 
@@ -219,6 +242,7 @@ fn main() {
                         }
                     })
                     .build(app)?;
+                shutdown_trace("tray-built");
             }
 
             // 启动后静默检查更新（延迟 5 秒，不影响启动速度）
@@ -241,6 +265,7 @@ fn main() {
                 });
             }
 
+            shutdown_trace("setup-ready");
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -253,6 +278,18 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            native_auth::native_auth_status,
+            native_auth::native_password_login,
+            native_auth::native_select_account,
+            native_auth::native_remove_account,
+            native_auth::native_logout,
+            native_auth::native_pair_begin,
+            native_auth::native_pair_poll,
+            native_auth::native_pair_cancel,
+            media_stream::grant_media_stream,
+            media_stream::release_media_stream,
+            media_stream::renew_media_stream,
+            native_ready,
             complete_shutdown,
             get_app_version,
             connect::save_server_url,
@@ -269,6 +306,7 @@ fn main() {
             lan_discovery::discover_servers,
             player_embedded::has_embedded_player,
             player_embedded::get_embedded_player_status,
+            player_embedded::get_embedded_player_state,
             player_embedded::launch_embedded_player,
             player_embedded::resize_embedded_player,
             player_embedded::set_embedded_player_visible,
@@ -278,6 +316,7 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building MovieClaw Desktop")
         .run(|app, event| {
+            if let tauri::RunEvent::Ready = event { shutdown_trace("run-ready"); }
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
                 shutdown_trace("exit-requested-event");
                 if SHUTDOWN.load(Ordering::SeqCst) != 3 {

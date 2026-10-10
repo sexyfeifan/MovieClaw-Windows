@@ -66,7 +66,7 @@ fn normalize_server_url(value: &str) -> Result<String, String> {
 #[tauri::command]
 pub fn save_server_url(url: String) -> Result<ConnectResult, String> {
     let normalized = normalize_server_url(&url)?;
-    crate::api_proxy::cancel_all_requests();
+    crate::native_auth::change_context();
     fs::write(config_path(), &normalized).map_err(|e| format!("写入配置失败: {e}"))?;
     Ok(ConnectResult {
         ok: true,
@@ -90,7 +90,7 @@ pub fn load_server_url() -> Result<String, String> {
 
 #[tauri::command]
 pub fn clear_server_url() -> Result<ConnectResult, String> {
-    crate::api_proxy::cancel_all_requests();
+    crate::native_auth::change_context();
     let path = config_path();
     if path.exists() {
         fs::remove_file(path).map_err(|e| format!("删除配置失败: {e}"))?;

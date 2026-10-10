@@ -18,7 +18,7 @@ function harness(respond = () => ({ data: [] })) {
       addEventListener(type, callback) { const handlers = this.listeners.get(type) || []; handlers.push(callback); this.listeners.set(type, handlers); },
       async emit(type, event = {}) { for (const callback of this.listeners.get(type) || []) await callback(event); },
       querySelectorAll() { return []; }, querySelector() { return null; },
-      classList: { add() {}, remove() {} }, appendChild() {},
+      classList: { add() {}, remove() {} }, appendChild() {}, remove() {}, setAttribute() {},
     };
   }
   const window = { __MOVIECLAW_SERVER__: 'http://old.invalid', addEventListener() {},
@@ -30,7 +30,7 @@ function harness(respond = () => ({ data: [] })) {
       const response = await respond(args);
       return response && 'status' in response ? response : { status: 200, body: JSON.stringify(response), headers: { 'server-timing': 'db;dur=12' } };
     } } } };
-  const context = vm.createContext({ window, console, setTimeout, clearTimeout, queueMicrotask,
+  const context = vm.createContext({ window, console, setTimeout, clearTimeout, setInterval, clearInterval, queueMicrotask,
     AbortController, DOMException, Headers, URLSearchParams,
     Player: { async close() {} },
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
@@ -231,7 +231,7 @@ test('search consumes the real nested hits and sends the cursor for subsequent p
   const h = harness(args => ({ data: { query: '诺兰', items: [{ item: { media_item_id: 42, kind: 'movie', title: '星际穿越' }, library_ids: [9], match: { label: '导演 诺兰' } }], people: [], suggestions: [], next_cursor: args.path.includes('cursor=') ? null : 'page-2', index_pending: false } }));
   let settings;
   h.A.renderPagedWall = async (_, config) => { settings = config; };
-  await h.A.renderSearch({}, '诺兰');
+  await h.A.renderSearch(h.element(), '诺兰');
   const page = await settings.fetchPage({ limit: 60, offset: 0, cursor: null });
   assert.equal(page.items[0].title, '星际穿越');
   assert.equal(page.items[0].library_id, 9);
@@ -394,7 +394,7 @@ test('stop refresh removes a completed item from the unwatched wall and keeps th
   grid.querySelector = () => ({ remove() { removed = true; } });
   container.querySelector = () => ({ getBoundingClientRect: () => ({ top: 1000 }) });
   container.getBoundingClientRect = () => ({ bottom: 0 });
-  const pager = { items: [item], offset: 60, total: 201, hasMore: true };
+  const pager = Object.assign(new h.Pager(async () => ({ items: [] }), () => true), { items: [item], offset: 60, total: 201, hasMore: true });
   h.A.currentPage = 'library'; h.A.pageAPI = h.API;
   h.A._wallContext = { pager, grid, count, container, generation: 0, libraryId: 9, prefs: { unwatched: true }, load() {} };
   await h.A.refreshStoppedItem({ mediaItemId: 42, libraryId: 9 });
@@ -433,4 +433,89 @@ test('a watched item removed during an in-flight page repairs exactly the missin
   while (pager.hasMore) await pager.loadMore();
   assert.equal(pager.items.length, 200);
   assert.equal(new Set(pager.items.map(item => item.media_item_id)).size, 200);
+});
+
+test('HomeRows resolves saved order, hidden builtins, legacy rows and pinned collections against visible sources', () => {
+  const h = harness();
+  const rows = vm.runInContext(`HomeRows.build([
+    {id:'row:collection',collection_id:8}, {id:'favorites',hidden:true}, {id:'kind:movie',hidden:true},
+    {id:'row:played',library_id:1,sort:'last_played',unwatched:true}, {id:'lib:2'}, {id:'row:unavailable',collection_id:9}
+  ], [{id:1,name:'电影库',kind:'movie'},{id:2,name:'隐藏库',kind:'tv',exclude_from_home:true},{id:3,kind:'photo'}],
+  [{id:8,name:'精选',sort:'release_date_asc'},{id:9,name:'不可见',hidden:true}])`, h.context);
+  assert.equal(rows[0].id, 'row:collection'); assert.equal(rows[0].sort, 'release_date'); assert.equal(rows[0].order, 'asc');
+  assert.equal(rows.find(row => row.id === 'favorites').hidden, true);
+  assert.equal(rows.find(row => row.id === 'row:played').unwatched, false);
+  assert.equal(rows.some(row => ['lib:2','kind:movie','row:unavailable'].includes(row.id)), false);
+  h.context.rowsForTest = rows;
+  assert.deepEqual(Array.from(vm.runInContext('HomeRows.pinned(rowsForTest)', h.context), col => col.id), [8]);
+  assert.ok(rows.some(row => row.id === 'genres:movie')); assert.ok(rows.some(row => row.id === 'lib:1'));
+});
+
+test('home source queries preserve favorites grouping and last-played seen filters in the complete wall', async () => {
+  const h = harness(() => ({ data: [] }));
+  await h.A.fetchHomeRow(h.API, { type:'favorites', sort:'unwatched_first', order:'desc' }, { offset:60,limit:60 });
+  await h.A.fetchHomeRow(h.API, { type:'kind',media_kind:'tv',sort:'last_played',order:'asc',unwatched:true,genre:'28' }, { offset:120,limit:60 });
+  const paths = h.calls.filter(call => call.command === 'proxy_api').map(call => call.path);
+  assert.match(paths[0], /sort=favorited_at/); assert.match(paths[0], /unwatched_first=true/);
+  const query = new URLSearchParams(paths[1].split('?')[1]);
+  assert.equal(paths[1].split('?')[0], '/libraries/kinds/tv/items');
+  assert.equal(query.get('w'),'seen'); assert.equal(query.get('g'),'28'); assert.equal(query.get('order'),'asc');
+});
+
+test('episode bands respect 49/50/51, sparse ranges and the 1050 to 1051 boundary', () => {
+  const h = harness();
+  assert.deepEqual(Array.from(vm.runInContext('EpisodeRanges.ranges(Array.from({length:50},(_,i)=>({episode_number:i+1})))',h.context)),[]);
+  const ranges = vm.runInContext('EpisodeRanges.ranges(Array.from({length:51},(_,i)=>({episode_number:i+49})))',h.context);
+  assert.deepEqual(Array.from(ranges, row=>[row.index,row.label]),[[0,'49–50'],[1,'51–99']]);
+  assert.equal(vm.runInContext('EpisodeRanges.index(1050)', h.context),20);
+  assert.equal(vm.runInContext('EpisodeRanges.index(1051)', h.context),21);
+});
+
+test('recent searches are recorded on selection, bounded and isolated by account and server', () => {
+  const h=harness(); h.API.baseUrl='http://a.invalid'; h.A.session={username:'alice'};
+  for(let i=0;i<15;i++) h.A.rememberSearch('标题 '+i);
+  assert.equal(h.A.recentSearches().items.length,10); assert.equal(h.A.recentSearches().items[0],'标题 14');
+  h.A.session={username:'bob'}; assert.equal(h.A.recentSearches().items.length,0);
+  h.A.rememberSearch('Bob'); h.API.baseUrl='http://b.invalid'; assert.equal(h.A.recentSearches().items.length,0);
+});
+
+test('person-filter search sends the local person id alongside the stable cursor', async () => {
+  const h=harness(()=>({data:{items:[],people:[],suggestions:[],next_cursor:null}})); let config;
+  h.A.renderPagedWall=async(_,value)=>config=value;
+  await h.A.renderSearch(h.element(),'演员',0,{id:9,name:'演员'});
+  await config.fetchPage({limit:60,cursor:'cursor-two'});
+  const query=new URLSearchParams(h.calls.find(call=>call.path?.startsWith('/search/')).path.split('?')[1]);
+  assert.equal(query.get('person_id'),'9'); assert.equal(query.get('cursor'),'cursor-two');
+});
+
+test('native credentials use opaque native account commands and structured failures, never device tokens in JS', async () => {
+  const h=harness(); const native=[];
+  h.window.__TAURI__.core.invoke=async(command,args)=>{ native.push({command,args}); if(command==='native_auth_status') return {mode:'device',session:{username:'alice'},accounts:[{username:'alice',active:true}],pairing_supported:true}; if(command==='native_remove_account') throw JSON.stringify({status:401,code:'REVOKED',message:'设备已失效'}); return {mode:'device',session:{username:args?.username||'bob'},accounts:[]}; };
+  await h.API.getNativeAuthStatus(); await h.API.login('bob','fixture-password'); await h.API.switchAccount('alice'); await h.API.logout();
+  await assert.rejects(h.API.removeAccount('alice'),error=>error.status===401&&error.code==='REVOKED');
+  assert.deepEqual(native.map(call=>call.command),['native_auth_status','native_password_login','native_select_account','native_logout','native_remove_account']);
+  assert.equal(native.some(call=>call.args?.token||call.args?.device_code),false);
+});
+
+test('large-wall payload cache keeps twelve pages and rehydrates evicted pages by their original cursor or offset', async () => {
+  const h=harness(); const calls=[];
+  const pager=new h.Pager(async page=>{calls.push({...page}); return {items:Array.from({length:60},(_,i)=>({media_item_id:page.offset+i+1,title:'Large payload '+(page.offset+i+1),poster_url:'/images/'+(page.offset+i+1)})),rawCount:60,hasMore:true,cursor:'next-'+(page.offset+60)};},()=>true);
+  pager.enableWindow(12);
+  for(let i=0;i<40;i++) await pager.loadMore();
+  assert.equal(pager.items.length,2400); assert.equal(pager.offset,2400);
+  assert.equal(pager.cachedPages.size,12); assert.equal(pager.items.filter(item=>!item._evicted).length,720);
+  assert.equal(pager.items[0].title,undefined);
+  await pager.hydrateRange(0,60);
+  assert.equal(pager.items[0].title,'Large payload 1'); assert.equal(pager.cachedPages.size,12);
+  assert.equal(calls.at(-1).offset,0); assert.equal(calls.at(-1).cursor,null);
+  await pager.hydrateRange(60,120); assert.equal(calls.at(-1).cursor,'next-60');
+});
+
+test('an old native status cannot overwrite metadata after its server or account context is retired', async () => {
+  const h=harness(), stale=deferred();
+  h.API.nativeAuthAvailable=true; h.API.nativeAuthStatus={mode:'device',session:{username:'new'}};
+  h.window.__TAURI__.core.invoke=()=>stale.promise;
+  const old=h.API.getNativeAuthStatus(); h.API.invalidateContext();
+  stale.resolve({mode:'cookie',session:{username:'old'},accounts:[]});
+  assert.equal(await old,null); assert.equal(h.API.nativeAuthStatus.session.username,'new');
 });

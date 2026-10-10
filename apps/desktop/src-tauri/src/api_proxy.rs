@@ -49,10 +49,16 @@ fn load_cookies() -> CookieStore {
     // Old cookies have no server identity. Retaining them would leave usable
     // unscoped credentials on disk after the migration.
     let _ = std::fs::remove_file(crate::connect::config_dir().join("cookies.json"));
-    std::fs::read_to_string(cookie_file_path())
+    let bytes = std::fs::read(cookie_file_path()).unwrap_or_default();
+    let store = crate::credential_vault::unprotect_disk(&bytes)
         .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+        .and_then(|plain| serde_json::from_slice(&plain).ok())
+        .unwrap_or_default();
+    #[cfg(windows)]
+    if !bytes.is_empty() && !bytes.starts_with(b"MC-DPAPI1\n") {
+        let _ = save_cookies(&store);
+    }
+    store
 }
 
 fn save_cookies(store: &CookieStore) -> Result<(), String> {
@@ -60,7 +66,8 @@ fn save_cookies(store: &CookieStore) -> Result<(), String> {
     let json = serde_json::to_vec(store).map_err(|e| e.to_string())?;
     // The temporary file also prevents a terminated write from corrupting the jar.
     let temp = path.with_extension("tmp");
-    std::fs::write(&temp, json).map_err(|e| format!("保存登录状态失败: {e}"))?;
+    let protected = crate::credential_vault::protect_disk(&json)?;
+    std::fs::write(&temp, protected).map_err(|e| format!("保存登录状态失败: {e}"))?;
     #[cfg(windows)]
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| e.to_string())?;
@@ -91,7 +98,7 @@ fn cookie_header_from(store: &CookieStore, url: &Url) -> Option<String> {
     }
 }
 
-fn cookie_header(url: &Url) -> Option<String> {
+pub(crate) fn cookie_header(url: &Url) -> Option<String> {
     cookie_header_from(&COOKIES.lock().unwrap(), url)
 }
 
@@ -251,14 +258,37 @@ pub async fn proxy_api(
     }
     let origin = crate::connect::validate_http_url(&server)?.origin();
     let (url, kind) = resolve_request(&server, &path)?;
+    let username = url
+        .query_pairs()
+        .find(|(name, _)| name == "mc_account")
+        .map(|(_, value)| value.into_owned());
+    let identity = crate::native_auth::identity(&server, username.as_deref())?;
     let (_registration, cancellation) = register_request(request_id)?;
     tokio::select! {
         biased;
         _ = cancellation.cancelled() => Err("请求已取消".into()),
         result = tokio::time::timeout(
             Duration::from_secs(if matches!(kind, ResponseKind::Api) { 30 } else { 90 }),
-            fetch(&CLIENT, url, origin, method, body, headers.unwrap_or_default(), kind)
+            fetch(&CLIENT, url, origin, method, body, headers.unwrap_or_default(), kind, identity)
         ) => result.map_err(|_| "请求超时".to_owned())?,
+    }
+}
+
+pub(crate) async fn cookie_api(
+    server: &str,
+    context_cancellation: &CancellationToken,
+    method: &str,
+    path: &str,
+    body: Option<String>,
+) -> Result<ProxyResponse, String> {
+    let origin = crate::connect::validate_http_url(server)?.origin();
+    let (url, kind) = resolve_request(server, path)?;
+    let (_registration, cancellation) = register_request(None)?;
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err("请求已取消".into()),
+        _ = context_cancellation.cancelled() => Err("服务器或账号已更改".into()),
+        result = tokio::time::timeout(Duration::from_secs(30), fetch(&CLIENT, url, origin, method.to_owned(), body, HashMap::new(), kind, None)) => result.map_err(|_| "请求超时".to_owned())?,
     }
 }
 
@@ -270,6 +300,7 @@ async fn fetch(
     body: Option<String>,
     headers: HashMap<String, String>,
     kind: ResponseKind,
+    identity: Option<crate::native_auth::Identity>,
 ) -> Result<ProxyResponse, String> {
     let mut method = Method::from_bytes(method.as_bytes()).map_err(|_| "无效的请求方法")?;
     if !matches!(
@@ -285,6 +316,12 @@ async fn fetch(
         90
     };
     for hop in 0..=5 {
+        if identity
+            .as_ref()
+            .is_some_and(|v| v.generation != crate::native_auth::generation())
+        {
+            return Err("服务器或账号已更改".into());
+        }
         let mut req = client
             .request(method.clone(), url.clone())
             .timeout(Duration::from_secs(timeout));
@@ -309,7 +346,9 @@ async fn fetch(
             req = req.header(name, value);
         }
         if url.origin() == credential_origin {
-            if let Some(value) = cookie_header(&url) {
+            if let Some(identity) = &identity {
+                req = req.bearer_auth(&identity.token);
+            } else if let Some(value) = cookie_header(&url) {
                 req = req.header(header::COOKIE, value);
             }
         }
@@ -320,6 +359,11 @@ async fn fetch(
         }
         let mut response = req.send().await.map_err(|e| format!("请求失败: {e}"))?;
         let status = response.status().as_u16();
+        if status == 401 && url.origin() == credential_origin {
+            if let Some(identity) = &identity {
+                crate::native_auth::invalidate(identity);
+            }
+        }
         if url.origin() == credential_origin {
             capture_cookies(&response, &url)?;
         }
@@ -334,6 +378,11 @@ async fn fetch(
                 }
                 let next = url.join(location).map_err(|_| "无效的重定向地址")?;
                 crate::connect::validate_http_url(next.as_str())?;
+                if next.origin() != credential_origin
+                    && !matches!(method, Method::GET | Method::HEAD)
+                {
+                    return Err("拒绝向另一服务器重定向请求正文".into());
+                }
                 if url.scheme() == "https" && next.scheme() != "https" {
                     return Err("拒绝 HTTPS 降级重定向".into());
                 }
@@ -490,6 +539,7 @@ mod tests {
             None,
             HashMap::new(),
             ResponseKind::Api,
+            None,
         )
         .await
         .unwrap();
@@ -515,6 +565,7 @@ mod tests {
             None,
             HashMap::from([("Range".into(), "bytes=10-12".into())]),
             ResponseKind::Stream,
+            None,
         )
         .await
         .unwrap();
@@ -565,6 +616,7 @@ mod tests {
             None,
             HashMap::new(),
             ResponseKind::Api,
+            None,
         )
         .await
         .unwrap();
@@ -611,7 +663,7 @@ mod tests {
             let _registration = registration;
             tokio::select! {
                 _ = token.cancelled() => Err("cancelled".to_owned()),
-                result = fetch(&CLIENT, url.clone(), url.origin(), "GET".into(), None, HashMap::new(), ResponseKind::Api) => result,
+                result = fetch(&CLIENT, url.clone(), url.origin(), "GET".into(), None, HashMap::new(), ResponseKind::Api, None) => result,
             }
         });
         started_rx.await.unwrap();

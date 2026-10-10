@@ -10,15 +10,16 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
 
 function harness(options = {}) {
+  const storage = new Map(Object.entries(options.storage || {}));
   const calls = [], events = [], timers = new Map(), intervals = new Map(), elements = new Map();
   let timer = 0;
   function element(id) {
     const listeners = new Map();
     return {
-      id, style: {}, dataset: {}, hidden: false, children: [], innerHTML: '', textContent: '',
+      id, style: { setProperty(name, value) { this[name] = value; } }, dataset: {}, hidden: false, children: [], innerHTML: '', textContent: '',
       classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
       addEventListener(name, fn) { if (!listeners.has(name)) listeners.set(name, []); listeners.get(name).push(fn); },
       emit(name) { for (const fn of listeners.get(name) || []) fn({ target: this }); },
@@ -44,7 +45,8 @@ function harness(options = {}) {
     getItemDetail() { return Promise.resolve({ kind: 'movie', files: [] }); },
     getItemEpisodes() { return Promise.resolve({ episodes: [] }); },
     getResume() { return Promise.resolve({}); },
-    request(route, args) { calls.push(['request', route, args]); return options.request ? options.request(route, args) : Promise.resolve(session()); },
+    rawFetch(route) { calls.push(['rawFetch', route]); return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve('[Script Info]\n') }); },
+    request(route, args) { if (route === '/playback/client-log') { calls.push(['client-log', args.body]); return Promise.resolve({}); } if (route === '/playback/metrics') { calls.push(['metrics', args.body]); return Promise.resolve({}); } if (route.includes('/playback/files/')) { calls.push(['preview-request', route, args]); return Promise.resolve(options.preview || { ready: false }); } calls.push(['request', route, args]); return options.request ? options.request(route, args) : Promise.resolve(session()); },
   };
   const win = {
     devicePixelRatio: 1, __MOVIECLAW_SERVER__: API.baseUrl,
@@ -55,13 +57,15 @@ function harness(options = {}) {
       if (name === 'has_embedded_player') return false;
       if (name === 'get_main_window_hwnd') return 1;
       if (name === 'get_embedded_player_status') return { running: true };
+      if (name === 'get_embedded_player_state') return { status: { running: true }, properties: {} };
+      if (name === 'grant_media_stream') return { streamId: 'cap-' + calls.length, url: 'http://127.0.0.1:3210/cap' };
       return {};
     } } },
   };
   const context = vm.createContext({
-    window: win, API, navigator: {}, performance: { now: () => 1000 },
+    window: win, API, navigator: {}, AbortController, DOMException, URL, TextEncoder, TextDecoder, Headers, Response, fetch: options.fetch || fetch, performance: { now: () => 1000 },
     console: { log() {}, warn() {}, error() {} },
-    localStorage: { getItem() { return null; }, setItem() {} },
+    localStorage: { getItem(key) { return storage.get(key) ?? null; }, setItem(key, value) { storage.set(key, value); } },
     document: { fullscreenElement: null, addEventListener() {}, removeEventListener() {},
       getElementById: id => elements.get(id) || null,
       querySelector: () => element('wrap'), querySelectorAll: () => [], createElement: () => element(''),
@@ -79,7 +83,7 @@ function harness(options = {}) {
   const P = context.P, A = context.A;
   P.init();
   A.libraries = [{ id: 9 }];
-  return { P, A, API, calls, events, video, elements, timers, intervals, context, win };
+  return { P, A, API, calls, events, video, elements, timers, intervals, context, win, storage };
 }
 
 function session(overrides = {}) {
@@ -230,6 +234,7 @@ test('EOF completes once; early EOF restarts at the current file position', asyn
   const restarted = [];
   h.A.restartPlaybackAt = ms => restarted.push(ms);
   h.P.reportPlaybackEnd();
+  [...h.timers.values()].find(t => t.ms === 500).fn();
   assert.deepEqual(restarted, [300000]);
   assert.equal(h.P._ended, false);
   h.video.currentTime = 3598;
@@ -306,10 +311,10 @@ test('file duration prioritizes source metadata and never invents a total from a
 test('mpv reports only after rendered video and detects EOF through the actual native poll', async () => {
   let position = 60, rendered = false, eof = false;
   const h = harness({ invoke(name, args) {
-    if (name === 'send_mpv_command_embedded') return { data: {
+    if (name === 'get_embedded_player_state') return { status: { running: true }, properties: {
       'time-pos': position, duration: 1800, pause: false, 'demuxer-cache-duration': 30,
       'eof-reached': eof, 'video-out-params': rendered ? { width: 1920, height: 1080 } : null,
-    }[args.command[1]] };
+    } };
     if (name === 'get_embedded_player_status') return { running: true };
     return {};
   } });
@@ -428,7 +433,7 @@ test('reports retry network and 5xx twice, never retry 4xx, and drop queued data
   [...h.timers.values()].find(t => t.ms === 400).fn();
   await retried;
   assert.equal(attempt, 3);
-  assert.equal(h.calls[0][8].timeoutMs, 3000);
+  assert.equal(h.calls.find(c => c[0] === 'progress')[8].timeoutMs, 3000);
   h.API.reportProgress = () => { attempt++; return Promise.reject(Object.assign(new Error('unauthorized'), { status: 401 })); };
   await assert.rejects(h.P.sendSnapshot('stop', h.P.snapshot()), /unauthorized/);
   assert.equal(attempt, 4);
@@ -458,27 +463,286 @@ test('shutdown bounds unfinished progress work and always completes the native h
   await flush();
 });
 
-test('HLS loader sends an inclusive Range, accepts 206, exposes response headers and really cancels', async () => {
-  const pending = deferred();
-  const h = harness({ invoke(name) { if (name === 'proxy_api') return pending.promise; return Promise.resolve(); } });
+test('HLS gateway loader sends Range, preserves 206 headers and cancels its real fetch/capability', async () => {
+  const pending = deferred(), requests = [];
+  const h = harness({ fetch(url, args) { requests.push({ url, args }); return pending.promise; } });
   const loader = new h.win.ProxyHlsLoader({});
   let success;
-  loader.load({ url: 'https://server.invalid/part.mp4', responseType: 'arraybuffer', rangeStart: 4, rangeEnd: 8 }, {}, {
+  loader.load({ url: 'https://server.invalid/part.mp4', responseType: 'arraybuffer', rangeStart: 4, rangeEnd: 8 }, { highWaterMark: 131072 }, {
+    onProgress() { throw new Error('非progressive不能把媒体数据只交给未启用的progress callback'); },
     onSuccess(response, stats, context, details) { success = { response, stats, details }; }, onError(error) { throw error; },
   });
-  assert.equal(h.calls.find(c => c[1] === 'proxy_api')[2].headers.Range, 'bytes=4-7');
-  pending.resolve({ status: 206, body: Buffer.from('abcd').toString('base64'), headers: { 'content-range': 'bytes 4-7/20' } });
+  await flush();
+  assert.equal(requests[0].args.headers.Range, 'bytes=4-7');
+  pending.resolve(new Response(Buffer.from('abcd'), { status: 206, headers: { 'content-range': 'bytes 4-7/20' } }));
   await flush();
   assert.equal(success.response.code, 206);
   assert.equal(success.stats.loaded, 4);
+  assert.equal(Buffer.from(success.response.data).toString(), 'abcd');
   assert.equal(success.details.headers['content-range'], 'bytes 4-7/20');
   const other = deferred();
-  h.win.__TAURI__.core.invoke = (name, args) => { h.calls.push(['invoke', name, args]); return name === 'proxy_api' ? other.promise : Promise.resolve(); };
+  h.context.fetch = (url, args) => { requests.push({ url, args }); return other.promise; };
   let delivered = false;
   loader.load({ url: 'https://server.invalid/other.mp4', responseType: 'arraybuffer' }, {}, { onSuccess() { delivered = true; }, onError() {} });
+  await flush();
   loader.destroy();
-  other.resolve({ status: 200, body: '', headers: {} });
+  assert.equal(requests.at(-1).args.signal.aborted, true);
+  other.resolve(new Response('late'));
   await flush();
   assert.equal(delivered, false);
-  assert.ok(h.calls.some(c => c[1] === 'cancel_proxy_request' && c[2].requestId));
+  assert.ok(h.calls.some(c => c[1] === 'release_media_stream' && c[2].streamId));
+});
+
+test('mpv track mapping uses per-type ffmpeg ordinal, real id, and gateway source order', () => {
+  const h = harness();
+  const map = h.context.mpvTrackMap([
+    { type: 'audio', id: 42, 'ff-index': 8 }, { type: 'audio', id: 7, 'ff-index': 1 },
+    { type: 'sub', id: 19, 'ff-index': 5 }, { type: 'sub', id: 91, external: true, 'external-filename': 'http://127.0.0.1/cap/sub' },
+  ], [{ track_ref: 'embedded:0' }, { track_ref: 'external:English.ass' }], ['/playback/subs/0', '/playback/subs/1'], true,
+  ['http://127.0.0.1/cap/sub']);
+  assert.deepEqual(Array.from(map.audio, t => [t.ref, t.id]), [['embedded:0', 7], ['embedded:1', 42]]);
+  assert.deepEqual(Array.from(map.subtitles, t => [t.ref, t.id]), [['embedded:0', 19], ['external:English.ass', 91]]);
+});
+
+function nativeTracks(h) {
+  h.P.adoptSession('Native', session({ timeline: 'session', start_ms: 100000,
+    decision: { tier: 0, file_id: 81, audio: { track_ref: 'embedded:0' },
+      audio_tracks: [{ ref: 'embedded:0', codec: 'aac', language: 'eng' }, { ref: 'embedded:1', codec: 'aac', language: 'chi' }],
+      subtitles: [{ track_ref: 'external:en.ass', kind: 'ass', language: 'eng' }] }, subtitle_urls: ['/playback/en.ass'] }), item(), 'mpv');
+  h.win.__MOVIECLAW_MPV_ACTIVE = true;
+  h.P.mpvInstanceId = 51;
+  h.P.mpvState = { time: 22, duration: 1000, paused: false, properties: {}, volume: 1 };
+  h.P.mpvTracks = { audio: [{ id: 7, ref: 'embedded:0' }, { id: 42, ref: 'embedded:1' }],
+    subtitles: [{ id: 91, ref: 'external:en.ass', external: true }] };
+}
+
+test('native visible controls change actual aid/sid/speed/volume and file-time external subtitle delay', async () => {
+  const h = harness(); nativeTracks(h);
+  h.P.startProgressReporting(); await flush();
+  await h.P.selectAudio('embedded:1');
+  await h.P.selectSubtitle(0);
+  await h.P.adjustSubtitleOffset(0.5);
+  await h.P.adjustSubtitleScale(0.1);
+  await h.P.setSpeed(1.5);
+  h.P.engSetVolume(0.7);
+  const commands = h.calls.filter(c => c[1] === 'send_mpv_command_embedded').map(c => Array.from(c[2].command));
+  assert.ok(commands.some(c => c[1] === 'aid' && c[2] === 42));
+  assert.ok(commands.some(c => c[1] === 'sid' && c[2] === 91));
+  assert.ok(commands.some(c => c[1] === 'sub-delay' && c[2] === -99.5));
+  assert.ok(commands.some(c => c[1] === 'sub-scale' && c[2] === 1.1));
+  assert.ok(commands.some(c => c[1] === 'speed' && c[2] === 1.5));
+  assert.ok(commands.some(c => c[1] === 'volume' && c[2] === 70));
+  assert.equal(h.video.playbackRate, undefined);
+  assert.equal(h.P.engRate(), 1.5);
+  assert.equal(h.P.snapshot().extras.audio_track, 'embedded:1');
+  assert.equal(h.P.snapshot().extras.subtitle_track, 'external:en.ass');
+  await h.P.selectSubtitle(-1);
+  assert.equal(h.P.selectedSubtitle, null);
+  assert.equal(h.P.snapshot().extras.subtitle_track, 'off');
+});
+
+test('native cached subscriptions serve watchdogs without extra command connections', async () => {
+  const h = harness(); nativeTracks(h);
+  h.P.mpvState.properties = { 'time-pos': 22, pause: false, 'demuxer-cache-duration': 10,
+    'cache-speed': 500, 'frame-drop-count': 3, 'decoder-frame-drop-count': 4, 'container-fps': 24 };
+  const result = await h.P._sampleEngine();
+  assert.equal(result.time, 122); assert.equal(result.loadingBps, 4000); assert.equal(result.dropped, 7);
+  assert.equal(h.calls.filter(c => c[1] === 'send_mpv_command_embedded').length, 0);
+});
+
+test('remembered watch tracks take precedence, global languages choose only when no remembered track exists', async () => {
+  const h = harness({ storage: { mc_subLang: 'zh', mc_audioLang: 'zh' } }); nativeTracks(h);
+  h.P.sessionData.watch.subtitle_track = 'off';
+  assert.equal(h.P.initialSubtitle(), -1);
+  delete h.P.sessionData.watch.subtitle_track;
+  h.P.sessionData.decision.subtitles.push({ track_ref: 'embedded:0', kind: 'pgs', language: 'chi' });
+  h.P.mpvTracks.subtitles.push({ id: 19, ref: 'embedded:0' });
+  assert.equal(h.P.initialSubtitle(), 1);
+  h.P.context.subtitle_track = 'external:en.ass';
+  assert.equal(h.P.initialSubtitle(), 0);
+  h.P.context.audio_track = 'embedded:0';
+  h.P.currentAudioRef = 'embedded:1';
+  await h.P.initializeTracks();
+  assert.equal(h.P.currentAudioRef, 'embedded:0');
+  assert.equal(h.P.snapshot().extras.audio_track, undefined);
+  assert.equal(h.P.snapshot().extras.subtitle_track, undefined);
+});
+
+test('HTML5 audio and PGS controls renegotiate the common context at file position', async () => {
+  const h = harness();
+  h.P.open('Title', 'https://server.invalid/a.mp4', [], 0, session({ timeline: 'session', start_ms: 100000,
+    decision: { tier: 3, file_id: 81, audio: { track_ref: 'embedded:0' }, video: {},
+      audio_tracks: [{ ref: 'embedded:0', codec: 'aac' }, { ref: 'embedded:1', codec: 'aac' }],
+      subtitles: [{ track_ref: 'embedded:0', kind: 'pgs' }] }, subtitle_urls: ['/pgs'] }), item());
+  await flush(); h.video.currentTime = 20;
+  const restarted = [];
+  h.A.restartPlaybackAt = (position, overrides) => restarted.push({ position, overrides, ref: h.P.context.subtitle_track });
+  await h.P.selectAudio('embedded:1');
+  assert.equal(restarted[0].position, 120000); assert.equal(restarted[0].overrides.audio_track, 'embedded:1');
+  await h.P.selectSubtitle(0);
+  assert.equal(restarted[1].position, 120000); assert.equal(restarted[1].ref, 'embedded:0');
+  h.P.sessionData.decision.video.burn_subtitle = 'embedded:0';
+  await h.P.adjustSubtitleOffset(1); assert.equal(h.P.subtitleOffset, 0);
+  await h.P.selectSubtitle(-1); assert.equal(restarted[2].ref, 'off');
+});
+
+test('VTT cues shift from file clock once, and subtitle size/offset survive engine replacement', async () => {
+  const h = harness();
+  h.P.adoptSession('Title', session({ timeline: 'session', start_ms: 100000 }), item(), 'html5');
+  const cue = { startTime: 150, endTime: 155, line: 'auto' };
+  h.video.textTracks = [{ cues: [cue], mode: 'disabled' }];
+  h.P.applyCueStyle(h.video.textTracks[0]); assert.equal(cue.startTime, 50);
+  await h.P.adjustSubtitleOffset(0.5); assert.equal(cue.startTime, 50.5);
+  h.P.applyCueStyle(h.video.textTracks[0]); assert.equal(cue.startTime, 50.5);
+  await h.P.adjustSubtitleScale(0.1);
+  const context = { ...h.P.context };
+  h.P.adoptSession('Again', session(), context, 'html5');
+  assert.equal(h.P.subtitleOffset, 0.5); assert.equal(h.P.subtitleFontScale, 1.1);
+});
+
+test('ASS renderer loads only the selected content and uses file-clock offset without hidden VTT duplicates', async () => {
+  const h = harness(); const renderers = [];
+  h.context.JASSUB = class {
+    constructor(config) { this.config = config; renderers.push(this); }
+    setTrack(content) { this.content = content; } freeTrack() {} destroy() {}
+  };
+  h.P.open('Title', 'https://server.invalid/a.mp4', ['/vtt', '/ass'], 0, session({ timeline: 'session', start_ms: 100000,
+    decision: { tier: 3, file_id: 81, subtitles: [{ track_ref: 'embedded:0', kind: 'vtt', is_default: true },
+      { track_ref: 'embedded:1', kind: 'ass' }] }, subtitle_urls: ['/vtt', '/ass'] }), item());
+  await flush(); assert.equal(renderers.length, 0); assert.equal(h.video.children.length, 1);
+  await h.P.selectSubtitle(1); assert.equal(renderers.length, 1);
+  assert.ok(renderers[0].config.subContent.startsWith('[Script Info]'));
+  assert.equal(renderers[0].timeOffset, 100);
+  await h.P.adjustSubtitleOffset(0.5); assert.equal(renderers[0].timeOffset, 99.5);
+  await h.P.selectSubtitle(-1); assert.equal(h.P.selectedSubtitle, null);
+});
+
+test('late ASS selection is discarded when another subtitle or off is selected', async () => {
+  const h = harness(), pending = deferred(); let constructed = 0;
+  h.context.JASSUB = class { constructor() { constructed++; } };
+  h.P.adoptSession('Title', session({ decision: { tier: 3, file_id: 81, subtitles: [{ track_ref: 'embedded:0', kind: 'ass' }] },
+    subtitle_urls: ['/ass'] }), item(), 'html5');
+  h.API.rawFetch = () => pending.promise;
+  const old = h.P.selectSubtitle(0); await h.P.selectSubtitle(-1);
+  pending.resolve({ ok: true, text: async () => '[Script Info]' });
+  await old; assert.equal(constructed, 0); assert.equal(h.P.selectedSubtitle, null);
+});
+
+test('quality memory is bounded and isolated by server, account and measured network class', () => {
+  const h = harness(); h.A.session = { username: 'alice' };
+  h.context.rememberQuality(77, 720); assert.equal(h.context.rememberedQuality(77), 720);
+  h.A.session.username = 'bob'; assert.equal(h.context.rememberedQuality(77), 0);
+  h.A.session.username = 'alice'; h.API.baseUrl = 'https://other.invalid'; assert.equal(h.context.rememberedQuality(77), 0);
+  h.API.baseUrl = 'https://server.invalid'; h.context.navigator.connection = { effectiveType: '3g' }; assert.equal(h.context.rememberedQuality(77), 0);
+  h.context.navigator.connection = undefined; h.context.rememberQuality(77, 0); assert.equal(h.context.rememberedQuality(77), 0);
+  for (let id = 1; id <= 305; id++) h.context.rememberQuality(id, 1080);
+  assert.equal(Object.keys(JSON.parse(h.storage.get('mc_quality_memory'))).length, 300);
+});
+
+test('trickplay sheet/row/column calculation clamps the file timeline across sheet boundaries', () => {
+  const h = harness(); const index = { ready: true, interval_ms: 10000, columns: 3, rows: 2, count: 11,
+    tile_width: 160, tile_height: 90, sheets: ['sheet-a', 'sheet-b'] };
+  const tile = h.context.trickplayTile(index, 80000);
+  assert.equal(tile.sheet, 'sheet-b'); assert.equal(tile.x, 320); assert.equal(tile.y, 0);
+  const last = h.context.trickplayTile(index, 999999); assert.equal(last.x, 160); assert.equal(last.y, 90);
+  assert.equal(h.context.trickplayTile({ ready: false }, 0), null);
+});
+
+test('skip supports ad/preview kinds and does not offer a meaningless skip in the last three seconds or outro-to-end', () => {
+  const h = harness(); h.elements.set('playerSkipBtn', { hidden: true, textContent: '' });
+  h.P.adoptSession('Title', session({ segments: [{ type: 'ad', start_ms: 10000, end_ms: 20000 },
+    { type: 'outro', start_ms: 30000, end_ms: 3600000, to_end: true }] }), item(), 'html5');
+  let next = 0; h.A.onPlaybackEnded = () => next++;
+  h.video.currentTime = 12; h.P.checkSegments(); assert.equal(h.elements.get('playerSkipBtn').textContent, '跳过广告');
+  h.P.skipSegment(); assert.equal(h.video.currentTime, 20);
+  h.video.currentTime = 18; h.P.checkSegments(); assert.equal(h.elements.get('playerSkipBtn').hidden, true);
+  h.video.currentTime = 35; h.P.checkSegments(); h.P.checkSegments();
+  assert.equal(next, 1); assert.equal(h.elements.get('playerSkipBtn').hidden, true);
+});
+
+test('chapters from native session clock seek on the common file timeline', () => {
+  const h = harness(); nativeTracks(h);
+  h.P.mpvState.properties['chapter-list'] = [{ time: 0, title: 'A' }, { time: 50, title: 'B' }];
+  const sought = []; h.P.engSeekTo = value => sought.push(value);
+  h.P.seekChapter(1); h.P.seekChapter(-1);
+  assert.deepEqual(sought, [150, 100]);
+});
+
+test('retry budget permits one native retry then server fallback and caps repeated network restarts', () => {
+  const h = harness(); nativeTracks(h); const retries = [];
+  h.A.restartPlaybackAt = (ms, overrides) => retries.push(overrides || {});
+  h.A.onPlaybackContentFailed('decode failed');
+  assert.equal(retries.length, 1); assert.equal(retries[0].__forceHtml5, undefined);
+  delete h.P.sessionData.__contentFailed; h.A.onPlaybackContentFailed('decode failed twice');
+  assert.equal(retries[1].__forceHtml5, true);
+  h.A._totalNetRestarts = 6; h.P.sessionData.__contentFailed = false;
+  let final; h.A._showPlaybackError = reason => final = reason;
+  h.A.onPlaybackNetworkDead('lost'); assert.match(final, /预算已用尽/);
+});
+
+test('native mouse input uses the same controls and does not toggle pause on a single click', () => {
+  const h = harness(); nativeTracks(h); let full = 0;
+  h.P.toggleFullscreen = () => full++;
+  h.P.handleNativeInput(['click']); assert.equal(h.P.mpvState.paused, false);
+  h.P.handleNativeInput(['double-click']); assert.equal(full, 1);
+  h.P.mpvState.bufferedAhead = 100;
+  h.P.handleNativeInput(['seek', '10']); assert.equal(h.P.engPos(), 132);
+});
+
+test('QoE final metrics use a bounded redacted payload and never cross account identity', async () => {
+  const h = harness();
+  h.P.open('Title secret', 'https://server.invalid/a.mp4?token=secret', [], 0, session(), item({ attemptId: 'attempt-1' }));
+  h.video.currentTime = 20; h.video.emit('playing'); h.P.engSeekTo(21);
+  h.P.measure('buffer_start'); h.P.measure('buffer_end');
+  await h.P.close();
+  const metrics = h.calls.find(c => c[0] === 'metrics')[1];
+  assert.equal(metrics.client, 'windows'); assert.equal(metrics.attempt_id, 'attempt-1'); assert.equal(metrics.seek_count, 1);
+  assert.ok(metrics.first_frame_ms != null); assert.equal(metrics.outcome, 'exited');
+  assert.equal(JSON.stringify(metrics).includes('secret'), false);
+  assert.ok(metrics.detail.timeline.length <= 64);
+  const other = harness(); other.P.adoptSession('Title', session(), item({ attemptId: 'attempt-2' }), 'html5');
+  other.A.session = { username: 'new-account' }; await other.P.close();
+  assert.equal(other.calls.filter(c => c[0] === 'metrics').length, 0);
+});
+
+test('explicit progressive HLS delivers each chunk once and leaves success data empty', async () => {
+  const h = harness({ fetch: async () => new Response('fragment') });
+  const loader = new h.win.ProxyHlsLoader({ progressive: true });
+  const chunks = []; let success;
+  loader.load({ url: 'https://server.invalid/part.m4s', responseType: 'arraybuffer' }, { highWaterMark: 4 }, {
+    onProgress(stats, context, data) { chunks.push(Buffer.from(data)); },
+    onSuccess(response, stats) { success = { response, stats }; }, onError(error) { throw error; },
+  });
+  await flush();
+  assert.equal(Buffer.concat(chunks).toString(), 'fragment'); assert.equal(success.response.data.byteLength, 0);
+  assert.equal(success.stats.loaded, 8); assert.equal(success.stats.chunkCount, 0);
+});
+
+test('aborting a pending HLS capability notifies onAbort once and revokes its late grant', async () => {
+  const pending = deferred(); let aborts = 0, fetched = 0;
+  const h = harness({ invoke(name) { return name === 'grant_media_stream' ? pending.promise : {}; },
+    fetch() { fetched++; return Promise.resolve(new Response('should not happen')); } });
+  const loader = new h.win.ProxyHlsLoader({});
+  loader.load({ url: 'https://server.invalid/part.m4s', responseType: 'arraybuffer' }, {}, {
+    onAbort() { aborts++; }, onSuccess() { throw new Error('stale response'); }, onError() {},
+  });
+  loader.destroy(); loader.destroy();
+  pending.resolve({ streamId: 'late-grant', url: 'http://127.0.0.1/cap/late' }); await flush();
+  assert.equal(aborts, 1); assert.equal(fetched, 0);
+  assert.ok(h.calls.some(c => c[1] === 'release_media_stream' && c[2].streamId === 'late-grant'));
+});
+
+test('browser progress starts on a real video-frame callback and discards callbacks after close', async () => {
+  const h = harness(); let callback, cancelled;
+  h.video.requestVideoFrameCallback = fn => { callback = fn; return 123; };
+  h.video.cancelVideoFrameCallback = id => { cancelled = id; };
+  h.P.open('Title', 'https://server.invalid/a.mp4', [], 0, session(), item());
+  h.video.emit('playing'); await flush();
+  assert.equal(h.calls.filter(c => c[0] === 'progress').length, 0);
+  callback(); await flush(); assert.equal(h.calls.filter(c => c[0] === 'progress' && c[2] === 'start').length, 1);
+  await h.P.close();
+  h.P.open('Title 2', 'https://server.invalid/a.mp4', [], 0, session(), item());
+  h.video.emit('playing'); await h.P.close(); callback(); await flush();
+  assert.equal(cancelled, 123);
+  assert.equal(h.calls.filter(c => c[0] === 'progress' && c[2] === 'start').length, 1);
 });

@@ -36,6 +36,35 @@ http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
     if (url.pathname === '/__test/reset') { reset(await bodyOf(req) || {}); return json(res, { ok: true }); }
     if (url.pathname === '/__test/state') return json(res, state);
+    if (url.pathname === '/__test/native') {
+      const { command, args } = await bodyOf(req);
+      state.nativeRequests ||= []; state.nativeRequests.push({ command, username: args.username, pairingId: args.pairingId });
+      const status = () => ({ mode: state.nativeAuth === 'cookie' ? 'cookie' : 'device', initialized: state.initialized,
+        session: state.authenticated ? { username: state.username || 'fixture', role: 'admin' } : null,
+        accounts: state.savedAccounts || [{ username: state.username || 'fixture', nickname: '当前账号', active: state.authenticated, authenticated: state.authenticated }],
+        pairing_supported: state.nativeAuth !== 'cookie', compatibility_reason: state.nativeAuth === 'cookie' ? '服务器尚不支持 Windows 设备登录，请升级服务器。' : null, context_generation: 1 });
+      if (command === 'native_auth_status') return json(res, status());
+      if (command === 'native_password_login') {
+        if (state.loginDelay) await new Promise(resolve => setTimeout(resolve, state.loginDelay));
+        if (state.loginFailures > 0) { state.loginFailures--; return json(res, { status: 401, code: 'BAD_PASSWORD', message: '密码错误，请重试' }, 401); }
+        state.authenticated = true; state.username = args.username; return json(res, status());
+      }
+      if (command === 'native_select_account') { state.authenticated = true; state.username = args.username; return json(res, status()); }
+      if (command === 'native_remove_account' || command === 'native_logout') { state.authenticated = false; return json(res, status()); }
+      if (command === 'native_pair_begin') {
+        state.pairingId = 'pair-' + state.nativeRequests.length; state.pairCancelled = false;
+        return json(res, { pairing_id: state.pairingId, user_code: 'FIX-1234', verification_uri: 'http://127.0.0.1:4179/pair', verification_uri_complete: 'http://127.0.0.1:4179/pair?user_code=FIX-1234', expires_at: Date.now() / 1000 + (state.pairExpires || 180), interval: 1 });
+      }
+      if (command === 'native_pair_cancel') { state.pairCancelled = true; return json(res, null); }
+      if (command === 'native_pair_poll') {
+        if (state.pairDelay) await new Promise(resolve => setTimeout(resolve, state.pairDelay));
+        if (state.pairCancelled || state.pairingId !== args.pairingId) return json(res, { status: 'cancelled', interval: 1 });
+        const result = state.pairStatuses?.shift() || 'pending';
+        if (result === 'approved') { state.authenticated = true; state.username = 'paired'; }
+        return json(res, { status: result, interval: 1, ...(result === 'approved' ? { session: status().session } : {}) });
+      }
+      return json(res, { status: 404, message: 'Unknown native fixture command' }, 404);
+    }
     if (url.pathname.startsWith('/api/v1/test-media/')) {
       const name = path.basename(url.pathname);
       const filename = path.join(__dirname, 'media', name);
@@ -88,26 +117,34 @@ http.createServer(async (req, res) => {
       state.username = body.username;
       return json(res, ok({ username: state.username, role: 'member' }));
     }
-    if (route === '/libraries') return json(res, ok([{ id: 1, name: '测试媒体库', kind: 'movie', stats: { item_count: 245 } }]));
-    if (route === '/collections') return json(res, ok([{ id: 8, name: '测试合集', library_id: 1, hidden: false, item_count: 245 }]));
-    if (/^\/(libraries\/1|collections\/8)\/items$/.test(route) || route === '/playback/favorites') {
+    if (route === '/libraries') return json(res, ok([{ id: 1, name: '测试媒体库', kind: 'movie', stats: { item_count: state.itemCount || 245 } }]));
+    if (route === '/ui/preferences') return json(res, ok({ home: { rows: state.homeRows || [] } }));
+    if (/^\/libraries\/kinds\/\w+\/genres$/.test(route)) return json(res, ok([{ value: '28', label: '动作', count: 120, cover_url: null }, { value: '18', label: '剧情', count: 125, cover_url: null }]));
+    if (route === '/collections') return json(res, ok([{ id: 8, name: '测试合集', library_id: 1, hidden: false, item_count: state.itemCount || 245 }]));
+    if (/^\/(libraries\/1|libraries\/kinds\/\w+|collections\/8)\/items$/.test(route) || route === '/playback/favorites') {
       const offset = Number(url.searchParams.get('offset') || 0);
       const limit = Number(url.searchParams.get('limit') || 20);
       if (limit > 200) return json(res, { message: 'limit must be <=200' }, 422);
-      let items = Array.from({ length: 245 }, (_, i) => item(i + 1));
-      if (url.searchParams.get('sort') === 'title' && url.searchParams.get('order') === 'desc') items.reverse();
-      const page = items.slice(offset, offset + limit);
-      return json(res, ok(route.startsWith('/libraries/') ? page : { items: page, total: 245 }));
+      const total = state.itemCount || 245;
+      const reversed = url.searchParams.get('sort') === 'title' && url.searchParams.get('order') === 'desc';
+      const page = Array.from({ length: Math.max(0, Math.min(limit, total - offset)) }, (_, i) => item(reversed ? total - offset - i : offset + i + 1));
+      return json(res, ok(route.startsWith('/libraries/') ? page : { items: page, total }));
     }
     if (route === '/search/library') {
       const q = url.searchParams.get('q') || '';
       if (q === '慢搜索') await new Promise(resolve => setTimeout(resolve, 900));
       const next = url.searchParams.has('cursor');
-      return json(res, ok({ items: [{ item: { ...item(next ? 202 : 201), title: q }, library_ids: [1], match: { kind: 'title', text: q } }],
-        people: [], suggestions: [], next_cursor: next ? null : 'fixture-next' }));
+      return json(res, ok({ items: [{ item: { ...item(next ? 202 : 201), title: q }, library_ids: [1], match: { type: 'title', source_field: 'title', matched_name: q, label: url.searchParams.has('person_id') ? '演员：测试演员' : '片名匹配' } }],
+        people: state.searchPeople ? [{ id: 9, tmdb_person_id: 9, name: '测试演员', item_count: 2, profile_path: null, match: { label: '演员：测试演员' } }] : [], suggestions: state.searchPeople ? [{ type: 'title', text: '推荐片名', media_item_id: 201, label: '片名匹配' }] : [], next_cursor: next ? null : 'fixture-next' }));
     }
-    if (route === '/playback/up-next') return json(res, ok({ items: [{ ...item(3), season_number: 3, episode_number: 2, position_ms: 300000, duration_ms: 3600000, progress_percent: 8, episode_title: '第二集' }] }));
-    if (route === '/playback/marks') return json(res, ok({ played: false, is_favorite: false, unplayed_count: 2 }));
+    if (route === '/playback/up-next') return json(res, ok({ items: [{ ...item(3), season_number: 3, episode_number: state.longSeason ? 1051 : 2, position_ms: 300000, duration_ms: 3600000, progress_percent: 8, episode_title: state.longSeason ? '第1051集' : '第二集' }] }));
+    if (route === '/playback/marks') {
+      state.marks ||= {};
+      const target = req.method === 'POST' ? body : Object.fromEntries(url.searchParams);
+      const key = [target.media_item_id, target.season_number || '', target.episode_number || ''].join(':');
+      if (req.method === 'POST') state.marks[key] = { ...state.marks[key], ...body };
+      return json(res, ok({ played: false, is_favorite: false, unplayed_count: 2, ...state.marks[key] }));
+    }
     if (route === '/playback/resume') return json(res, ok({ season_number: 3, episode_number: 2, position_ms: 300000, duration_ms: 3600000 }));
     if (/^\/libraries\/1\/items\/\d+$/.test(route)) {
       const n = Number(route.split('/').pop());
@@ -115,7 +152,7 @@ http.createServer(async (req, res) => {
     }
     if (route.endsWith('/episodes')) {
       const season = Number(url.searchParams.get('season_number') || 3);
-      return json(res, ok({ season_number: season, resume_episode: 2, episodes: [1, 2, 3].map(n => ({ season_number: season, episode_number: n, name: `第 ${n} 集`, title: `第 ${n} 集`, owned: true, played: n === 1, files: [file(3)], duration_ms: 3600000 })) }));
+      return json(res, ok({ season_number: season, resume_episode: state.longSeason ? 1051 : 2, episodes: Array.from({ length: state.longSeason ? 1101 : 3 }, (_, i) => i + 1).map(n => ({ season_number: season, episode_number: n, name: `第 ${n} 集`, title: `第 ${n} 集`, owned: n !== (state.longSeason ? 1052 : 0), played: state.marks?.[`3:${season}:${n}`]?.played ?? n === 1, files: [file(3)], duration_ms: 3600000 })) }));
     }
     if (route === '/people/9') return json(res, ok({ name: '测试演员', credits: [{ ...item(3), department: 'cast', character: '演员', library_id: 1 }] }));
     if (route === '/playback/sessions' && req.method === 'POST') {

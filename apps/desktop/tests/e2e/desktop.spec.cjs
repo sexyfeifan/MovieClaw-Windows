@@ -1,66 +1,6 @@
 const { test, expect } = require('@playwright/test');
 
-// Browser tests exercise the shipped DOM and HTTP contract. This bridge is deliberately a
-// fixture: native WebView2, Win32 child-window rendering and hardware decode need Windows.
-async function openDesktop(page, request, options = {}) {
-  await request.post('/__test/reset', { data: options });
-  await page.addInitScript(({ native }) => {
-    window.__fixture = { calls: [], windows: [], running: false, instanceId: null,
-      props: { 'time-pos': 21, duration: 3300, pause: false, 'eof-reached': false,
-        'video-out-params': { w: 1280, h: 720 }, 'demuxer-cache-duration': 30 } };
-    const pending = new Map();
-    const listeners = new Map();
-    window.__TAURI__ = {
-      event: { listen: async (name, fn) => { listeners.set(name, fn); return () => listeners.delete(name); } },
-      window: { getCurrentWindow: () => Object.fromEntries(['minimize', 'toggleMaximize', 'close', 'setFullscreen'].map(name => [name, async () => window.__fixture.windows.push(name)])) },
-      core: { invoke: async (command, args = {}) => {
-        const f = window.__fixture;
-        f.calls.push({ command, args });
-        if (command === 'get_server_url') return location.origin;
-        if (command === 'get_app_version') return '0.2.111';
-        if (command === 'check_for_updates') return { has_update: false, message: '已是最新版本 (0.2.111)' };
-        if (command === 'proxy_api') {
-          const controller = new AbortController(); pending.set(args.requestId, controller);
-          try {
-            let target = args.path;
-            if (target.startsWith('/__image__')) return { status: 404, body: '', headers: {} };
-            if (target.startsWith('/__stream__')) target = new URLSearchParams(target.split('?')[1]).get('url');
-            const url = target.startsWith('http') ? target : location.origin + (target.startsWith('/api/') ? target : '/api/v1' + target);
-            const response = await fetch(url, { method: args.method, body: args.body,
-              signal: controller.signal, headers: { 'Content-Type': 'application/json', ...args.headers } });
-            const binary = args.path.startsWith('/__stream__') && response.headers.get('Content-Type')?.includes('video/');
-            const body = binary ? btoa(String.fromCharCode(...new Uint8Array(await response.arrayBuffer()))) : await response.text();
-            return { status: response.status, body, headers: Object.fromEntries(response.headers) };
-          } finally { pending.delete(args.requestId); }
-        }
-        if (command === 'cancel_proxy_request') { pending.get(args.requestId)?.abort(); return; }
-        if (command === 'has_embedded_player') return native;
-        if (command === 'get_main_window_hwnd') return 1;
-        if (command === 'launch_embedded_player') { f.running = true; f.instanceId = args.instanceId; return; }
-        if (command === 'stop_embedded_player') {
-          if (args.instanceId == null || args.instanceId === f.instanceId) f.running = false;
-          return;
-        }
-        if (command === 'get_embedded_player_status') return { running: f.running && (args.instanceId == null || args.instanceId === f.instanceId), exit_code: null };
-        if (command === 'send_mpv_command_embedded') {
-          const c = args.command;
-          if (c[0] === 'get_property') return { data: f.props[c[1]] ?? 0 };
-          if (c[0] === 'set_property') f.props[c[1]] = c[2];
-          if (c[0] === 'seek') f.props['time-pos'] = c[1];
-          return { data: null };
-        }
-        if (['resize_embedded_player', 'set_embedded_player_visible', 'complete_shutdown', 'clear_server_url'].includes(command)) return;
-        throw new Error('Unexpected fixture command: ' + command);
-      } },
-    };
-  }, { native: options.native !== false });
-  await page.goto('/desktop/index.html');
-}
-async function state(request) { return (await request.get('/__test/state')).json(); }
-async function browseLibrary(page) {
-  await page.locator('#libraryNav [data-library-id="1"]').click();
-  await expect(page.locator('#posterGrid .poster-card')).toHaveCount(60);
-}
+const { openDesktop, state, browseLibrary } = require('./helpers.cjs');
 
 test('login keeps window controls usable and enters the authenticated library', async ({ page, request }) => {
   await openDesktop(page, request, { authenticated: false });
@@ -272,4 +212,130 @@ test('HLS loads real fMP4 fragments through the proxy loader and reports file ti
   await page.locator('#playerBack').click();
   await expect.poll(async () => (await state(request)).stopped).toEqual(['session-1']);
   await expect(page.locator('#playerView')).toBeHidden();
+});
+
+test('saved home rows determine pinned collections and complete walls, while genre tiles use genre ids', async ({ page, request }) => {
+  await openDesktop(page, request, { homeRows: [{ id:'row:selected',collection_id:8,sort:'title',order:'asc',name:'我的精选' }, {id:'favorites',hidden:true}] });
+  await expect(page.locator('[data-home-row]').first()).toHaveAttribute('data-home-row','row:selected');
+  await expect(page.locator('[data-home-row="favorites"]')).toHaveCount(0);
+  await expect(page.locator('#collectionNav [data-collection-id="8"]')).toBeVisible();
+  await expect(page.locator('.continue-card')).toHaveCount(1);
+  await expect(page.locator('.library-tile')).toHaveCount(2);
+  await page.locator('[data-home-row="row:selected"] .see-all-card').click();
+  await expect(page.locator('.page-title')).toHaveText('我的精选');
+  await expect(page.locator('#posterGrid .poster-card')).toHaveCount(60);
+  expect((await state(request)).requests.some(r=>r.path==='/collections/8/items'&&r.query.limit==='60'&&r.query.sort==='title'&&r.query.order==='asc')).toBe(true);
+  await page.locator('[data-page="home"]').click();
+  await page.locator('.genre-tile[data-genre="28"]').click();
+  await expect(page.locator('.page-title')).toHaveText('动作');
+  expect((await state(request)).requests.some(r=>r.path==='/libraries/kinds/movie/items'&&r.query.g==='28')).toBe(true);
+});
+
+test('each tab restores its detail stack and loaded wall scroll, while reselect returns to the tab root', async ({ page, request }) => {
+  await openDesktop(page, request); await browseLibrary(page);
+  await page.locator('#wallSentinel').scrollIntoViewIfNeeded();
+  await expect(page.locator('#posterGrid .poster-card')).toHaveCount(120);
+  await page.locator('#posterGrid [data-item-id="101"]').scrollIntoViewIfNeeded();
+  const scroll=await page.locator('#content').evaluate(el=>el.scrollTop);
+  await page.locator('#posterGrid [data-item-id="101"]').click();
+  await expect(page.locator('.detail-title')).toHaveText('影片 101');
+  await page.locator('[data-page="favorites"]').click(); await page.locator('#libraryNav [data-library-id="1"]').click();
+  await expect(page.locator('.detail-title')).toHaveText('影片 101');
+  await page.locator('#btnBack').click();
+  await expect(page.locator('#posterGrid .poster-card')).toHaveCount(120);
+  expect(await page.locator('#content').evaluate(el=>el.scrollTop)).toBe(scroll);
+  await page.locator('#posterGrid [data-item-id="101"]').click();
+  await page.locator('#libraryNav [data-library-id="1"]').click();
+  await expect(page.locator('.page-title')).toHaveText('测试媒体库');
+  await expect(page.locator('#posterGrid .poster-card')).toHaveCount(60);
+});
+
+test('hover and right click menus operate on the selected media without opening its detail', async ({ page, request }) => {
+  await openDesktop(page, request); await browseLibrary(page);
+  const card=page.locator('#posterGrid [data-item-id="1"]');
+  await card.hover(); await expect(card.locator('.card-more')).toBeVisible();
+  await card.click({button:'right'}); await expect(page.locator('#cardMenu')).toBeVisible();
+  await page.locator('#cardMenu button').filter({hasText:/^收藏$/}).click();
+  await expect(page.locator('#appNotice')).toHaveText('已收藏');
+  await expect(page.locator('.page-title')).toHaveText('测试媒体库');
+  expect((await state(request)).requests.some(r=>r.path==='/playback/marks'&&r.body?.media_item_id===1&&r.body.favorite===true)).toBe(true);
+});
+
+test('people chips filter search with explanations and selection persists account recent searches', async ({ page, request }) => {
+  await openDesktop(page, request, {searchPeople:true});
+  await page.locator('#searchInput').fill('演员');
+  await expect(page.locator('[data-search-person="9"]')).toBeVisible();
+  await expect(page.locator('#posterGrid')).toContainText('片名匹配');
+  await page.locator('[data-search-person="9"]').click();
+  await expect(page.locator('.person-filter')).toContainText('测试演员');
+  await expect(page.locator('#posterGrid')).toContainText('演员：测试演员');
+  expect((await state(request)).requests.some(r=>r.path==='/search/library'&&r.query.person_id==='9')).toBe(true);
+  await page.locator('#posterGrid .poster-card').first().click();
+  await expect(page.locator('#btnPlay')).toBeVisible(); await page.locator('#btnBack').click();
+  await expect(page.locator('.person-filter')).toContainText('测试演员');
+  await expect(page.locator('[data-search-person="9"]')).toBeVisible();
+  await page.locator('#clearPersonFilter').click();
+  await page.locator('#searchInput').fill('');
+  await expect(page.locator('#heroBanner')).toBeVisible();
+  await page.locator('#searchInput').blur(); await page.locator('#searchInput').focus();
+  await expect(page.locator('[data-recent-query="演员"]')).toBeVisible();
+  await page.locator('#clearRecentSearches').click(); await expect(page.locator('[data-recent-query]')).toHaveCount(0);
+});
+
+test('long seasons locate 1051, browse 50-item bands and mark a single episode from the complete grid', async ({ page, request }) => {
+  await openDesktop(page, request,{longSeason:true}); await browseLibrary(page);
+  await page.locator('#posterGrid [data-item-id="3"]').click();
+  await expect(page.locator('[data-episode-range="21"]')).toHaveClass(/active/);
+  await expect(page.locator('.episode-card')).toHaveCount(50);
+  await expect(page.locator('.detail-episode-line')).toContainText('1051');
+  await page.locator('[data-episode-range="20"]').click();
+  await expect(page.locator('.episode-card').last()).toHaveAttribute('data-episode-number','1050');
+  await expect(page.locator('.detail-episode-line')).toContainText('1051');
+  await page.locator('#allEpisodes').click(); await expect(page.locator('[data-grid-episode]')).toHaveCount(1101);
+  await expect(page.locator('[data-grid-episode="1052"]')).toBeDisabled();
+  await page.locator('[data-grid-episode="51"]').click();
+  await expect(page.locator('[data-episode-range="1"]')).toHaveClass(/active/);
+  await expect(page.locator('.detail-episode-line')).toContainText('51');
+  await page.locator('.episode-card[data-episode-number="51"] .episode-mark-btn').click();
+  await expect(page.locator('#appNotice')).toHaveText('已标为已看');
+  expect((await state(request)).requests.some(r=>r.path==='/playback/marks'&&r.body?.season_number===3&&r.body.episode_number===51&&r.body.played===true)).toBe(true);
+});
+
+test('native welcome chooses a saved account and keeps device credential material out of the browser', async ({ page, request }) => {
+  await openDesktop(page,request,{nativeAuth:true,authenticated:false,savedAccounts:[{username:'alice',nickname:'Alice',authenticated:true},{username:'expired',authenticated:false}]});
+  await expect(page.locator('h2')).toHaveText('选择账号');
+  await page.locator('[data-account="alice"]').click(); await expect(page.locator('#heroBanner')).toBeVisible();
+  expect(await page.evaluate(()=>App.session.username)).toBe('alice');
+  expect((await state(request)).nativeRequests.some(r=>r.command==='native_select_account'&&r.username==='alice')).toBe(true);
+  expect(await page.evaluate(()=>Object.keys(API.nativeAuthStatus).some(key=>/token|device_code/.test(key)))).toBe(false);
+});
+
+test('native QR waits for approval, retries a denial and enters the approved account', async ({ page, request }) => {
+  await openDesktop(page,request,{nativeAuth:true,authenticated:false,savedAccounts:[],pairStatuses:['denied','pending','approved']});
+  await page.locator('#loginPairing').click(); await expect(page.locator('#pairingCode svg')).toBeVisible();
+  await expect(page.locator('#pairingCode')).toContainText('FIX-1234');
+  await expect(page.locator('#pairingStatus')).toContainText('被拒绝'); await page.locator('#pairingRetry').click();
+  await expect(page.locator('#heroBanner')).toBeVisible();
+  expect(await page.evaluate(()=>App.session.username)).toBe('paired');
+  const snapshot=await state(request);
+  expect(snapshot.nativeRequests.filter(r=>r.command==='native_pair_begin')).toHaveLength(2);
+  expect(snapshot.nativeRequests.some(r=>r.command==='native_pair_cancel')).toBe(true);
+  expect(snapshot.requests.some(r=>r.path==='/auth/device/token')).toBe(false);
+});
+
+test('an expired QR can be regenerated and cancel retires an in-flight approval before password login', async ({ page, request }) => {
+  await openDesktop(page,request,{nativeAuth:true,authenticated:false,savedAccounts:[],pairExpires:1.2,pairDelay:1500,pairStatuses:['approved']});
+  await page.locator('#loginPairing').click(); await expect(page.locator('#pairingStatus')).toContainText('过期');
+  await expect(page.locator('#pairingRetry')).toBeVisible();
+  await page.locator('#pairingCancel').click(); await expect(page.locator('#loginForm')).toBeVisible();
+  await page.waitForTimeout(1800); expect((await state(request)).authenticated).toBe(false);
+  await expect(page.locator('#loginForm')).toBeVisible();
+});
+
+test('old servers give a specific QR upgrade explanation while native password compatibility remains usable', async ({ page, request }) => {
+  await openDesktop(page,request,{nativeAuth:'cookie',authenticated:false,savedAccounts:[]});
+  await page.locator('#loginPairing').click(); await expect(page.locator('#appNotice')).toContainText('尚不支持 Windows');
+  await page.locator('#loginUser').fill('fixture'); await page.locator('#loginPass').fill('fixture-password'); await page.locator('#loginBtn').click();
+  await expect(page.locator('#heroBanner')).toBeVisible();
+  expect((await state(request)).nativeRequests.some(r=>r.command==='native_password_login')).toBe(true);
 });

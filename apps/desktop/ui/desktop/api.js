@@ -43,6 +43,7 @@ const API = {
     if (this.baseUrl !== next) this.invalidateContext();
     this.baseUrl = next;
     window.__MOVIECLAW_SERVER__ = next;
+    await window.__TAURI__?.core.invoke('native_ready').catch(() => {});
   },
 
   // 通过 proxy_api 的 /__image__ 路径加载需要认证的图片，返回 data URI
@@ -61,13 +62,14 @@ const API = {
       }
       return '';
     } catch (e) {
-      console.warn('[API] proxyImage failed:', pathOrUrl, e);
+      console.warn('[API] image request failed', { name: e?.name || 'Error', status: e?.status || 0 });
       return '';
     }
   },
 
   // 通过 Rust proxy_api 命令发送请求（自动 Cookie，绕过 CORS，无 URL scope 限制）
   async rawFetch(path, options = {}) {
+    const started = window.performance?.now();
     const method = (options.method || 'GET').toUpperCase();
     const body = options.body || null;
     const signal = options.signal || this.defaultSignal;
@@ -105,6 +107,7 @@ const API = {
       if (cancelable && (signal?.aborted || epoch !== API.contextEpoch)) throw new DOMException('请求已取消', 'AbortError');
       const headerValues = result.headers || {};
       const headers = new Headers(headerValues);
+      if (started != null) window.MovieClawPerf?.network(path, window.performance.now() - started, headers.get('server-timing'));
       return {
         ok: result.status >= 200 && result.status < 300,
         status: result.status,
@@ -154,6 +157,11 @@ const API = {
   listLibraries() {
     return this.request('/libraries');
   },
+
+  getUiPreferences() { return this.request('/ui/preferences'); },
+  saveUiPreferences(body) { return this.request('/ui/preferences', { method: 'PUT', body }); },
+  listKindItems(kind, params = {}) { return this.request(`/libraries/kinds/${encodeURIComponent(kind)}/items?${new URLSearchParams(params)}`); },
+  listKindGenres(kind) { return this.request(`/libraries/kinds/${encodeURIComponent(kind)}/genres`); },
 
   getLibrary(id) {
     return this.request(`/libraries/${id}`);
@@ -296,11 +304,43 @@ const API = {
   },
 
   // ===== 认证 =====
+  async nativeCall(command, args = {}) {
+    try { return await window.__TAURI__.core.invoke(command, args); }
+    catch (error) {
+      let detail; try { detail = JSON.parse(typeof error === 'string' ? error : error.message); } catch (_) {}
+      throw new APIError(detail?.message || error.message || String(error), { status: detail?.status || 0, code: detail?.code || 'NATIVE_AUTH_ERROR' });
+    }
+  },
+
+  async getNativeAuthStatus() {
+    const epoch = API.contextEpoch;
+    try {
+      const status = await this.nativeCall('native_auth_status');
+      if (epoch !== API.contextEpoch) return null;
+      API.nativeAuthAvailable = !!status;
+      if (status) API.nativeAuthStatus = status;
+      return status;
+    } catch (error) {
+      // An older desktop binary may lack the command; a real authentication failure stays visible.
+      if (/unknown command|not found|unexpected fixture command|not registered/i.test(error.message)) {
+        API.nativeAuthAvailable = false; return null;
+      }
+      throw error;
+    }
+  },
+
+  async nativeMutation(command, args) {
+    const status = await this.nativeCall(command, args);
+    API.nativeAuthStatus = status;
+    return { data: status.session };
+  },
+
   getSession() {
     return this.request('/auth/me');
   },
 
   async login(username, password, remember = true, options = {}) {
+    if (API.nativeAuthAvailable) return this.nativeMutation('native_password_login', { username, password });
     return this.request('/auth/login', {
       ...options,
       method: 'POST',
@@ -313,19 +353,23 @@ const API = {
   },
 
   async createAdmin(username, password, options = {}) {
-    return this.request('/auth/bootstrap', {
+    const response = await this.request('/auth/bootstrap', {
       ...options,
       method: 'POST',
       body: { username, password },
     });
+    if (API.nativeAuthAvailable && API.nativeAuthStatus?.mode === 'device') return this.login(username, password);
+    return response;
   },
 
   // 多账号
   async listAccounts() {
+    if (API.nativeAuthAvailable) { const status = await this.getNativeAuthStatus(); return { data: status.accounts }; }
     return this.request('/auth/accounts');
   },
 
   async switchAccount(username) {
+    if (API.nativeAuthAvailable) return this.nativeMutation('native_select_account', { username });
     return this.request('/auth/accounts/switch', {
       method: 'POST',
       body: { username },
@@ -333,8 +377,18 @@ const API = {
   },
 
   async removeAccount(username) {
+    if (API.nativeAuthAvailable) return this.nativeMutation('native_remove_account', { username });
     return this.request(`/auth/accounts/${encodeURIComponent(username)}`, { method: 'DELETE' });
   },
+
+  async logout() {
+    if (API.nativeAuthAvailable) return this.nativeMutation('native_logout', { all: false });
+    return this.request('/auth/logout', { method: 'POST' });
+  },
+
+  beginPairing() { return this.nativeCall('native_pair_begin'); },
+  pollPairing(pairingId) { return this.nativeCall('native_pair_poll', { pairingId }); },
+  cancelPairing(pairingId) { return this.nativeCall('native_pair_cancel', { pairingId }); },
 
   // QR 配对
   async getDeviceCode(client) {

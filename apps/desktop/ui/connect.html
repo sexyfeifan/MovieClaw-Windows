@@ -96,102 +96,14 @@
   <label for="server-url">服务器地址</label>
   <input id="server-url" type="text" placeholder="http://192.168.1.100:3000" autocomplete="off">
 
-  <button class="btn btn-primary" id="btn-connect" onclick="doConnect()">连接</button>
-  <button class="btn btn-secondary" id="btn-probe" onclick="doProbe()">测试连接</button>
-  <button class="btn btn-secondary" id="btn-discover" onclick="doDiscover()">局域网发现</button>
+  <button class="btn btn-primary" id="btn-connect">连接</button>
+  <button class="btn btn-secondary" id="btn-probe">测试连接</button>
+  <button class="btn btn-secondary" id="btn-discover">局域网发现</button>
 
   <div id="discovered-list" style="margin-top:12px;display:none"></div>
   <div class="status" id="status"></div>
 </div>
 
-<script>
-  const { invoke } = window.__TAURI__?.core ?? window.__TAURI_INTERNALS__ ?? {};
-
-  async function callTauri(cmd, args) {
-    if (window.__TAURI__?.core?.invoke) return window.__TAURI__.core.invoke(cmd, args);
-    if (window.__TAURI_INTERNALS__?.invoke) return window.__TAURI_INTERNALS__.invoke(cmd, args);
-    throw new Error('Tauri API 不可用');
-  }
-
-  function setStatus(msg, cls) {
-    const el = document.getElementById('status');
-    el.textContent = msg;
-    el.className = 'status ' + cls;
-  }
-
-  async function loadSaved() {
-    try {
-      const saved = await callTauri('load_server_url');
-      if (saved) document.getElementById('server-url').value = saved;
-    } catch {}
-  }
-
-  async function doProbe() {
-    const url = document.getElementById('server-url').value.trim();
-    if (!url) { setStatus('请输入服务器地址', 'err'); return; }
-    setStatus('正在测试连接...', 'loading');
-    try {
-      const r = await callTauri('probe_server', { url });
-      setStatus(r.message, r.ok ? 'ok' : 'err');
-    } catch (e) {
-      setStatus('测试失败: ' + e, 'err');
-    }
-  }
-
-  async function doConnect() {
-    const url = document.getElementById('server-url').value.trim();
-    if (!url) { setStatus('请输入服务器地址', 'err'); return; }
-    setStatus('正在连接...', 'loading');
-    try {
-      await callTauri('save_server_url', { url });
-      const r = await callTauri('probe_server', { url });
-      if (r.ok) {
-        setStatus('连接成功，正在跳转...', 'ok');
-        window.location.href = 'desktop/index.html';
-      } else {
-        setStatus(r.message, 'err');
-      }
-    } catch (e) {
-      setStatus('连接失败: ' + e, 'err');
-    }
-  }
-
-  async function doDiscover() {
-    setStatus('正在搜索局域网服务器...', 'loading');
-    document.getElementById('discovered-list').style.display = 'none';
-    try {
-      const servers = await callTauri('discover_servers');
-      if (servers && servers.length > 0) {
-        setStatus(`找到 ${servers.length} 台服务器`, 'ok');
-        const list = document.getElementById('discovered-list');
-        list.style.display = 'block';
-        list.innerHTML = servers.map(s => `
-          <div style="padding:10px 12px;margin:6px 0;background:#0f1923;border:1px solid #2a3f52;border-radius:6px;cursor:pointer;display:flex;justify-content:space-between;align-items:center" onclick="selectServer('${s.url}')">
-            <div>
-              <div style="font-size:14px;font-weight:600">${s.name || 'MovieClaw Server'}</div>
-              <div style="font-size:12px;color:#7a8fa3">${s.url} · v${s.version || '?'}</div>
-            </div>
-            <div style="color:#4fc3f7;font-size:13px">连接</div>
-          </div>
-        `).join('');
-      } else {
-        setStatus('未找到服务器，请手动输入地址', 'err');
-      }
-    } catch (e) {
-      setStatus('搜索失败: ' + e, 'err');
-    }
-  }
-
-  function selectServer(url) {
-    document.getElementById('server-url').value = url;
-    doConnect();
-  }
-
-  document.getElementById('server-url').addEventListener('keydown', e => {
-    if (e.key === 'Enter') doConnect();
-  });
-
-  loadSaved();
-</script>
+<script src="connect.js"></script>
 </body>
 </html>

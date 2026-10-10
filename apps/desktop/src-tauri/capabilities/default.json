@@ -37,6 +37,19 @@
     "allow-cancel-proxy-request",
     "allow-complete-shutdown",
     "allow-get-app-version",
-    "allow-get-embedded-player-status"
+    "allow-get-embedded-player-status",
+    "allow-native-auth-status",
+    "allow-native-password-login",
+    "allow-native-select-account",
+    "allow-native-remove-account",
+    "allow-native-logout",
+    "allow-native-pair-begin",
+    "allow-native-pair-poll",
+    "allow-native-pair-cancel",
+    "allow-grant-media-stream",
+    "allow-release-media-stream",
+    "allow-get-embedded-player-state",
+    "allow-native-ready",
+    "allow-renew-media-stream"
   ]
 }
