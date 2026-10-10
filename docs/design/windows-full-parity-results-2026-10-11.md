@@ -8,11 +8,15 @@
 
 基础集成提交 `c6c90e312c44d0fd1e24c5998dc856c5fcc903eb` 已通过 [Windows 托管 CI](https://github.com/sexyfeifan/MovieClaw-Windows/actions/runs/38077233682)：MSVC Release 构建、实际 mpv 解码/IPC、WebView2 原生就绪、关闭、NSIS 安装/启动/卸载与便携包全部通过。便携包界面就绪 6.805 秒、关闭 0.062 秒；安装版就绪 1.680 秒、关闭 0.036 秒。这里计的是界面 bridge 就绪，而不是仅找到原生窗口句柄。
 
-本地最终回归已通过 JavaScript 单测89条、真实浏览器DOM/HTTP测试40条、后端381条和Web28条；后端2条字体测试因Mac缺少Linux测试字体跳过，托管流程明确安装字体并重跑。全仓ruff和正式desktop cargo check --tests通过。
+本地最终回归已通过 JavaScript 单测90条、真实浏览器DOM/HTTP测试40条、后端381条和Web28条；后端2条字体测试因Mac缺少Linux测试字体跳过，托管流程明确安装字体并重跑。全仓ruff和正式desktop cargo check --tests通过。
+
+全仓[PR CI](https://github.com/sexyfeifan/MovieClaw-Windows/actions/runs/38080732966)已通过：Python三分片合计5352 passed/37 skipped/3 xfailed/1 xpassed，Web lint/typecheck、Go CLI六平台构建、macOS Worker构建/单测全部成功。
+
+Windows首轮已完成原生编译和真实凭证/网络合同；真实mpv的关闭轨道属性返回JSON false，已修正测试合同并改用可seek文件验证前进/回退，避免EOF假阳性。更新器改用原始stdout管道写UTF8 JSON，保留真实Authenticode和无控制台回归；其最终Windows结果仍待下轮实证。
 
 本文在最后一轮集成验证期间持续更新；新增平台、更新、原盘与性能门禁的最终提交、运行、产物哈希和测试数量会在 CI 收尾后登记。没有创建稳定 Release。
 
-服务端认证合同已在 [GitHub 托管 CI](https://github.com/sexyfeifan/MovieClaw-Windows/actions/runs/38077233737) 验证：79 条真实 API 测试、28 条 Web 设备展示与审批测试全部通过。后续新增的原盘协商合同会纳入同一流程重新验证。
+最终提交 `c377212821e96fce9f52cdae80ba2914dc790c96` 的服务端合同已在 [push CI](https://github.com/sexyfeifan/MovieClaw-Windows/actions/runs/38080717852) 与 [PR CI](https://github.com/sexyfeifan/MovieClaw-Windows/actions/runs/38080732879) 双绿：383条真实API/媒体测试、28条Web设备展示与审批测试全部通过，没有跳过；Ubuntu实际FFmpeg/ffprobe为6.1.1。包含DVD重排音轨跨VOB续播、碎片ISO主标题取流、PGS字幕和会话DELETE缓存清理。
 
 | 阶段 | 代码与自动化交付 | 尚需外部证据 |
 | --- | --- | --- |
@@ -106,4 +110,4 @@ Windows 原生设备登录需要服务端 bootstrap 的 `native_device_kinds` �
 
 ## 上游维护验证
 
-`upstream-baseline.json`固定官方仓库`movieclaw/MovieClaw`及Mac基线；旧`yipengfei329/movieclaw`地址仍重定向至该仓库。新版Upstream Watch比较两个完整Git树，覆盖Mac界面/Shared/AetherCore/API/Apple构建，包含删除文件，不再依赖没有files字段的提交列表或最近七天窗口。本地真实抓取官方main `56afe35ca6c672b888a8249b23898f14a76cb69c`后，所跟踪路径相对固定基线无变化；不同提交并不代表这些目录变化。差异报告作为待人工审查证据，不自动更新基线、导入代码或开Issue。
+`upstream-baseline.json`固定官方仓库`movieclaw/MovieClaw`及Mac基线；旧`yipengfei329/movieclaw`地址仍重定向至该仓库。新版Upstream Watch比较两个完整Git树，覆盖Mac界面/Shared/AetherCore/API/Apple构建，包含删除文件，不再依赖没有files字段的提交列表或最近七天窗口。[GitHub上游检查](https://github.com/sexyfeifan/MovieClaw-Windows/actions/runs/38080717926)及本地真实抓取官方main `56afe35ca6c672b888a8249b23898f14a76cb69c`后，所跟踪路径相对固定基线无变化；不同提交并不代表这些目录变化。差异报告作为待人工审查证据，不自动更新基线、导入代码或开Issue。

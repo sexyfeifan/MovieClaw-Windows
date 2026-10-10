@@ -612,6 +612,34 @@ fn system_directory() -> Result<PathBuf, String> {
 }
 #[cfg(any(windows, test))]
 struct VerifierProcess(std::process::Child);
+#[cfg(windows)]
+const POWERSHELL_JSON_OUTPUT: &str = r#"
+function Write-MovieClawJson($value) {
+    $json = ConvertTo-Json -InputObject $value -Compress -Depth 4;
+    $writer = [System.IO.StreamWriter]::new([Console]::OpenStandardOutput(), [System.Text.UTF8Encoding]::new($false));
+    try { $writer.Write($json); $writer.Flush(); } finally { $writer.Dispose(); }
+}
+"#;
+#[cfg(any(windows, test))]
+fn signature_process_error(exit_code: Option<i32>, output: &str) -> String {
+    let value: Value =
+        serde_json::from_str(output.trim_start_matches('\u{feff}')).unwrap_or(Value::Null);
+    let identifier = |key: &str| {
+        value[key].as_str().filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|v| v.is_ascii_alphanumeric() || matches!(v, b'.' | b'_' | b'-'))
+        })
+    };
+    // Only fixed stage/type/version identifiers and numeric HRESULTs survive.
+    // Never include stderr, exception messages, paths or raw script output.
+    json!({"code":"UPDATE_SIGNATURE", "message":"Windows 签名验证失败", "exitCode":exit_code,
+        "diagnostics":{"stage":identifier("stage"), "exceptionType":identifier("exceptionType"),
+            "powershell":identifier("powershell"), "hresult":value["hresult"].as_i64()}})
+    .to_string()
+}
 #[cfg(any(windows, test))]
 impl Drop for VerifierProcess {
     fn drop(&mut self) {
@@ -627,19 +655,19 @@ fn verifier_output(
 ) -> Result<String, String> {
     let mut child = VerifierProcess(child);
     let start = Instant::now();
-    loop {
+    let status = loop {
         if cancellation.is_cancelled() {
             return Err(error("UPDATE_CANCELLED", "更新下载已取消"));
         }
         match child.0.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(Some(_)) | Err(_) => return Err(error("UPDATE_SIGNATURE", "Windows 签名验证失败")),
+            Ok(Some(status)) => break status,
+            Err(_) => return Err(error("UPDATE_SIGNATURE", "无法读取签名验证进程状态")),
             Ok(None) if start.elapsed() >= deadline => {
                 return Err(error("UPDATE_SIGNATURE", "Windows 签名验证超时"));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
         }
-    }
+    };
     let mut output = String::new();
     child
         .0
@@ -649,6 +677,9 @@ fn verifier_output(
         .take(16 * 1024)
         .read_to_string(&mut output)
         .map_err(|_| error("UPDATE_SIGNATURE", "签名验证响应无效"))?;
+    if !status.success() {
+        return Err(signature_process_error(status.code(), &output));
+    }
     Ok(output)
 }
 fn signature(
@@ -667,8 +698,41 @@ fn signature(
     {
         use std::os::windows::process::CommandExt;
         let executable = system_directory()?.join("WindowsPowerShell/v1.0/powershell.exe");
-        let child = std::process::Command::new(executable).args(["-NoLogo","-NoProfile","-NonInteractive","-Command", "$ErrorActionPreference='Stop'; $s=Get-AuthenticodeSignature -LiteralPath $env:MOVIECLAW_UPDATE_FILE; [Console]::OutputEncoding=[Text.UTF8Encoding]::new(); @{status=$s.Status.ToString();signer=$s.SignerCertificate.Subject} | ConvertTo-Json -Compress"])
-            .env("MOVIECLAW_UPDATE_FILE", path).creation_flags(0x08000000).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().map_err(|_| error("UPDATE_SIGNATURE", "无法启动 Windows 签名验证"))?;
+        // Windows PowerShell 5.1's Console.OutputEncoding setter calls
+        // SetConsoleOutputCP, which fails for CREATE_NO_WINDOW. Write UTF-8
+        // directly to the redirected stdout stream, without a console code page.
+        let script = format!(
+            "{POWERSHELL_JSON_OUTPUT}\n{}",
+            r#"
+$ErrorActionPreference='Stop';
+$stage='authenticode';
+try {
+    $s=Get-AuthenticodeSignature -LiteralPath $env:MOVIECLAW_UPDATE_FILE;
+    $signer=if ($s.SignerCertificate) { $s.SignerCertificate.Subject } else { $null };
+    $stage='serialize';
+    Write-MovieClawJson @{status=$s.Status.ToString();signer=$signer};
+} catch {
+    $exception=$_.Exception;
+    while ($exception.InnerException) { $exception=$exception.InnerException; }
+    Write-MovieClawJson @{stage=$stage;exceptionType=$exception.GetType().FullName;hresult=$exception.HResult;powershell=$PSVersionTable.PSVersion.ToString()};
+    exit 1;
+}
+"#
+        );
+        let child = std::process::Command::new(executable)
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &script,
+            ])
+            .env("MOVIECLAW_UPDATE_FILE", path)
+            .creation_flags(0x08000000)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|_| error("UPDATE_SIGNATURE", "无法启动 Windows 签名验证"))?;
         let output = verifier_output(child, cancellation, Duration::from_secs(20))?;
         let value: Value = serde_json::from_str(output.trim_start_matches('\u{feff}'))
             .map_err(|_| error("UPDATE_SIGNATURE", "签名验证响应无效"))?;
@@ -693,6 +757,28 @@ mod tests {
             SHUTTING_DOWN.store(false, Ordering::SeqCst);
             CLEANUP_FAILED.store(false, Ordering::SeqCst);
         }
+    }
+    #[test]
+    fn verifier_failure_diagnostics_keep_only_bounded_identifiers_and_hresult() {
+        let output = json!({"stage":"authenticode", "exceptionType":"System.IO.IOException",
+            "hresult":-2147024890i64, "powershell":"5.1.20348.1",
+            "message":"secret C:\\Users\\private\\download.exe", "stderr":"token=secret"})
+        .to_string();
+        let diagnostic: Value =
+            serde_json::from_str(&signature_process_error(Some(1), &output)).unwrap();
+        assert_eq!(diagnostic["diagnostics"]["hresult"], -2147024890i64);
+        assert_eq!(
+            diagnostic["diagnostics"]["exceptionType"],
+            "System.IO.IOException"
+        );
+        assert!(!diagnostic.to_string().contains("secret"));
+        let rejected: Value = serde_json::from_str(&signature_process_error(Some(1),
+            &json!({"stage":"C:\\Users\\private", "exceptionType":"https://signed.example/?token=x",
+                "powershell":"x".repeat(129), "hresult":"secret"}).to_string())).unwrap();
+        assert_eq!(
+            rejected["diagnostics"],
+            json!({"stage":null,"exceptionType":null,"powershell":null,"hresult":null})
+        );
     }
     #[test]
     fn release_tags_and_delivery_urls_are_strict() {
@@ -1021,6 +1107,50 @@ mod tests {
         tokio::task::spawn_blocking(move || handler.join().unwrap())
             .await
             .unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_consoleless_powershell_writes_utf8_without_console_code_page() {
+        use std::os::windows::process::CommandExt;
+        let script = format!(
+            "{POWERSHELL_JSON_OUTPUT}\n{}",
+            r#"
+$ErrorActionPreference='Stop';
+$legacy=@{hresult=$null;exceptionType=$null};
+try { [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); } catch {
+    $exception=$_.Exception;
+    while ($exception.InnerException) { $exception=$exception.InnerException; }
+    $legacy=@{hresult=$exception.HResult;exceptionType=$exception.GetType().FullName};
+}
+Write-MovieClawJson @{signer='发行者 München';legacyConsoleEncoding=$legacy;powershell=$PSVersionTable.PSVersion.ToString()};
+"#
+        );
+        let child = std::process::Command::new(
+            system_directory()
+                .unwrap()
+                .join("WindowsPowerShell/v1.0/powershell.exe"),
+        )
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &script,
+        ])
+        .creation_flags(0x08000000)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+        let output =
+            verifier_output(child, &CancellationToken::new(), Duration::from_secs(20)).unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["signer"], "发行者 München");
+        eprintln!(
+            "consoleless PowerShell UTF-8 regression: {}",
+            json!({
+            "powershell":value["powershell"], "legacyConsoleEncoding":value["legacyConsoleEncoding"]})
+        );
     }
     #[cfg(windows)]
     #[test]

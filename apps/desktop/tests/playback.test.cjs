@@ -550,6 +550,31 @@ test('native cached subscriptions serve watchdogs without extra command connecti
   assert.equal(h.calls.filter(c => c[1] === 'send_mpv_command_embedded').length, 0);
 });
 
+test('native JSON false track properties stay off and never map to a source ordinal', async () => {
+  const h = harness({ invoke: name => name === 'get_embedded_player_state'
+    ? Promise.resolve({ status: { running: true }, properties: {
+      aid: false, sid: false, pause: true, 'time-pos': 22, duration: 1000,
+      'track-list': [{ type: 'audio', id: 7, 'ff-index': 0 },
+        { type: 'audio', id: 42, 'ff-index': 1 },
+        { type: 'sub', id: 91, external: true, 'external-filename': '/playback/en.ass' }],
+    } }) : Promise.resolve({}) });
+  nativeTracks(h);
+  h.P._nativeTrackInit = true;
+  h.P._everPlayed = true;
+  h.P.selectedSubtitle = 0;
+  h.P.startMpvPoll();
+  await flush();
+  assert.equal(h.P.mpvState.aid, false);
+  assert.equal(h.P.mpvState.sid, false);
+  assert.equal(h.P.mpvTracks.audio.find(t => t.id === h.P.mpvState.aid), undefined);
+  assert.equal(h.P.selectedSubtitle, null);
+  h.elements.set('playerSettingsContent', h.elements.get('playerTitle'));
+  h.P.renderSettingsTab('subtitles');
+  assert.match(h.elements.get('playerSettingsContent').innerHTML,
+    /player-settings-item active" data-sub-index="-1"/);
+  h.P.stopMpvPoll();
+});
+
 test('remembered watch tracks take precedence, global languages choose only when no remembered track exists', async () => {
   const h = harness({ storage: { mc_subLang: 'zh', mc_audioLang: 'zh' } }); nativeTracks(h);
   h.P.sessionData.watch.subtitle_track = 'off';

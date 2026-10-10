@@ -479,6 +479,21 @@ mod tests {
             }
             std::fs::write(path, bytes).unwrap();
         }
+        fn video(path: &Path) {
+            use std::io::Write;
+            // A local Y4M file has a real byte-seekable timeline. A lavfi source
+            // cannot prove that a backward seek reached the requested position.
+            let mut file = std::fs::File::create(path).unwrap();
+            file.write_all(b"YUV4MPEG2 W320 H180 F24:1 Ip A1:1 C420jpeg\n")
+                .unwrap();
+            let mut frame = vec![76u8; 320 * 180];
+            frame.extend(vec![85u8; 320 * 180 / 4]);
+            frame.extend(vec![255u8; 320 * 180 / 4]);
+            for _ in 0..24 * 8 {
+                file.write_all(b"FRAME\n").unwrap();
+                file.write_all(&frame).unwrap();
+            }
+        }
         async fn raw(session: &Session, value: Vec<Value>) -> Value {
             // Test-only commands reach the same actor; production allowlist stays
             // closed to file/process access, including audio-add and quit.
@@ -499,7 +514,11 @@ mod tests {
                 .unwrap()
                 .unwrap()
         }
-        async fn wait_state(session: &Session, predicate: impl Fn(&Value) -> bool) -> Value {
+        async fn wait_state(
+            session: &Session,
+            stage: &str,
+            predicate: impl Fn(&Value) -> bool,
+        ) -> Value {
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
                 let snapshot = session.snapshot();
@@ -508,7 +527,7 @@ mod tests {
                 }
                 assert!(
                     Instant::now() < deadline,
-                    "mpv observed state deadline: {snapshot}"
+                    "mpv observed state deadline ({stage}): {snapshot}"
                 );
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
@@ -536,6 +555,8 @@ mod tests {
         wav(&a, 440.0);
         wav(&b, 550.0);
         wav(&c, 660.0);
+        let movie = dir.join("movie.y4m");
+        video(&movie);
         let sub = dir.join("caption.srt");
         std::fs::write(
             &sub,
@@ -557,7 +578,7 @@ mod tests {
             .arg(format!("--audio-file={}", a.display()))
             .arg(format!("--audio-file={}", b.display()))
             .arg(format!("--sub-file={}", sub.display()))
-            .arg("av://lavfi:testsrc=duration=8:size=320x180:rate=24")
+            .arg(&movie)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -565,7 +586,7 @@ mod tests {
             .unwrap();
         let mut fixture = Fixture { child, dir };
         let session = Session::start(pipe, 10, None);
-        let state = wait_state(&session, |s| {
+        let state = wait_state(&session, "initial tracks", |s| {
             s["track-list"].as_array().is_some_and(|tracks| {
                 tracks.iter().filter(|t| t["type"] == "audio").count() == 2
                     && tracks.iter().any(|t| t["type"] == "sub")
@@ -591,7 +612,7 @@ mod tests {
             ],
         )
         .await;
-        let state = wait_state(&session, |s| {
+        let state = wait_state(&session, "third audio added", |s| {
             s["track-list"].as_array().is_some_and(|ts| {
                 ts.iter().any(|t| {
                     t["type"] == "audio" && t["id"].as_i64().is_some_and(|id| id > audio[1])
@@ -608,7 +629,7 @@ mod tests {
             .max()
             .unwrap();
         raw(&session, vec![json!("audio-remove"), json!(audio[1])]).await;
-        let state = wait_state(&session, |s| {
+        let state = wait_state(&session, "middle audio removed", |s| {
             s["track-list"].as_array().is_some_and(|ts| {
                 ts.iter().filter(|t| t["type"] == "audio").count() == 2
                     && !ts
@@ -622,6 +643,19 @@ mod tests {
             .unwrap()
             .iter()
             .any(|t| t["type"] == "audio" && t["id"] == audio[1]));
+        let subtitle = state["track-list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["type"] == "sub")
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        session
+            .command(vec![json!("set_property"), json!("sid"), json!(subtitle)])
+            .await
+            .unwrap();
+        wait_state(&session, "subtitle enabled", |s| s["sid"] == subtitle).await;
         for (property, value) in [
             ("aid", json!(replacement)),
             ("sid", json!("no")),
@@ -635,33 +669,47 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let state = wait_state(&session, |s| {
+        let state = wait_state(&session, "controls and subtitle off", |s| {
             s["pause"] == false
                 && s["speed"] == 1.5
                 && s["aid"] == replacement
-                && s["sid"] == "no"
+                // The command accepts "no"; the JSON property reports false.
+                && s["sid"] == false
                 && s["sub-delay"] == 0.25
                 && s["sub-scale"] == 1.2
         })
         .await;
         assert_eq!(state["hwdec-current"], "no");
         session
-            .command(vec![json!("seek"), json!(3.0), json!("absolute+exact")])
-            .await
-            .unwrap();
-        wait_state(&session, |s| {
-            s["time-pos"].as_f64().is_some_and(|n| n >= 2.9)
-        })
-        .await;
-        session
             .command(vec![json!("set_property"), json!("pause"), json!(true)])
             .await
             .unwrap();
+        wait_state(&session, "paused before seek", |s| s["pause"] == true).await;
+        // Seek both forwards and backwards while paused. A broad >= predicate
+        // would incorrectly accept EOF as proof that the seek succeeded.
+        for target in [5.0, 3.0] {
+            session
+                .command(vec![json!("seek"), json!(target), json!("absolute+exact")])
+                .await
+                .unwrap();
+            wait_state(&session, "exact seek", |s| {
+                s["time-pos"]
+                    .as_f64()
+                    .is_some_and(|n| (n - target).abs() < 0.15)
+                    && s["pause"] == true
+                    && s["seeking"] == false
+                    && s["eof-reached"] == false
+            })
+            .await;
+        }
         session
             .command(vec![json!("set_property"), json!("aid"), json!("no")])
             .await
             .unwrap();
-        wait_state(&session, |s| s["pause"] == true && s["aid"] == "no").await;
+        wait_state(&session, "audio off", |s| {
+            s["pause"] == true && s["aid"] == false
+        })
+        .await;
         raw(
             &session,
             vec![
@@ -671,14 +719,14 @@ mod tests {
             ],
         )
         .await;
-        wait_state(&session, |s| {
+        wait_state(&session, "native input", |s| {
             s["input_events"].as_u64().is_some_and(|n| n >= 1)
         })
         .await;
         assert_eq!(session.snapshot()["ipc_connections"], 1);
         raw(&session, vec![json!("quit")]).await;
         session.stop();
-        wait_state(&session, |s| s["ipc_connected"] == false).await;
+        wait_state(&session, "pipe closed", |s| s["ipc_connected"] == false).await;
         assert!(session
             .command(vec![json!("get_property"), json!("pause")])
             .await
