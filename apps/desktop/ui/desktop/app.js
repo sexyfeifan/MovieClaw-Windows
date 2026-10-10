@@ -115,6 +115,7 @@ const App = {
 
   async resetContext() {
     this._changingContext = true;
+    this._authPending = true;
     this._sessionSequence = (this._sessionSequence || 0) + 1;
     this._startupController?.abort();
     this._sessionController?.abort();
@@ -235,7 +236,6 @@ const App = {
     this._pageController?.abort();
     this._wallObserver?.disconnect();
     this.viewGeneration++;
-    const generation = this.viewGeneration;
     const content = document.getElementById('content');
     const sidebar = document.getElementById('sidebar');
     if (sidebar) sidebar.style.display = 'none';
@@ -272,26 +272,34 @@ const App = {
       btn.disabled = true;
       btn.textContent = '正在登录...';
       err.textContent = '';
+      let attemptGeneration = this.viewGeneration;
 
       try {
         const user = document.getElementById('loginUser').value.trim();
         const pass = document.getElementById('loginPass').value;
         if (setup && pass !== document.getElementById('loginConfirm').value) throw new Error('两次输入的密码不一致');
-        const result = setup ? await API.createAdmin(user, pass) : await API.login(user, pass);
-        if (generation !== this.viewGeneration) return;
+        // Stop against the old Cookie first, then retire its request/progress identity before Cookie mutation.
         await this.resetContext();
+        attemptGeneration = this.viewGeneration;
+        const result = setup ? await API.createAdmin(user, pass) : await API.login(user, pass);
+        if (attemptGeneration !== this.viewGeneration) return;
         await this.enterSession(result);
       } catch (ex) {
-        if (generation !== this.viewGeneration) return;
+        if (attemptGeneration !== this.viewGeneration) return;
         err.textContent = ex.message || '登录失败';
         btn.disabled = false;
         btn.textContent = setup ? '创建管理员' : '登录';
       }
     });
     document.getElementById('loginChangeServer').addEventListener('click', () => this.changeServer());
-    document.getElementById('cancelAddAccount')?.addEventListener('click', () => {
-      sidebar.style.display = '';
-      this.navigate('settings', {}, false);
+    document.getElementById('cancelAddAccount')?.addEventListener('click', async () => {
+      try {
+        this._resumeRoute = { page: 'settings', params: {} };
+        await this.enterSession(await API.getSession());
+      } catch (error) {
+        if (error.status === 401) this.renderLogin();
+        else this.renderConnectionState('unreachable', error.message);
+      }
     });
   },
 
@@ -898,6 +906,7 @@ const App = {
       && Number(value.library_id ?? wall.libraryId) === Number(libraryId));
     if (!item) return;
     wall.refreshing = true;
+    const pendingOffset = wall.pager.loading ? wall.pager.offset : null;
     try {
       // Keep the existing pages and scroll position; pause the next batch while a watched filter changes.
       await wall.pager.inFlight?.catch(() => {});
@@ -914,6 +923,22 @@ const App = {
         wall.pager.offset = Math.max(0, wall.pager.offset - 1);
         if (wall.pager.total != null) wall.pager.total = Math.max(0, wall.pager.total - 1);
         card?.remove();
+        if (pendingOffset != null && pendingOffset > 0) {
+          // A batch already in flight may have observed the removal before we adjusted its offset.
+          const boundary = await wall.pager.fetchPage({ offset: pendingOffset - 1, cursor: null, limit: 1 });
+          if (wall !== this._wallContext || !this.isCurrent(wall.generation)) return;
+          const repair = boundary.items.find(value => !wall.pager.items.some(known => known.media_item_id === value.media_item_id));
+          if (repair) {
+            const index = Math.min(pendingOffset - 1, wall.pager.items.length);
+            wall.pager.items.splice(index, 0, repair);
+            wall.pager.offset++;
+            const next = wall.pager.items[index + 1];
+            const nextCard = next && wall.grid.querySelector(`[data-item-id="${Number(next.media_item_id)}"]`);
+            if (nextCard) nextCard.insertAdjacentHTML('beforebegin', this.posterCard(repair, wall.libraryId));
+            else wall.grid.insertAdjacentHTML('beforeend', this.posterCard(repair, wall.libraryId));
+            this.bindPosterCards(wall.grid);
+          }
+        }
         wall.count.textContent = wall.pager.total != null ? `${wall.pager.total} 个项目` : `${wall.pager.items.length}${wall.pager.hasMore ? '+' : ''} 个项目`;
       } else {
         item.is_favorite = marks?.is_favorite ?? item.is_favorite;
@@ -1785,15 +1810,15 @@ const App = {
     });
     document.getElementById('btnSwitchServer')?.addEventListener('click', () => this.changeServer());
     document.getElementById('btnLogout')?.addEventListener('click', async () => {
+      if (this._authPending || this._changingContext) return;
       if (!window.confirm('退出当前账号？其他已保存账号会保留。')) return;
-      await Player.close();
       try {
-        const response = await API.request('/auth/logout', { method: 'POST' });
         await this.resetContext();
+        const response = await API.request('/auth/logout', { method: 'POST' });
         this.session = null;
         if (response?.data) await this.enterSession(response);
         else this.renderLogin();
-      } catch (error) { this.renderPageError(container, error, generation); }
+      } catch (error) { this.renderConnectionState('unreachable', error.message); }
     });
 
     // 多账号列表
@@ -1830,22 +1855,19 @@ const App = {
         </div>`).join('') || '<div style="color:var(--text-secondary)">没有已保存账号</div>';
       list.querySelectorAll('.account-switch').forEach(button => button.addEventListener('click', () => this.switchToAccount(button.closest('[data-username]').dataset.username)));
       list.querySelectorAll('.account-remove').forEach(button => button.addEventListener('click', async () => {
+        if (this._authPending || this._changingContext) return;
         const username = button.closest('[data-username]').dataset.username;
         if (!window.confirm(`从这台电脑移除“${username}”的登录状态？`)) return;
         button.disabled = true;
         try {
-          await Player.close();
-          const response = await API.removeAccount(username);
           await this.resetContext();
+          const response = await API.removeAccount(username);
           this.session = null;
           if (response?.data) await this.enterSession(response);
           else this.renderLogin();
         } catch (error) {
-          if (error.status === 401) this.handleSessionExpired();
-          else if (this.isCurrent(generation)) {
-            list.textContent = error.message;
-            button.disabled = false;
-          }
+          if (error.status === 401) this.renderLogin({ message: '登录已失效，请重新输入密码。' });
+          else this.renderConnectionState('unreachable', error.message);
         }
       }));
     } catch (error) {
@@ -1856,19 +1878,15 @@ const App = {
   },
 
   async switchToAccount(username) {
-    const generation = this.viewGeneration;
+    if (this._authPending || this._changingContext) return;
     try {
-      await Player.close();
-      const response = await API.switchAccount(username);
       await this.resetContext();
+      const response = await API.switchAccount(username);
       await this.enterSession(response);
     } catch (error) {
       if (error.status === 404 || error.status === 401) {
         this.renderLogin({ addAccount: true, username, message: '该账号的登录已失效，请重新输入密码。' });
-      } else if (this.isCurrent(generation)) {
-        const list = document.getElementById('accountList');
-        if (list) list.textContent = '切换失败：' + error.message;
-      }
+      } else this.renderConnectionState('unreachable', '切换失败：' + error.message);
     }
   },
 
@@ -2228,7 +2246,9 @@ const App = {
   // 同意弹窗「开启并播放」：写入全局开关后重新决策（同 macOS grantConsent）。
   // 失败不关框——原因就显示在框里，用户还能再点一次
   async grantConsent() {
+    const seq = this._playbackSeq;
     const saved = await API.playbackPolicySet({ software_transcode_enabled: true });
+    if (seq !== this._playbackSeq) return;
     const view = (saved && saved.data !== undefined) ? saved.data : saved;
     // 保存接口回显的是落库后的取值：不是 true 说明开关根本没生效，不能假装成功
     if (!view || view.software_transcode_enabled !== true) {
@@ -2372,6 +2392,7 @@ const App = {
       // 这回如实报浏览器能力，服务端给能播的换壳/转码流
       if (item.__universalClaim) {
         await this.releasePlaybackSession(session);
+        if (!alive()) return;
         item.__universalClaim = false;
         item.__forceHtml5 = true;
         return this.startPlayback(item, true);

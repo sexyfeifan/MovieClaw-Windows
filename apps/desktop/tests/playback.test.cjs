@@ -321,6 +321,40 @@ test('a native launch finishing after close is stopped by instance and does not 
   assert.ok(h.calls.some(c => c[0] === 'stop' && c[1] === 'session-a'));
 });
 
+test('closing during a failed native launch cleanup prevents its HTML5 fallback from reopening', async () => {
+  const deletion = deferred();
+  const h = harness({ invoke(name) {
+    if (name === 'launch_embedded_player') return Promise.reject(new Error('mpv launch failed'));
+    return name === 'get_main_window_hwnd' ? 1 : {};
+  } });
+  h.API.sessionStop = id => { h.calls.push(['stop', id]); return deletion.promise; };
+  h.A._playbackSeq = 12;
+  const launch = h.A.openEmbeddedPlayer(item({ __universalClaim: true }), 'a.mkv', [], 0, session(), 12);
+  await flush();
+  assert.ok(h.calls.some(c => c[0] === 'stop' && c[1] === 'session-a'));
+  await h.P.close();
+  deletion.resolve();
+  await launch;
+  assert.equal(h.P.activeEngine, null);
+  assert.equal(h.elements.get('playerView').hidden, true);
+  assert.equal(h.calls.filter(c => c[0] === 'request').length, 0);
+});
+
+test('closing while consent is being saved prevents playback from reopening after the PUT succeeds', async () => {
+  const saving = deferred();
+  const h = harness();
+  h.API.playbackPolicySet = () => saving.promise;
+  h.A._retryItem = item();
+  const granted = h.A.grantConsent();
+  await h.P.close();
+  saving.resolve({ software_transcode_enabled: true });
+  await granted;
+  await flush();
+  assert.equal(h.P.activeEngine, null);
+  assert.equal(h.elements.get('playerView').hidden, true);
+  assert.equal(h.calls.filter(c => c[0] === 'request').length, 0);
+});
+
 test('progress queue coalesces periodic updates, preserves start/stop order, and is bounded', async () => {
   const pending = deferred();
   let count = 0;

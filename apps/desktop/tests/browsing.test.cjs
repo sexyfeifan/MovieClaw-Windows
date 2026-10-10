@@ -14,7 +14,10 @@ function harness(respond = () => ({ data: [] })) {
   const calls = [], storage = new Map(), elements = new Map();
   function element(id = '') {
     return { id, innerHTML: '', textContent: '', style: {}, dataset: {}, value: '', hidden: true,
-      addEventListener() {}, querySelectorAll() { return []; }, querySelector() { return null; },
+      listeners: new Map(),
+      addEventListener(type, callback) { const handlers = this.listeners.get(type) || []; handlers.push(callback); this.listeners.set(type, handlers); },
+      async emit(type, event = {}) { for (const callback of this.listeners.get(type) || []) await callback(event); },
+      querySelectorAll() { return []; }, querySelector() { return null; },
       classList: { add() {}, remove() {} }, appendChild() {},
     };
   }
@@ -75,6 +78,57 @@ test('Cookie account mutations use username, active and the real DELETE route', 
   assert.equal(requests[2].method, 'DELETE');
   assert.equal(requests[2].path, '/auth/accounts/%E5%A7%93%E5%90%8D%2Fa');
 });
+
+for (const action of ['login', 'bootstrap', 'logout', 'remove', 'switch']) {
+  test(`${action} retires the old progress identity before the server can change its Cookie`, async () => {
+    const closing = deferred(), progress = deferred();
+    const expectedPath = { login: '/auth/login', bootstrap: '/auth/bootstrap', logout: '/auth/logout', remove: '/auth/accounts/alice', switch: '/auth/accounts/switch' }[action];
+    let mutation = false, h;
+    h = harness(args => {
+      if (args.path === '/playback/progress') return progress.promise;
+      if (args.path === '/auth/accounts') return { data: [{ username: 'alice', active: true }] };
+      if (args.path === expectedPath && args.method !== 'GET') {
+        mutation = true;
+        assert.equal(h.API.contextEpoch, 1, 'the old queue identity must already be retired at Cookie mutation');
+        assert.equal(h.A._authPending, true);
+        return { data: { username: 'bob' } };
+      }
+      return { data: [] };
+    });
+    h.A.session = { username: 'alice' };
+    h.context.Player.close = () => closing.promise;
+    h.A.enterSession = async response => { h.A.session = response.data; h.A._authPending = false; };
+    let run;
+    if (action === 'switch') run = () => h.A.switchToAccount('bob');
+    else if (action === 'logout') {
+      h.A.renderSettings(h.element());
+      run = () => h.elements.get('btnLogout').emit('click');
+    } else if (action === 'remove') {
+      const list = h.context.document.getElementById('accountList'), button = h.element();
+      button.closest = () => ({ dataset: { username: 'alice' } });
+      list.querySelectorAll = selector => selector === '.account-remove' ? [button] : [];
+      await h.A.loadAccounts();
+      run = () => button.emit('click');
+    } else {
+      h.A.renderLogin({ setup: action === 'bootstrap', addAccount: action === 'login' });
+      h.context.document.getElementById('loginUser').value = 'bob';
+      h.context.document.getElementById('loginPass').value = 'safe-password';
+      if (action === 'bootstrap') h.context.document.getElementById('loginConfirm').value = 'safe-password';
+      run = () => h.elements.get('loginForm').emit('submit', { preventDefault() {} });
+    }
+    const old = h.API.reportProgress(42, 'stop', 321000, 1000000, null, null, {}, { timeoutMs: 0, cancelable: true });
+    const stopped = assert.rejects(old, error => error.name === 'AbortError');
+    const request = run();
+    assert.equal(mutation, false, 'old-player stop gets its bounded chance before the Cookie changes');
+    closing.resolve();
+    await request; await stopped;
+    assert.equal(mutation, true);
+    assert.equal(h.A.session.username, 'bob');
+    const reportId = h.calls.find(call => call.path === '/playback/progress').requestId;
+    assert.ok(h.calls.some(call => call.command === 'cancel_proxy_request' && call.requestId === reportId));
+    progress.resolve({ data: {} });
+  });
+}
 
 test('API errors keep status, code and response headers without dumping an HTML response', async () => {
   const h = harness(() => ({ status: 401, body: JSON.stringify({ code: 'SESSION_EXPIRED', message: '请重新登录' }), headers: { 'server-timing': 'auth;dur=2' } }));
@@ -283,4 +337,35 @@ test('stop refresh removes a completed item from the unwatched wall and keeps th
   assert.equal(pager.items.length, 0);
   assert.equal(pager.offset, 59);
   assert.equal(pager.total, 200);
+});
+
+test('a watched item removed during an in-flight page repairs exactly the missing boundary item', async () => {
+  const h = harness(args => ({ data: args.path.startsWith('/playback/marks') ? { played: true } : { played: true } }));
+  const original = Array.from({ length: 201 }, (_, n) => ({ media_item_id: n + 1, library_id: 9 }));
+  const filtered = original.filter(item => item.media_item_id !== 20), pending = deferred(), requested = [];
+  const pager = new h.Pager(async ({ offset, limit }) => {
+    requested.push({ offset, limit });
+    if (offset === 60) return pending.promise;
+    const items = (offset === 0 ? original : filtered).slice(offset, offset + limit);
+    return { items, rawCount: items.length, hasMore: items.length === limit };
+  }, () => true);
+  await pager.loadMore();
+  const next = pager.loadMore();
+  const grid = h.element(), container = h.element(), count = h.element();
+  grid.insertAdjacentHTML = () => {};
+  grid.querySelector = selector => ({ remove() {}, insertAdjacentHTML() {} });
+  container.querySelector = () => ({ getBoundingClientRect: () => ({ top: 1000 }) });
+  container.getBoundingClientRect = () => ({ bottom: 0 });
+  h.A.currentPage = 'library'; h.A.pageAPI = h.API;
+  h.A._wallContext = { pager, grid, count, container, generation: 0, libraryId: 9, prefs: { unwatched: true }, load() {} };
+  const refresh = h.A.refreshStoppedItem({ mediaItemId: 20, libraryId: 9 });
+  const items = filtered.slice(60, 120);
+  pending.resolve({ items, rawCount: items.length, hasMore: true });
+  await next; await refresh;
+  assert.deepEqual(requested, [{ offset: 0, limit: 60 }, { offset: 60, limit: 60 }, { offset: 59, limit: 1 }]);
+  assert.deepEqual(Array.from(pager.items, item => item.media_item_id), filtered.slice(0, 120).map(item => item.media_item_id));
+  assert.equal(pager.offset, 120);
+  while (pager.hasMore) await pager.loadMore();
+  assert.equal(pager.items.length, 200);
+  assert.equal(new Set(pager.items.map(item => item.media_item_id)).size, 200);
 });

@@ -30,6 +30,8 @@ Desktop CI runs on Windows MSVC for branch pushes and PRs. Desktop releases only
 
 Browser E2E covers the real DOM and HTTP contracts with a native bridge fixture. Native smoke covers the packaged executable, WebView2 process startup, bundled mpv decoding and IPC. HDR/Dolby output, embedded video geometry, GPU hardware decode, multi-monitor DPI and picture quality still require a Windows machine with the relevant hardware.
 
+CI uploads `smoke-environment.json` with Windows/CPU/GPU driver details, tool and runtime versions, and portable/installed startup and shutdown durations. These numbers describe the hosted runner's smoke test, and are not a real-machine playback performance baseline.
+
 ## Authentication and shutdown
 
 Cookie credentials are isolated by complete server origin, including port, and never attached to external media origins or redirected external requests. The older global `cookies.json` cannot be assigned safely to a server and is removed on migration; upgrading requires signing in again once. Native device tokens and Windows Credential Manager remain a later parity stage.

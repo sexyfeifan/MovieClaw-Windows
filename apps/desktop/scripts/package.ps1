@@ -14,6 +14,9 @@ $resources = @{}
 $resources[(Join-Path $dist 'runtime\mpv').Replace('\', '/') + '/'] = 'mpv/'
 @{ bundle = @{ resources = $resources } } | ConvertTo-Json -Depth 5 | Set-Content $configPath -Encoding utf8
 if (-not $SkipBuild) {
+    # A cached/local target may contain an installer for an older Cargo version.
+    $nsisOutput = Join-Path $tauri 'target\x86_64-pc-windows-msvc\release\bundle\nsis'
+    if (Test-Path $nsisOutput) { Remove-Item $nsisOutput -Recurse -Force }
     Push-Location $root
     try {
         & npm exec -- tauri build --target x86_64-pc-windows-msvc --bundles nsis --ci --config $configPath -- --locked

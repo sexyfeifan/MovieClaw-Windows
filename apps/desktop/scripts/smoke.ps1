@@ -6,6 +6,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $package = (Resolve-Path $PackageDirectory).Path
 $manifest = Get-Content (Join-Path $PSScriptRoot 'mpv-manifest.json') -Raw | ConvertFrom-Json
+$environmentPath = Join-Path $PSScriptRoot '..\dist\smoke-environment.json'
+if (-not (Test-Path $environmentPath)) { & (Join-Path $PSScriptRoot 'probe-environment.ps1') -OutputPath $environmentPath }
+$environment = Get-Content $environmentPath -Raw | ConvertFrom-Json -AsHashtable
+$environment.nativeSmoke = @{}
+$null = $environment.Remove('nativeSmokeError')
 $runtime = Join-Path $package 'mpv'
 foreach ($file in @('movieclaw-desktop.exe', 'LICENSE', 'mpv\runtime-checksums.json', 'mpv\mpv-manifest.json') + @($manifest.requiredFiles | ForEach-Object { "mpv\$_" }) + @($manifest.licenses | ForEach-Object { "mpv\licenses\$($_.file)" })) {
     if (-not (Test-Path (Join-Path $package $file))) { throw "Package missing: $file" }
@@ -26,6 +31,7 @@ try {
     $consoleMpv = Join-Path $runtime 'mpv.com'
     $versionOutput = & $consoleMpv --no-config --version 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch 'mpv ') { throw 'Bundled mpv cannot start' }
+    $environment.mpv.actualVersion = $versionOutput.Trim()
     Write-Host $versionOutput.Trim()
     # Real video decoding with deterministic CPU/null output (CI has no HDR display).
     $decoder = Start-Process $consoleMpv -ArgumentList @('--no-config', '--vo=null', '--ao=null', '--frames=5', 'av://lavfi:testsrc=size=64x64:rate=24') -PassThru -NoNewWindow
@@ -93,9 +99,12 @@ public static class MovieClawSmokeWindow {
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 }
 '@
-    function Test-NativeApp([string]$Executable) {
+    function Test-NativeApp([string]$Executable, [string]$Label) {
         $env:MOVIECLAW_DATA_DIR = Join-Path $temp 'data'
         $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $temp 'webview2'
+        $measurement = @{ status = 'starting' }
+        $environment.nativeSmoke[$Label] = $measurement
+        $startupTimer = [System.Diagnostics.Stopwatch]::StartNew()
         $script:app = Start-Process $Executable -PassThru
         $window = [IntPtr]::Zero
         for ($attempt = 0; $attempt -lt 150; $attempt++) {
@@ -113,12 +122,23 @@ public static class MovieClawSmokeWindow {
             Start-Sleep -Milliseconds 100
         }
         if (-not $webviewFound) { throw 'WebView2 browser process did not start' }
+        $startupTimer.Stop()
+        $measurement.startupSeconds = [Math]::Round($startupTimer.Elapsed.TotalSeconds, 3)
+        $webviewExecutable = $children[0].ExecutablePath
+        if ($webviewExecutable -and (Test-Path $webviewExecutable)) {
+            $environment.webview2.runningVersion = (Get-Item $webviewExecutable).VersionInfo.ProductVersion
+        }
+        $measurement.status = 'closing'
+        $shutdownTimer = [System.Diagnostics.Stopwatch]::StartNew()
         $null = [MovieClawSmokeWindow]::PostMessage($window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
         if (-not $script:app.WaitForExit(5000)) { throw 'Tauri shutdown exceeded its bounded cleanup window' }
+        $shutdownTimer.Stop()
+        $measurement.shutdownSeconds = [Math]::Round($shutdownTimer.Elapsed.TotalSeconds, 3)
         if ($script:app.ExitCode -ne 0) { throw 'Tauri shutdown failed' }
+        $measurement.status = 'passed'
         $script:app = $null
     }
-    Test-NativeApp (Join-Path $package 'movieclaw-desktop.exe')
+    Test-NativeApp (Join-Path $package 'movieclaw-desktop.exe') 'portable'
     if ($InstallSmoke) {
         if (-not $InstallerPath -or -not (Test-Path $InstallerPath)) { throw 'Install smoke requires the built NSIS installer' }
         $installed = Join-Path $temp 'installed'
@@ -128,7 +148,7 @@ public static class MovieClawSmokeWindow {
         foreach ($file in @('movieclaw-desktop.exe', 'mpv\mpv.exe', 'mpv\d3dcompiler_43.dll', 'mpv\licenses\MPV-GPL.txt')) {
             if (-not (Test-Path (Join-Path $installed $file))) { throw "Installer missing runtime resource: $file" }
         }
-        Test-NativeApp (Join-Path $installed 'movieclaw-desktop.exe')
+        Test-NativeApp (Join-Path $installed 'movieclaw-desktop.exe') 'installed'
         $uninstaller = Join-Path $installed 'uninstall.exe'
         if (Test-Path $uninstaller) {
             $remove = Start-Process $uninstaller -ArgumentList '/S' -PassThru
@@ -137,7 +157,11 @@ public static class MovieClawSmokeWindow {
         }
     }
     Write-Host 'PASS: package integrity, mpv synthetic decode/IPC, native WebView2 startup and bounded shutdown'
+} catch {
+    $environment.nativeSmokeError = $_.Exception.Message
+    throw
 } finally {
+    $environment | ConvertTo-Json -Depth 8 | Set-Content $environmentPath -Encoding utf8
     if ($pipe) { $pipe.Dispose() }
     if ($player -and -not $player.HasExited) { $player.Kill() }
     if ($script:app -and -not $script:app.HasExited) { $script:app.Kill() }

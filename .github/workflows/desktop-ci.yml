@@ -41,8 +41,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop/src-tauri -> target
+          cache-on-failure: true
       - name: Install locked JavaScript tools
         run: npm ci
+      - name: Record CI smoke environment
+        run: ./scripts/probe-environment.ps1
       - name: JavaScript contracts
         run: npm run test:unit
       - name: Install browser for E2E
@@ -73,3 +76,11 @@ jobs:
             apps/desktop/playwright-report
           if-no-files-found: ignore
           retention-days: 7
+      - name: Upload CI smoke environment
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-environment-${{ github.sha }}
+          path: apps/desktop/dist/smoke-environment.json
+          if-no-files-found: warn
+          retention-days: 14
