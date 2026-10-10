@@ -7,7 +7,7 @@ Mac 自己也未实装 Discover / Reels / Subscriptions / 设置页 / 活动 / A
 Windows 已有的设置页保留（Mac v1 没有设置页，这是 Windows 的超集，不是差距）。
 
 对照基线：macOS 清单（apps/apple/MovieClawMac + Shared + AetherCore）vs
-Windows 现状（apps/desktop/ui/desktop + src-tauri），v0.2.110。
+Windows 现状（apps/desktop/ui/desktop + src-tauri），v0.2.111。
 
 ---
 
@@ -165,7 +165,7 @@ Windows 现状：HTML5 `<video>` + hls.js（`ProxyHlsLoader` 走 Rust `/__stream
 4. 字幕延迟仅 UI 未应用渲染
 5. bootstrap 首启 / removeAccount 无 UI
 6. 硬件解码开关 `mc_hwDecode` 存而不用（mpv 写死 `--hwdec=d3d11va`）
-7. 关于页版本号写死 0.2.108（实际 0.2.110），无运行时版本
+7. 关于页版本号写死（发版需手改，无运行时版本）
 8. 画质切换 capability payload 与主路径不一致
 9. 「网格」视图切换死按钮
 10. 海报墙类型筛选常为空（`LibraryItemView` 无 genres）
