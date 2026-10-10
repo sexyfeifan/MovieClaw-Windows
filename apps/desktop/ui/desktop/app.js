@@ -1906,6 +1906,7 @@ const App = {
 
   // ===== 播放（内置 HTML5 播放器） =====
   async startPlayback(item, isRetry) {
+    if (this._authPending || this._changingContext) return;
     item = { ...item };
     if (!item.attemptId) item.attemptId = Date.now().toString(36) + Math.random().toString(36).slice(2);
     // 错误对话框的「重试」要重跑这一份（同 macOS retry() 重新 request）

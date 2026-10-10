@@ -27,7 +27,7 @@ $environment = [ordered]@{
         cargo = ((& cargo --version) | Out-String).Trim()
         node = ((& node --version) | Out-String).Trim()
     }
-    mpv = @{ manifestVersion = $manifest.version; archiveSha256 = $manifest.sha256 }
+    mpv = @{ manifestVersion = $manifest.version; archiveSha256 = $manifest.sha256; vulkanLoaderVersion = $manifest.vulkanLoader.version; vulkanLoaderSha256 = $manifest.vulkanLoader.binarySha256 }
     webview2 = @{ registryVersions = $webviews }
     nativeSmoke = @{}
 }

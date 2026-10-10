@@ -12,7 +12,7 @@ $environment = Get-Content $environmentPath -Raw | ConvertFrom-Json -AsHashtable
 $environment.nativeSmoke = @{}
 $null = $environment.Remove('nativeSmokeError')
 $runtime = Join-Path $package 'mpv'
-foreach ($file in @('movieclaw-desktop.exe', 'LICENSE', 'mpv\runtime-checksums.json', 'mpv\mpv-manifest.json') + @($manifest.requiredFiles | ForEach-Object { "mpv\$_" }) + @($manifest.licenses | ForEach-Object { "mpv\licenses\$($_.file)" })) {
+foreach ($file in @('movieclaw-desktop.exe', 'LICENSE', 'mpv\runtime-checksums.json', 'mpv\mpv-manifest.json', 'mpv\licenses\VulkanRT-License.txt') + @($manifest.requiredFiles | ForEach-Object { "mpv\$_" }) + @($manifest.licenses | ForEach-Object { "mpv\licenses\$($_.file)" })) {
     if (-not (Test-Path (Join-Path $package $file))) { throw "Package missing: $file" }
 }
 $inventory = Get-Content (Join-Path $runtime 'runtime-checksums.json') -Raw | ConvertFrom-Json
@@ -141,7 +141,7 @@ public static class MovieClawSmokeWindow {
         $setup = Start-Process $InstallerPath -ArgumentList @('/S', "/D=$installed") -PassThru
         if (-not $setup.WaitForExit(120000)) { $setup.Kill(); throw 'NSIS installation timed out' }
         if ($setup.ExitCode -ne 0) { throw 'NSIS installation failed' }
-        foreach ($file in @('movieclaw-desktop.exe', 'mpv\mpv.exe', 'mpv\d3dcompiler_43.dll', 'mpv\licenses\MPV-GPL.txt')) {
+        foreach ($file in @('movieclaw-desktop.exe', 'mpv\mpv.exe', 'mpv\d3dcompiler_43.dll', 'mpv\vulkan-1.dll', 'mpv\licenses\MPV-GPL.txt', 'mpv\licenses\VulkanRT-License.txt', 'mpv\licenses\Vulkan-Apache-2.0.txt')) {
             if (-not (Test-Path (Join-Path $installed $file))) { throw "Installer missing runtime resource: $file" }
         }
         Test-NativeApp (Join-Path $installed 'movieclaw-desktop.exe') 'installed'

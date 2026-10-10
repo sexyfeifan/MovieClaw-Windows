@@ -159,6 +159,41 @@ test('explicit zero remains zero in negotiation and does not reuse an old video 
   assert.equal(h.video.currentTime, 0);
 });
 
+test('authentication and context transitions block old playback buttons before mutating playback state', async () => {
+  for (const flag of ['_authPending', '_changingContext']) {
+    const h = harness();
+    h.A[flag] = true;
+    h.elements.get('playerView').hidden = true;
+    await h.A.startPlayback(item());
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.A._retryItem, undefined);
+    assert.equal(h.P.activeEngine, null);
+    assert.equal(h.elements.get('playerView').hidden, true);
+  }
+});
+
+test('an old Hero play action during resetContext cannot start another session while close is pending', async () => {
+  const pending = deferred();
+  const h = harness({ reportProgress: () => pending.promise });
+  h.elements.set('searchInput', { value: 'old-search' });
+  h.API.invalidateContext = () => h.API.contextEpoch++;
+  h.P.open('Title', 'a.mp4', [], 0, session(), item());
+  h.video.emit('playing');
+  await flush();
+  const reset = h.A.resetContext();
+  assert.equal(h.A._changingContext, true);
+  assert.equal(h.A._authPending, true);
+  await h.A.startPlayback(item({ media_item_id: 88 }));
+  [...h.timers.values()].find(t => t.ms === 1200).fn();
+  await reset;
+  assert.equal(h.calls.filter(c => c[0] === 'request').length, 0);
+  assert.equal(h.P.activeEngine, null);
+  assert.equal(h.elements.get('playerView').hidden, true);
+  assert.equal(h.API.contextEpoch, 1);
+  pending.resolve();
+  await flush();
+});
+
 test('a session arriving after close is deleted and cannot reopen the player', async () => {
   const pending = deferred();
   const h = harness({ request: () => pending.promise });
