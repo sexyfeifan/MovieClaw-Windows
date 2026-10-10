@@ -85,6 +85,7 @@ from movieclaw_api.services.playback import plan as playback_plan
 from movieclaw_api.services.playback import warmup as playback_warmup
 from movieclaw_api.services.playback import watch as playback_watch
 from movieclaw_api.services.playback.adaptive import adapt_to_downlink
+from movieclaw_api.services.playback.disc_fallback import main_title_file
 from movieclaw_api.services.playback.disc_source import disc_source_for_file
 from movieclaw_api.services.playback.embedded_subs import (
     extract_embedded_fonts,
@@ -1082,15 +1083,27 @@ async def start_playback_session(
             if file is None:
                 raise NotFoundException("文件已不在台账中")
 
+    disc = await asyncio.to_thread(disc_source_for_file, file) if file.is_disc() else None
+    source_file = await asyncio.to_thread(main_title_file, file, disc)
     # 诊断面板的「源 → 处理」层次要有左半边：台账真值原样带回（§6.5）
     source_view = PlaybackSourceView(
         container=file.container,
-        resolution=file.resolution,
-        video_codec=file.video_codec,
-        hdr=file.hdr,
+        duration_ms=(
+            round(disc.duration_s * 1000)
+            if disc is not None
+            else (file.duration_seconds or 0) * 1000 or None
+        ),
+        resolution=source_file.resolution,
+        video_codec=source_file.video_codec,
+        hdr=source_file.hdr,
         bit_rate=file.bit_rate,
-        frame_rate=file.frame_rate,
+        frame_rate=source_file.frame_rate,
         size_bytes=file.size_bytes,
+        subtitle_codecs=[
+            str(track.get("codec") or "")[:32]
+            for track in (source_file.subtitle_streams or [])[:32]
+            if isinstance(track, dict)
+        ],
     )
     chapter_marks = _chapter_marks(file)
     # 片头片尾（docs/design/skip-intro.md）：两次主键查询；这一季还没识别过就在后台
@@ -1169,7 +1182,6 @@ async def start_playback_session(
     # 清单（时间轴 = 播放列表时间，与台账时长、章节同口径），关键帧索引来自
     # CLPI 的 EP_map。远程 Worker 读的是 NAS 下发的 ffconcat 清单（各段剪辑一个
     # HTTP 地址，remote-transcode.md §5.2），只派给申报了能读原盘的 Worker
-    disc = disc_source_for_file(file) if file.is_disc() else None
     if file.is_disc() and disc is None:
         raise NotFoundException("原盘主播放列表不可读，无法播放；请检查 BDMV/PLAYLIST 是否完整")
 
@@ -1177,7 +1189,11 @@ async def start_playback_session(
         """全片关键帧索引，只有直通档的 VOD 规划要它。冷缓存时 mp4 要过
         ffprobe（上秒级）——这是把它并入 gather 的主要理由：分享链接直达
         播放页时详情页预热没跑过，串行 await 会把这一秒全记在起播上。"""
-        if not file.duration_seconds or not view.video or view.video.action != "copy":
+        if (
+            (disc is None and not file.duration_seconds)
+            or not view.video
+            or view.video.action != "copy"
+        ):
             return None
         if disc is not None:
             return await asyncio.to_thread(disc.keyframe_index)
@@ -1199,7 +1215,9 @@ async def start_playback_session(
     # NAS 探测快照中选编码器。只有在执行端确认仍在线时，才把 videotoolbox
     # 作为远程命令发给 Worker。
     local_backends = await asyncio.to_thread(available_local_backends) if backends else ()
-    remote_video_available = remote_worker_available("videotoolbox", disc=disc is not None)
+    remote_video_available = (disc is None or not disc.virtual) and remote_worker_available(
+        "videotoolbox", disc=disc is not None
+    )
     prep_ms = int((time.perf_counter() - prep_started_at) * 1000)
     if disc is None and view.video is not None and view.video.action == "copy":
         # 视频直通的会话：MP4 快路径只抽检了部分关键帧的，起播之后在后台全量核对；快路径拿不到
@@ -1238,14 +1256,26 @@ async def start_playback_session(
         file = await session.get(LibraryFile, view.file_id)
         if file is None:
             raise NotFoundException("文件已不在台账中")
+        disc = await asyncio.to_thread(disc_source_for_file, file) if file.is_disc() else None
+        source_file = await asyncio.to_thread(main_title_file, file, disc)
         source_view = PlaybackSourceView(
             container=file.container,
-            resolution=file.resolution,
-            video_codec=file.video_codec,
-            hdr=file.hdr,
+            duration_ms=(
+                round(disc.duration_s * 1000)
+                if disc
+                else (file.duration_seconds or 0) * 1000 or None
+            ),
+            resolution=source_file.resolution,
+            video_codec=source_file.video_codec,
+            hdr=source_file.hdr,
             bit_rate=file.bit_rate,
-            frame_rate=file.frame_rate,
+            frame_rate=source_file.frame_rate,
             size_bytes=file.size_bytes,
+            subtitle_codecs=[
+                str(track.get("codec") or "")[:32]
+                for track in (source_file.subtitle_streams or [])[:32]
+                if isinstance(track, dict)
+            ],
         )
         playback_warmup.cancel(file.media_item_id)
         trickplay.schedule(file, delay_s=90)
@@ -1289,8 +1319,8 @@ async def start_playback_session(
     # force_key_frames 在绝对栅格上强插关键帧，用等长规划。规划失败（时长
     # 未知 / 关键帧索引读不出）退回旧的会话相对模式，一切照旧。
     segment_plan = None
-    if file.duration_seconds:
-        duration_s = float(file.duration_seconds)
+    if disc is not None or file.duration_seconds:
+        duration_s = disc.duration_s if disc is not None else float(file.duration_seconds)
         if view.video and view.video.action == "transcode":
             segment_plan = compute_uniform_plan(duration_s, target_s=SEGMENT_SECONDS)
         elif keyframe_index is not None:
@@ -1298,7 +1328,11 @@ async def start_playback_session(
     start_ms = resolved_start_ms
     if segment_plan is None and start_ms > 0 and view.video and view.video.action == "copy":
         # 旧模式的关键帧校正（VOD 下不需要：start() 自己对齐到分片边界）
-        keyframe_s = await asyncio.to_thread(probe_keyframe_before, file.file_path, start_ms / 1000)
+        keyframe_s = (
+            None
+            if disc is not None
+            else await asyncio.to_thread(probe_keyframe_before, file.file_path, start_ms / 1000)
+        )
         if keyframe_s is not None:
             start_ms = int(keyframe_s * 1000)
     spawn_started_at = time.perf_counter()
@@ -2229,6 +2263,9 @@ async def get_playback_subtitle(
     file = await session.get(LibraryFile, file_id)
     if file is None:
         raise NotFoundException("文件不存在")
+    if (file.container or "") in {"iso", "dvd", "bluray"}:
+        source = await asyncio.to_thread(disc_source_for_file, file)
+        file = await asyncio.to_thread(main_title_file, file, source)
     ref = resolve_external_subtitle(file, track)
     if ref is None:
         index = parse_embedded_track(track)
@@ -3014,10 +3051,25 @@ async def report_playback_metric(
     member_id = principal.member_id if principal.member_id is not None else 0
     if payload.attempt_id:
         fields = payload.model_dump(exclude={"ttff_ms"})
-        report = qoe.FinishReport(**{k: v for k, v in fields.items() if v is not None or k in {
-            "first_frame_ms", "playing_ms", "degraded_from", "dropped_frames", "total_frames",
-            "library_file_id", "media_item_id", "season_number", "episode_number",
-        }})
+        report = qoe.FinishReport(
+            **{
+                k: v
+                for k, v in fields.items()
+                if v is not None
+                or k
+                in {
+                    "first_frame_ms",
+                    "playing_ms",
+                    "degraded_from",
+                    "dropped_frames",
+                    "total_frames",
+                    "library_file_id",
+                    "media_item_id",
+                    "season_number",
+                    "episode_number",
+                }
+            }
+        )
         # 旧字段 ttff_ms 仍填上首帧，老的 /playback/stats 汇总照样能看
         row = await qoe.finish_attempt(session, member_id=member_id, report=report)
         if row.ttff_ms is None and payload.first_frame_ms is not None:
@@ -3044,8 +3096,17 @@ async def report_playback_metric(
     )
     legacy = payload.model_dump(
         include={
-            "library_file_id", "tier", "degraded_from", "engine", "hw_backend", "ttff_ms",
-            "rebuffer_ms", "rebuffer_count", "seek_count", "dropped_frames", "total_frames",
+            "library_file_id",
+            "tier",
+            "degraded_from",
+            "engine",
+            "hw_backend",
+            "ttff_ms",
+            "rebuffer_ms",
+            "rebuffer_count",
+            "seek_count",
+            "dropped_frames",
+            "total_frames",
             "watched_ms",
         }
     )
@@ -3107,8 +3168,18 @@ async def get_playback_attempt(
     row = await qoe.get_attempt(session, attempt_id)
     if row is None:
         raise NotFoundException("没有这次播放的记录")
-    data = row.model_dump(exclude={"id", "updated_at", "ttff_ms", "hw_backend", "dropped_frames",
-                                   "total_frames", "seek_count", "metric_version"})
+    data = row.model_dump(
+        exclude={
+            "id",
+            "updated_at",
+            "ttff_ms",
+            "hw_backend",
+            "dropped_frames",
+            "total_frames",
+            "seek_count",
+            "metric_version",
+        }
+    )
     data["attempt_id"] = row.attempt_id or attempt_id
     data["created_at"] = utc_isoformat(row.created_at)
     data["ended_at"] = utc_isoformat(row.ended_at) if row.ended_at else None

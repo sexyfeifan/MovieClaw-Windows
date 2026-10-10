@@ -13,6 +13,8 @@
     "core:window:allow-close",
     "core:window:allow-toggle-maximize",
     "core:window:allow-is-maximized",
+    "core:window:allow-is-fullscreen",
+    "core:window:allow-set-fullscreen",
     "core:window:allow-show",
     "core:window:allow-hide",
     "core:window:allow-set-focus",
@@ -50,6 +52,13 @@
     "allow-release-media-stream",
     "allow-get-embedded-player-state",
     "allow-native-ready",
-    "allow-renew-media-stream"
+    "allow-renew-media-stream",
+    "allow-begin-native-playback",
+    "allow-update-native-playback",
+    "allow-end-native-playback",
+    "allow-download-update",
+    "allow-cancel-update-download",
+    "allow-install-downloaded-update",
+    "allow-open-downloaded-update"
   ]
 }

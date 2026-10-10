@@ -506,6 +506,12 @@ class PlaybackSourceView(BaseModel):
     frame_rate: float | None = None
     size_bytes: int | None = None
 
+    #: 逻辑主标题片长；原盘不能把整盘大小/探测值当作正片时长。
+    duration_ms: int | None = None
+
+    #: 主标题实际探测到的字幕编码；让客户端区分无轨与当前路径无法呈现的轨。
+    subtitle_codecs: list[str] = Field(default_factory=list, max_length=32)
+
 
 class PlaybackStateView(BaseModel):
     """一个播放单元在当前成员名下的观看状态。续播与上报共用同一形状。"""

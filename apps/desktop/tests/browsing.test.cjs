@@ -65,6 +65,23 @@ test('a delayed configuration read cannot overwrite a newer server selection', a
   assert.equal(h.window.__MOVIECLAW_SERVER__, 'http://new.invalid');
 });
 
+test('a late authenticated image response cannot replace a newer image or retired account', async () => {
+  const h = harness(), old = deferred();
+  const image = { src: 'old-source', dataset: { raw: '/old.png' }, style: {},
+    getAttribute(name) { return this[name]; }, parentElement: { classList: { add() {} } } };
+  h.context.image = image; h.API.proxyImage = () => old.promise;
+  vm.runInContext('imgFallback(image, image.dataset.raw)', h.context);
+  image.dataset.raw = '/new.png'; image.src = 'new-source';
+  old.resolve('data:image/png;base64,OLD'); await old.promise;
+  assert.equal(image.src, 'new-source');
+  const retired = deferred(); h.API.proxyImage = () => retired.promise;
+  delete image.dataset.retried;
+  vm.runInContext('imgFallback(image, image.dataset.raw)', h.context);
+  h.API.invalidateContext();
+  retired.resolve('data:image/png;base64,RETIRED'); await retired.promise;
+  assert.equal(image.src, 'new-source');
+});
+
 test('Cookie account mutations use username, active and the real DELETE route', async () => {
   const h = harness(args => args.path === '/auth/accounts'
     ? { data: [{ username: 'alice', nickname: 'Alice', active: true }, { username: 'bob', nickname: 'Bob', active: false }] }
@@ -309,13 +326,16 @@ test('person uses inline credits, displays missing sources and never requests a 
     { media_item_id: 1, library_id: 9, title: '现有作品', department: 'cast', character: '角色' },
     { media_item_id: 2, library_id: null, title: '移除作品', department: 'director' },
   ] } }));
-  const container = h.element();
+  const container = h.element(), back = h.element('personBack');
+  container.querySelector = selector => selector === '#personBack' ? back : null;
+  let returned = false; h.A.goBack = () => { returned = true; };
   await h.A.renderPerson(container, { personId: 1 });
   assert.ok(container.innerHTML.includes('现有作品'));
   assert.ok(container.innerHTML.includes('片源已移除'));
   assert.ok(container.innerHTML.includes('aria-disabled="true"'));
   assert.equal(h.calls.filter(c => c.command === 'proxy_api').length, 1);
   assert.equal(h.calls[0].path, '/people/1');
+  await back.emit('click'); assert.equal(returned, true);
 });
 
 test('poster text and URL attributes escape hostile metadata and reject script schemes', () => {

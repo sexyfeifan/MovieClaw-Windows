@@ -93,6 +93,8 @@ class _ExtractionSpec:
     fmt: str
     video: Path
     out_path: Path
+    input_args: tuple[str, ...] = ()
+    stamp: Path | None = None
 
 
 @dataclass
@@ -179,7 +181,42 @@ def track_codec(file: LibraryFile, index: int) -> str | None:
     return raw.get("codec") if isinstance(raw, dict) else None
 
 
+def _disc_input(file: LibraryFile):
+    """Share subtitle extraction's existing queue while reading the logical title in place."""
+    if (file.container or "") not in {"iso", "dvd", "bluray"}:
+        return file, (), None, ""
+    from movieclaw_api.services.playback.disc_fallback import main_title_file
+    from movieclaw_api.services.playback.disc_source import disc_source_for_file
+
+    source = disc_source_for_file(file)
+    if source is None:
+        return file, (), None, ""
+    file = main_title_file(file, source)
+    fingerprint = source.fingerprint
+    manifest = cache_dir() / f"{file.id}.disc-{fingerprint[:20]}.concat"
+    if not manifest.is_file():
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        temporary = manifest.with_name(f".{manifest.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(source.concat_list(), encoding="utf-8")
+            os.replace(temporary, manifest)
+        finally:
+            temporary.unlink(missing_ok=True)
+    args = (
+        "-protocol_whitelist",
+        "file,subfile,concat",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(manifest),
+    )
+    return file, args, manifest, f".disc-{fingerprint[:20]}"
+
+
 def _extraction_spec(file: LibraryFile, index: int) -> _ExtractionSpec | None:
+    file, input_args, stamp, suffix = _disc_input(file)
     fmt = subtitle_format(track_codec(file, index))
     if fmt is None:
         return None
@@ -187,7 +224,9 @@ def _extraction_spec(file: LibraryFile, index: int) -> _ExtractionSpec | None:
     return _ExtractionSpec(
         fmt=fmt,
         video=video,
-        out_path=cache_dir() / f"{file.id}.s{index}.{fmt}",
+        out_path=cache_dir() / f"{file.id}{suffix}.s{index}.{fmt}",
+        input_args=input_args,
+        stamp=stamp,
     )
 
 
@@ -249,7 +288,7 @@ def _is_fresh(out_path: Path, video: Path) -> bool:
 
 
 def _cached_track(spec: _ExtractionSpec) -> ExtractedTrack | None:
-    if not _is_fresh(spec.out_path, spec.video):
+    if not _is_fresh(spec.out_path, spec.stamp or spec.video):
         return None
     return ExtractedTrack(path=spec.out_path, format=spec.fmt)
 
@@ -317,7 +356,11 @@ def _can_extract(spec: _ExtractionSpec) -> bool:
             "或为该影片放置外挂字幕文件（官方 Docker 镜像已内置 ffmpeg）"
         )
         return False
-    return spec.video.is_file()
+    return (
+        (spec.stamp.is_file() and spec.video.exists())
+        if spec.input_args and spec.stamp
+        else spec.video.is_file()
+    )
 
 
 def _new_tmp_path(out_path: Path) -> Path:
@@ -334,9 +377,14 @@ def _codec_args(spec: _ExtractionSpec) -> list[str]:
 
 def _extract_command(spec: _ExtractionSpec, index: int, tmp_path: Path) -> list[str]:
     return [
-        "ffmpeg", "-nostdin", "-v", "error", "-y",
-        "-i", str(spec.video),
-        "-map", f"0:s:{index}",
+        "ffmpeg",
+        "-nostdin",
+        "-v",
+        "error",
+        "-y",
+        *(spec.input_args or ("-i", str(spec.video))),
+        "-map",
+        f"0:s:{index}",
         *_codec_args(spec),
         str(tmp_path),
     ]
@@ -351,9 +399,15 @@ def _batch_command(
     的末尾展示进度（见 ``read_progress``）。
     """
     argv = [
-        "ffmpeg", "-nostdin", "-v", "error", "-y",
-        "-progress", str(progress_path), "-nostats",
-        "-i", str(video),
+        "ffmpeg",
+        "-nostdin",
+        "-v",
+        "error",
+        "-y",
+        "-progress",
+        str(progress_path),
+        "-nostats",
+        *(outputs[0][1].input_args or ("-i", str(video))),
     ]
     for index, spec, tmp_path in outputs:
         argv += ["-map", f"0:s:{index}", *_codec_args(spec), str(tmp_path)]
@@ -376,7 +430,9 @@ def _finish_extraction(
         _cleanup(tmp_path)
         logger.warning(
             "内封字幕抽取失败：%s 轨 %d（%s）",
-            spec.video, index, stderr.decode(errors="replace")[:200],
+            spec.video,
+            index,
+            stderr.decode(errors="replace")[:200],
         )
         return None
     try:
@@ -387,7 +443,10 @@ def _finish_extraction(
         return None
     logger.info(
         "内封字幕抽取完成：%s 轨 %d → %s 耗时 %.1f 秒",
-        spec.video.name, index, spec.fmt, time.monotonic() - started_at,
+        spec.video.name,
+        index,
+        spec.fmt,
+        time.monotonic() - started_at,
     )
     return ExtractedTrack(path=spec.out_path, format=spec.fmt)
 
@@ -427,9 +486,7 @@ def extract_track(file: LibraryFile, index: int) -> ExtractedTrack | None:
     except subprocess.TimeoutExpired:
         _terminate_sync_process(proc)
         _cleanup(tmp_path)
-        logger.warning(
-            "内封字幕抽取超时（%.0f 秒）：%s 轨 %d", EXTRACT_TIMEOUT, spec.video, index
-        )
+        logger.warning("内封字幕抽取超时（%.0f 秒）：%s 轨 %d", EXTRACT_TIMEOUT, spec.video, index)
         return None
     return _finish_extraction(spec, index, tmp_path, proc.returncode, stderr, started_at)
 
@@ -480,7 +537,7 @@ async def _shared_extract(
 
 def _video_stamp(spec: _ExtractionSpec) -> int | None:
     try:
-        return spec.video.stat().st_mtime_ns
+        return (spec.stamp or spec.video).stat().st_mtime_ns
     except OSError:
         return None
 
@@ -545,9 +602,7 @@ def schedule_extraction(file: LibraryFile, index: int) -> bool:
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 -- 后台抽取失败只影响下一次预检
-            logger.warning(
-                "内封字幕后台抽取失败：%s 轨 %d", spec.video, index, exc_info=True
-            )
+            logger.warning("内封字幕后台抽取失败：%s 轨 %d", spec.video, index, exc_info=True)
             produced = None
         # 记住成败：失败不记，前端轮询会每隔两三秒把同一条坏轨再抽一遍。
         if produced is None:
@@ -706,7 +761,9 @@ async def _run_ffmpeg(pending: list[tuple[int, _ExtractionSpec]], progress_path:
         )
         logger.warning(
             "内封字幕抽取超时（%.0f 秒）：%s（%d 条轨），视频文件不变就不再重试",
-            timeout, video, len(outputs),
+            timeout,
+            video,
+            len(outputs),
         )
         return True
 
@@ -789,14 +846,19 @@ def _window_spec(file: LibraryFile, index: int, start_ms: int, end_ms: int) -> _
         return None
     start_s = max(0, start_ms // 1000)
     end_s = min(max(start_s + 1, -(-end_ms // 1000)), start_s + WINDOW_MAX_SECONDS)
+    full = _extraction_spec(file, index)
     return _WindowSpec(
         fmt=fmt,
         index=index,
         video=Path(file.file_path),
         start_s=start_s,
         end_s=end_s,
-        out_path=cache_dir() / f"{file.id}.s{index}.w{start_s}-{end_s}.{fmt}",
-        full=_extraction_spec(file, index),
+        out_path=(
+            full.out_path.with_name(f"{full.out_path.stem}.w{start_s}-{end_s}.{fmt}")
+            if full
+            else cache_dir() / f"{file.id}.s{index}.w{start_s}-{end_s}.{fmt}"
+        ),
+        full=full,
     )
 
 
@@ -804,15 +866,16 @@ def _extract_window(spec: _WindowSpec) -> ExtractedTrack | None:
     """（阻塞）抽出窗口里的字幕；整轨已有缓存就直接给整轨。失败返回 None。"""
     if spec.full is not None and (full := _cached_track(spec.full)) is not None:
         return full
-    if _is_fresh(spec.out_path, spec.video):
+    stamp = (spec.full.stamp or spec.video) if spec.full else spec.video
+    if _is_fresh(spec.out_path, stamp):
         return ExtractedTrack(path=spec.out_path, format=spec.fmt)
-    if shutil.which("ffmpeg") is None or not spec.video.is_file():
+    if spec.full is None or not _can_extract(spec.full):
         return None
     tmp_path = _new_tmp_path(spec.out_path)
     argv = [
         "ffmpeg", "-nostdin", "-v", "error", "-y",
         "-ss", str(spec.start_s), "-t", str(spec.end_s - spec.start_s),
-        "-i", str(spec.video),
+        *(spec.full.input_args or ("-i", str(spec.video))),
         "-copyts",
         "-map", f"0:s:{spec.index}", "-c:s", "copy", "-f", spec.fmt,
         str(tmp_path),

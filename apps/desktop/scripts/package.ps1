@@ -50,4 +50,20 @@ $hashes = @($setupName, $zipName) | ForEach-Object {
 $hashes | Set-Content (Join-Path $dist 'SHA256SUMS.txt') -Encoding ascii
 & (Join-Path $PSScriptRoot 'smoke.ps1') -PackageDirectory $portable -InstallerPath (Join-Path $dist $setupName) -InstallSmoke:$InstallSmoke
 if ($LASTEXITCODE -ne 0) { throw 'Package smoke test failed' }
+$revision = $env:GITHUB_SHA
+if (-not $revision) { $revision = (& git -C $root rev-parse HEAD).Trim() }
+$setupSignature = Get-AuthenticodeSignature -LiteralPath (Join-Path $dist $setupName)
+$appSignature = Get-AuthenticodeSignature -LiteralPath $exe
+$runtimeManifest = Get-Content (Join-Path $PSScriptRoot 'mpv-manifest.json') -Raw | ConvertFrom-Json
+$releaseManifest = @{
+    schemaVersion = 1; version = $version; sourceRevision = $revision
+    scope = 'windows-hosted-ci-smoke'; physicalValidated = $false
+    files = @(@($setupName, $zipName) | ForEach-Object { $path = Join-Path $dist $_; @{ name = $_; size = (Get-Item $path).Length; sha256 = (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant() } })
+    runtime = $runtimeManifest
+    signatures = @{
+        installer = @{ status = $setupSignature.Status.ToString(); thumbprint = $setupSignature.SignerCertificate.Thumbprint }
+        application = @{ status = $appSignature.Status.ToString(); thumbprint = $appSignature.SignerCertificate.Thumbprint }
+    }
+}
+$releaseManifest | ConvertTo-Json -Depth 12 | Set-Content (Join-Path $dist 'release-manifest.json') -Encoding utf8
 Write-Host "Verified packages for MovieClaw Desktop $version are in $dist"

@@ -154,6 +154,8 @@ class MediaProfile:
     #: DVD 目录（VIDEO_TS 文件夹）：没有单个文件可直连，服务端也不解析它的结构；
     #: 能读目录的播放器按目录直推，自己读 IFO 选正片、拼接 VOB（disc-direct-play.md §2.7）
     dvd_folder: bool = False
+    #: Server parsed a main title that can be streamed through local concat/remux.
+    server_disc_available: bool = False
 
     @property
     def height(self) -> int | None:
@@ -334,15 +336,11 @@ def decide_playback(
     if media.is_strm:
         return _decide_strm(media, failed_tiers)
 
-    # 光盘镜像（ISO）：服务端读不了盘内结构（没有 UDF / ISO9660 解析，ffprobe 读 ISO
-    # 只是碰巧嗅探到盘内字节，规格不可信），换封装、转码都无从谈起——但自己拉原文件的
-    # 全解码播放器未必放不了（Infuse、带 libbluray 的播放器都认 ISO），所以不拦：一律给
-    # 原字节直推，放不放得了由播放器自己决定。申报了能读镜像的（App 的自研引擎）额外标上
-    # disc="image"，它据此按镜像装载（disc-direct-play.md §2.2）。
-    # 只有指望服务端换封装 / 转码的客户端（浏览器）明确告知放不了——服务端确实无能为力，
-    # 与其开一个注定 404 的会话，不如直接说清原因和出路。
+    # Codec/container universality does not include UDF/ISO9660 parsing. Only clients
+    # explicitly declaring disc_image may receive raw ISO bytes (the URL has no suffix).
+    # Other clients cannot ask this server to remux/transcode an unparsed image.
     if media.container == "iso":
-        if capability.universal:
+        if capability.universal and capability.disc_image:
             return PlaybackPlan(
                 tier=PlaybackTier.DIRECT_PLAY,
                 file_id=media.file_id,
@@ -354,13 +352,13 @@ def decide_playback(
                 subtitles=plan_subtitles(media),
                 audio_tracks=media.audio_tracks,
                 reason="光盘镜像原字节直推，盘内结构由播放器在本机读取",
-                disc="image" if capability.disc_image else None,
+                disc="image",
             )
-        return PlaybackRejected(
-            reason="服务端读不了光盘镜像（ISO）的盘内结构，没法为这个播放器换封装或转码",
-            suggestion="请用能直接播放 ISO 的播放器（MovieClaw 的 iOS App、Infuse 等）；"
-            "或把镜像里的 BDMV 目录解出来后重新入库",
-        )
+        if not media.server_disc_available:
+            return PlaybackRejected(
+                reason="ISO 主播放列表或标题不可读，不能为此播放器生成视频流",
+                suggestion="请用支持此镜像格式的播放器（如 Infuse），或提取 BDMV / 正片后重新入库",
+            )
 
     # 2. 恒等快照（全解码播放器）：永远直连，与 jellyfin-compat.md 行为一致。
     #    例外：多剪辑原盘没有单个文件可直连。能读原盘目录的播放器（App 的自研引擎）
@@ -409,11 +407,21 @@ def decide_playback(
             reason="DVD 目录直推：播放器读 IFO 选正片、在本机拼接 VOB，服务端只按文件供字节",
             disc="folder",
         )
-    if capability.universal and media.disc_clips > 1:
+    if (media.dvd_folder or media.container == "dvd") and not media.server_disc_available:
+        # The server's disc_source reader only handles BDMV/MPLS. A VIDEO_TS folder
+        # cannot fall through to file streaming (404) or unsupported server concat.
+        return PlaybackRejected(
+            reason="此播放器不支持读取 DVD 目录，服务端也暂不能解析 IFO 并拼接 VOB",
+            suggestion="请使用支持 DVD 目录的 MovieClaw Apple 播放器，或将正片提取为普通视频后入库",
+        )
+    if capability.universal and (
+        media.disc_clips > 1
+        or media.server_disc_available and media.container in {"iso", "dvd"}
+    ):
         return PlaybackPlan(
             tier=PlaybackTier.REMUX,
             file_id=media.file_id,
-            container="hls-fmp4",
+            container="hls-ts" if media.container == "dvd" else "hls-fmp4",
             video=VideoPlan(
                 action="copy", codec=media.video_codec, source_bit_depth=media.bit_depth
             ),
@@ -421,7 +429,7 @@ def decide_playback(
             subtitles=plan_subtitles(media),
             audio_tracks=media.audio_tracks,
             reason=(
-                f"原盘主片由 {media.disc_clips} 段剪辑拼接而成，"
+                f"原盘主标题由 {media.disc_clips} 段剪辑或 cell 拼接而成，"
                 "按播放列表拼接后原样封装为 HLS，不转码"
             ),
         )

@@ -25,7 +25,7 @@ function harness(options = {}) {
       emit(name) { for (const fn of listeners.get(name) || []) fn({ target: this }); },
       appendChild(child) { this.children.push(child); if (child.id) elements.set(child.id, child); },
       remove() { elements.delete(this.id); },
-      removeAttribute() {}, querySelectorAll() { return []; },
+      removeAttribute() {}, canPlayType() { return ''; }, querySelectorAll() { return []; },
       getBoundingClientRect() { return { left: 0, top: 0, right: 1000, bottom: 700, width: 1000, height: 700 }; },
     };
   }
@@ -63,7 +63,7 @@ function harness(options = {}) {
     } } },
   };
   const context = vm.createContext({
-    window: win, API, navigator: {}, AbortController, DOMException, URL, TextEncoder, TextDecoder, Headers, Response, fetch: options.fetch || fetch, performance: { now: () => 1000 },
+    window: win, API, navigator: { userAgent: 'test', ...options.navigator }, AbortController, DOMException, URL, TextEncoder, TextDecoder, Headers, Response, fetch: options.fetch || fetch, performance: { now: () => 1000 },
     console: { log() {}, warn() {}, error() {} },
     localStorage: { getItem(key) { return storage.get(key) ?? null; }, setItem(key, value) { storage.set(key, value); } },
     document: { fullscreenElement: null, addEventListener() {}, removeEventListener() {},
@@ -79,7 +79,7 @@ function harness(options = {}) {
     atob: data => Buffer.from(data, 'base64').toString('binary'),
   });
   for (const file of ['player.js', 'app.js']) vm.runInContext(fs.readFileSync(path.join(__dirname, '../ui/desktop', file), 'utf8'), context);
-  vm.runInContext('globalThis.P = Player; globalThis.A = App; getCapabilitySnapshot = async () => ({video:[],audio:[],containers:["mp4"]});', context);
+  vm.runInContext('globalThis.P = Player; globalThis.A = App; globalThis.readBrowserCapability = getCapabilitySnapshot; getCapabilitySnapshot = async () => ({video:[],audio:[],containers:["mp4"]});', context);
   const P = context.P, A = context.A;
   P.init();
   A.libraries = [{ id: 9 }];
@@ -745,4 +745,131 @@ test('browser progress starts on a real video-frame callback and discards callba
   h.video.emit('playing'); await h.P.close(); callback(); await flush();
   assert.equal(cancelled, 123);
   assert.equal(h.calls.filter(c => c[0] === 'progress' && c[2] === 'start').length, 1);
+});
+
+
+test('browser codec decode probes never claim HDR output; HDR source prefers native mapping', async () => {
+  const h = harness({ navigator: { mediaCapabilities: { decodingInfo: async () => ({ supported: true, smooth: true, powerEfficient: true }) } } });
+  const browser = await h.context.readBrowserCapability();
+  assert.ok(browser.video.length > 0);
+  assert.equal(browser.hdr_passthrough, false);
+  assert.equal(h.A.needsNativePlayer({ container: 'mp4', video_codec: 'hevc', hdr: 'HDR10' }, []), true);
+  assert.equal(h.context.getUniversalCapabilitySnapshot().disc_image, false);
+  assert.equal(h.context.getUniversalCapabilitySnapshot().disc_folder, false);
+});
+
+test('known ISO and DVD request server remux without disc-reader claims; legacy raw discs never reach an engine', async () => {
+  for (const container of ['iso', 'dvd']) {
+    const h = harness({ request: () => Promise.resolve(session({ stream_url: '/playback/files/81/stream?token=x',
+      source: { container }, decision: { tier: 0, file_id: 81 } })) });
+    h.A._mpvReady = true;
+    const errors = [], opened = [];
+    h.A._showPlaybackError = message => errors.push(message);
+    h.P.open = (...args) => opened.push(args);
+    await h.A.startPlayback(item({ file_id: 81, files: [{ id: 81, state: 'in_place', container }] }));
+    const body = h.calls.find(c => c[0] === 'request')[2].body;
+    assert.equal(body.capability.universal, true);
+    assert.equal(body.capability.disc_image, false);
+    assert.equal(body.capability.disc_folder, false);
+    assert.equal(opened.length, 0);
+    assert.equal(h.calls.filter(c => c[1] === 'launch_embedded_player').length, 0);
+    assert.deepEqual(h.calls.filter(c => c[0] === 'stop'), [['stop', 'session-a']]);
+    assert.equal(errors.length, 1);
+  }
+});
+
+test('unexpected disc manifests renegotiate once and cannot fall through to mpv or HTML5', async () => {
+  let count = 0;
+  const h = harness({ request: () => Promise.resolve(session({ session_id: 'disc-' + ++count,
+    stream_url: '/playback/files/81/disc?token=x', source: { container: 'bluray' },
+    decision: { tier: 0, file_id: 81, disc: 'folder' } })) });
+  h.A._mpvReady = true;
+  const errors = [], opened = [];
+  h.A._showPlaybackError = message => errors.push(message);
+  h.P.open = (...args) => opened.push(args);
+  await h.A.startPlayback(item({ files: [{ id: 81, state: 'in_place', container: 'bluray' }] }));
+  const requests = h.calls.filter(c => c[0] === 'request');
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0][2].body.capability.universal, true);
+  assert.equal(requests[0][2].body.capability.disc_folder, false);
+  assert.notEqual(requests[1][2].body.capability.universal, true);
+  assert.deepEqual(h.calls.filter(c => c[0] === 'stop'), [['stop', 'disc-1'], ['stop', 'disc-2']]);
+  assert.equal(opened.length, 0);
+  assert.equal(h.calls.filter(c => c[1] === 'launch_embedded_player').length, 0);
+  assert.equal(errors.length, 1);
+});
+
+test('BDMV server remux is accepted and direct native entry still refuses a JSON manifest', async () => {
+  const h = harness({ request: () => Promise.resolve(session({ stream_url: '/playback/sessions/a/master.m3u8',
+    source: { container: 'bluray' }, decision: { tier: 1, file_id: 81, container: 'hls-fmp4' } })) });
+  h.A._mpvReady = true;
+  const launches = [], opened = [], errors = [];
+  h.A.openEmbeddedPlayer = async (...args) => launches.push(args);
+  await h.A.startPlayback(item({ files: [{ id: 81, state: 'in_place', container: 'bluray' }] }));
+  assert.equal(launches.length, 1);
+  assert.match(launches[0][1], /master\.m3u8$/);
+  const direct = harness(); direct.A._playbackSeq = 12;
+  direct.P.open = (...args) => opened.push(args);
+  direct.A._showPlaybackError = message => errors.push(message);
+  await direct.A.openEmbeddedPlayer(item(), 'https://server.invalid/api/v1/playback/files/81/disc?token=x', [], 0,
+    session({ decision: { tier: 0, file_id: 81 } }), 12);
+  assert.equal(opened.length, 0);
+  assert.equal(direct.calls.filter(c => c[1] === 'launch_embedded_player').length, 0);
+  assert.deepEqual(direct.calls.filter(c => c[0] === 'stop'), [['stop', 'session-a']]);
+  assert.equal(errors.length, 1);
+});
+
+test('native fullscreen uses the Tauri window without DOM activation and restores after a delayed close', async () => {
+  const h = harness();
+  let fullscreen = false;
+  const entered = deferred(), release = deferred(), changes = [];
+  h.win.__TAURI__.window = { getCurrentWindow: () => ({
+    isFullscreen: async () => fullscreen,
+    setFullscreen: async value => {
+      changes.push(value);
+      if (value) { entered.resolve(); await release.promise; }
+      fullscreen = value;
+    },
+  }) };
+  h.P.activeEngine = 'mpv'; h.win.__MOVIECLAW_MPV_ACTIVE = true;
+  h.elements.get('playerView').requestFullscreen = () => { throw new Error('DOM fullscreen has no user activation'); };
+  const toggle = h.P.toggleFullscreen();
+  await entered.promise;
+  const close = h.P.close();
+  release.resolve();
+  await Promise.all([toggle, close]);
+  assert.deepEqual(changes, [true, false]);
+  assert.equal(fullscreen, false);
+  assert.equal(h.P.isFullscreen(), false);
+  assert.equal(h.elements.get('playerView').hidden, true);
+});
+
+test('native fullscreen preserves prior window mode through engine replacement and final close', async () => {
+  const h = harness();
+  let fullscreen = true;
+  const changes = [];
+  h.win.__TAURI__.window = { getCurrentWindow: () => ({
+    isFullscreen: async () => fullscreen,
+    setFullscreen: async value => { changes.push(value); fullscreen = value; },
+  }) };
+  h.P.activeEngine = 'mpv'; h.win.__MOVIECLAW_MPV_ACTIVE = true;
+  await h.P.toggleFullscreen();
+  assert.equal(fullscreen, false);
+  await h.P.close({ hide: false });
+  assert.equal(fullscreen, false);
+  h.P.activeEngine = 'mpv'; h.win.__MOVIECLAW_MPV_ACTIVE = true;
+  await h.P.close();
+  assert.equal(fullscreen, true);
+  assert.deepEqual(changes, [false, true]);
+});
+
+test('probed DVD bitmap subtitles are unavailable with an accurate reason instead of claiming no tracks', () => {
+  const h = harness();
+  h.P.sessionData = session({ source: { subtitle_codecs: ['dvd_subtitle'] }, decision: { subtitles: [] } });
+  const tracks = h.P.buildSubtitleTracks();
+  assert.equal(tracks.options.length, 0);
+  assert.equal(tracks.unavailable.length, 1);
+  assert.match(tracks.unavailable[0].reason, /此播放路径暂不支持 DVD 位图字幕/);
+  h.P.sessionData.source.subtitle_codecs = [];
+  assert.equal(h.P.buildSubtitleTracks().unavailable.length, 0);
 });

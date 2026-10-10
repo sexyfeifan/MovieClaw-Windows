@@ -29,11 +29,37 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: read
     steps:
+      - uses: actions/checkout@v4
+      - name: Require a successful CI run for the exact physically tested source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ACCEPTANCE_RUN_ID: ${{ vars.DESKTOP_ACCEPTANCE_RUN_ID }}
+        run: |
+          test -n "$ACCEPTANCE_RUN_ID" || { echo 'Stable release requires DESKTOP_ACCEPTANCE_RUN_ID for the physically tested packages'; exit 1; }
+          gh api "repos/$GH_REPO/actions/runs/$ACCEPTANCE_RUN_ID" > acceptance-run.json
+          python3 - <<'PY'
+          import json, os
+          run = json.load(open('acceptance-run.json'))
+          assert run['conclusion'] == 'success' and run['head_sha'] == os.environ['GITHUB_SHA'], 'Acceptance CI must pass for the exact release commit'
+          assert run['path'] == '.github/workflows/desktop-ci.yml', 'Acceptance must come from Desktop CI'
+          assert run['event'] == 'push', 'Acceptance artifacts must be built from the exact pushed commit, not a PR merge tree'
+          assert run['head_repository']['full_name'] == os.environ['GH_REPO'], 'Fork artifacts are not release inputs'
+          PY
       - uses: actions/download-artifact@v4
         with:
           name: desktop-packages-${{ github.sha }}
           path: dist
+          github-token: ${{ github.token }}
+          run-id: ${{ vars.DESKTOP_ACCEPTANCE_RUN_ID }}
+      - name: Physical acceptance and signature gate
+        env:
+          DESKTOP_HARDWARE_ACCEPTANCE_JSON: ${{ vars.DESKTOP_HARDWARE_ACCEPTANCE_JSON }}
+        run: |
+          VERSION=$(python3 -c "import pathlib,tomllib; print(tomllib.loads(pathlib.Path('apps/desktop/src-tauri/Cargo.toml').read_text())['package']['version'])")
+          python3 apps/desktop/scripts/check-release-evidence.py --directory dist --revision "$GITHUB_SHA" --version "$VERSION"
       - name: Verify and publish the tested packages
         env:
           GH_TOKEN: ${{ github.token }}
@@ -42,4 +68,4 @@ jobs:
         run: |
           cd dist
           sha256sum --check SHA256SUMS.txt
-          gh release create "$RELEASE_TAG" MovieClaw-Desktop-*-Setup-x64.exe MovieClaw-Desktop-*-portable-x64.zip SHA256SUMS.txt --verify-tag --title "MovieClaw Desktop $RELEASE_TAG" --generate-notes
+          gh release create "$RELEASE_TAG" MovieClaw-Desktop-*-Setup-x64.exe MovieClaw-Desktop-*-portable-x64.zip SHA256SUMS.txt release-manifest.json --verify-tag --title "MovieClaw Desktop $RELEASE_TAG" --generate-notes

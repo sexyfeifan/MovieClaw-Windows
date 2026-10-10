@@ -35,6 +35,7 @@ const PROPERTIES: &[&str] = &[
     "eof-reached",
     "seeking",
     "video-out-params",
+    "video-target-params",
     "video-params",
     "hwdec-current",
     "hwdec",
@@ -265,6 +266,11 @@ async fn run(
                     } else if value["event"] == "end-file" {
                         state.lock().unwrap().insert("end_file".into(), value);
                     } else if value["event"] == "client-message" && value["args"][0] == "movieclaw-input" {
+                        {
+                            let mut data = state.lock().unwrap();
+                            let count = data.get("input_events").and_then(Value::as_u64).unwrap_or(0);
+                            data.insert("input_events".into(), json!(count.saturating_add(1)));
+                        }
                         if let Some(app) = &app {
                             let _ = app.emit("movieclaw:player-input", json!({ "instanceId": instance, "args": value["args"] }));
                         }
@@ -431,5 +437,264 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+    /// Exercises the production actor against the pinned Windows runtime. Missing
+    /// runtime is a CI setup failure; this test must never silently skip there.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn real_mpv_session_observes_tracks_controls_input_seek_and_releases_pipe() {
+        use std::path::{Path, PathBuf};
+        use std::process::{Child, Command as Process, Stdio};
+        struct Fixture {
+            child: Child,
+            dir: PathBuf,
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+        fn wav(path: &Path, hz: f64) {
+            let samples = 8000u32 * 8;
+            let size = samples * 2;
+            let mut bytes = Vec::with_capacity((size + 44) as usize);
+            bytes.extend_from_slice(b"RIFF");
+            bytes.extend_from_slice(&(size + 36).to_le_bytes());
+            bytes.extend_from_slice(b"WAVEfmt ");
+            bytes.extend_from_slice(&16u32.to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&8000u32.to_le_bytes());
+            bytes.extend_from_slice(&16000u32.to_le_bytes());
+            bytes.extend_from_slice(&2u16.to_le_bytes());
+            bytes.extend_from_slice(&16u16.to_le_bytes());
+            bytes.extend_from_slice(b"data");
+            bytes.extend_from_slice(&size.to_le_bytes());
+            for n in 0..samples {
+                let value =
+                    ((n as f64 * hz * std::f64::consts::TAU / 8000.0).sin() * 4000.0) as i16;
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            std::fs::write(path, bytes).unwrap();
+        }
+        async fn raw(session: &Session, value: Vec<Value>) -> Value {
+            // Test-only commands reach the same actor; production allowlist stays
+            // closed to file/process access, including audio-add and quit.
+            let (reply, response) = oneshot::channel();
+            let deadline = Instant::now() + COMMAND_TIMEOUT;
+            session
+                .tx
+                .send(Command {
+                    value,
+                    deadline,
+                    reply,
+                })
+                .await
+                .unwrap();
+            tokio::time::timeout_at(deadline, response)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        }
+        async fn wait_state(session: &Session, predicate: impl Fn(&Value) -> bool) -> Value {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let snapshot = session.snapshot();
+                if predicate(&snapshot) {
+                    return snapshot;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "mpv observed state deadline: {snapshot}"
+                );
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+        let runtime = PathBuf::from(
+            std::env::var_os("MOVIECLAW_MPV_RUNTIME")
+                .expect("Windows real IPC test needs MOVIECLAW_MPV_RUNTIME"),
+        );
+        let exe = if runtime.is_dir() {
+            runtime.join("mpv.exe")
+        } else {
+            runtime
+        };
+        assert!(exe.is_file(), "pinned mpv.exe missing");
+        let pipe = test_pipe();
+        let dir = std::env::temp_dir().join(format!(
+            "movieclaw-real-ipc-{}-{}",
+            std::process::id(),
+            pipe.rsplit('-').next().unwrap()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("one.wav");
+        let b = dir.join("two.wav");
+        let c = dir.join("three.wav");
+        wav(&a, 440.0);
+        wav(&b, 550.0);
+        wav(&c, 660.0);
+        let sub = dir.join("caption.srt");
+        std::fs::write(
+            &sub,
+            "1\n00:00:00,000 --> 00:00:08,000\nSynthetic caption\n",
+        )
+        .unwrap();
+        let child = Process::new(exe)
+            .args([
+                "--no-config",
+                "--vo=null",
+                "--ao=null",
+                "--pause=yes",
+                "--idle=yes",
+                "--keep-open=yes",
+                "--hwdec=no",
+                "--no-terminal",
+            ])
+            .arg(format!("--input-ipc-server={pipe}"))
+            .arg(format!("--audio-file={}", a.display()))
+            .arg(format!("--audio-file={}", b.display()))
+            .arg(format!("--sub-file={}", sub.display()))
+            .arg("av://lavfi:testsrc=duration=8:size=320x180:rate=24")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut fixture = Fixture { child, dir };
+        let session = Session::start(pipe, 10, None);
+        let state = wait_state(&session, |s| {
+            s["track-list"].as_array().is_some_and(|tracks| {
+                tracks.iter().filter(|t| t["type"] == "audio").count() == 2
+                    && tracks.iter().any(|t| t["type"] == "sub")
+            })
+        })
+        .await;
+        assert_eq!(state["ipc_connections"], 1);
+        let audio: Vec<_> = state["track-list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["type"] == "audio")
+            .map(|t| t["id"].as_i64().unwrap())
+            .collect();
+        // mpv allocates max(existing ID)+1, so add the third track before
+        // removing the middle one to create a real gap (1,3).
+        raw(
+            &session,
+            vec![
+                json!("audio-add"),
+                json!(c.to_str().unwrap()),
+                json!("select"),
+            ],
+        )
+        .await;
+        let state = wait_state(&session, |s| {
+            s["track-list"].as_array().is_some_and(|ts| {
+                ts.iter().any(|t| {
+                    t["type"] == "audio" && t["id"].as_i64().is_some_and(|id| id > audio[1])
+                })
+            })
+        })
+        .await;
+        let replacement = state["track-list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["type"] == "audio")
+            .map(|t| t["id"].as_i64().unwrap())
+            .max()
+            .unwrap();
+        raw(&session, vec![json!("audio-remove"), json!(audio[1])]).await;
+        let state = wait_state(&session, |s| {
+            s["track-list"].as_array().is_some_and(|ts| {
+                ts.iter().filter(|t| t["type"] == "audio").count() == 2
+                    && !ts
+                        .iter()
+                        .any(|t| t["type"] == "audio" && t["id"] == audio[1])
+            })
+        })
+        .await;
+        assert!(!state["track-list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["type"] == "audio" && t["id"] == audio[1]));
+        for (property, value) in [
+            ("aid", json!(replacement)),
+            ("sid", json!("no")),
+            ("speed", json!(1.5)),
+            ("sub-delay", json!(0.25)),
+            ("sub-scale", json!(1.2)),
+            ("pause", json!(false)),
+        ] {
+            session
+                .command(vec![json!("set_property"), json!(property), value])
+                .await
+                .unwrap();
+        }
+        let state = wait_state(&session, |s| {
+            s["pause"] == false
+                && s["speed"] == 1.5
+                && s["aid"] == replacement
+                && s["sid"] == "no"
+                && s["sub-delay"] == 0.25
+                && s["sub-scale"] == 1.2
+        })
+        .await;
+        assert_eq!(state["hwdec-current"], "no");
+        session
+            .command(vec![json!("seek"), json!(3.0), json!("absolute+exact")])
+            .await
+            .unwrap();
+        wait_state(&session, |s| {
+            s["time-pos"].as_f64().is_some_and(|n| n >= 2.9)
+        })
+        .await;
+        session
+            .command(vec![json!("set_property"), json!("pause"), json!(true)])
+            .await
+            .unwrap();
+        session
+            .command(vec![json!("set_property"), json!("aid"), json!("no")])
+            .await
+            .unwrap();
+        wait_state(&session, |s| s["pause"] == true && s["aid"] == "no").await;
+        raw(
+            &session,
+            vec![
+                json!("script-message"),
+                json!("movieclaw-input"),
+                json!("space"),
+            ],
+        )
+        .await;
+        wait_state(&session, |s| {
+            s["input_events"].as_u64().is_some_and(|n| n >= 1)
+        })
+        .await;
+        assert_eq!(session.snapshot()["ipc_connections"], 1);
+        raw(&session, vec![json!("quit")]).await;
+        session.stop();
+        wait_state(&session, |s| s["ipc_connected"] == false).await;
+        assert!(session
+            .command(vec![json!("get_property"), json!("pause")])
+            .await
+            .is_err());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(exit) = fixture.child.try_wait().unwrap() {
+                assert!(exit.success());
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "mpv did not exit after quit/Session.stop"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        println!("real mpv IPC: observed audio IDs {audio:?}->{replacement}, subtitle off, speed/delay/scale, seek, input, one pipe, process exit/cancel verified");
     }
 }

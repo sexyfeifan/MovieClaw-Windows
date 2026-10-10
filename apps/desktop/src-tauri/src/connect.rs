@@ -46,6 +46,22 @@ pub(crate) fn validate_http_url(value: &str) -> Result<Url, String> {
     Ok(url)
 }
 
+pub(crate) fn url_in_server_scope(base: &Url, target: &Url) -> bool {
+    if base.origin() != target.origin() {
+        return false;
+    }
+    let prefix = base.path().trim_end_matches('/');
+    prefix.is_empty()
+        || target.path() == prefix
+        || target
+            .path()
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+pub(crate) fn server_namespace(base: &Url) -> String {
+    base.as_str().trim_end_matches('/').to_owned()
+}
+
 fn normalize_server_url(value: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -66,8 +82,9 @@ fn normalize_server_url(value: &str) -> Result<String, String> {
 #[tauri::command]
 pub fn save_server_url(url: String) -> Result<ConnectResult, String> {
     let normalized = normalize_server_url(&url)?;
-    crate::native_auth::change_context();
-    fs::write(config_path(), &normalized).map_err(|e| format!("写入配置失败: {e}"))?;
+    crate::native_auth::change_server(|| {
+        fs::write(config_path(), &normalized).map_err(|e| format!("写入配置失败: {e}"))
+    })?;
     Ok(ConnectResult {
         ok: true,
         message: normalized,
@@ -81,6 +98,9 @@ pub fn get_server_url() -> Result<String, String> {
 
 #[tauri::command]
 pub fn load_server_url() -> Result<String, String> {
+    crate::native_auth::with_context_read(read_server_url_unlocked)
+}
+pub(crate) fn read_server_url_unlocked() -> Result<String, String> {
     match fs::read_to_string(config_path()) {
         Ok(s) => normalize_server_url(s.trim_start_matches('\u{FEFF}')),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
@@ -90,11 +110,13 @@ pub fn load_server_url() -> Result<String, String> {
 
 #[tauri::command]
 pub fn clear_server_url() -> Result<ConnectResult, String> {
-    crate::native_auth::change_context();
-    let path = config_path();
-    if path.exists() {
-        fs::remove_file(path).map_err(|e| format!("删除配置失败: {e}"))?;
-    }
+    crate::native_auth::change_server(|| {
+        let path = config_path();
+        if path.exists() {
+            fs::remove_file(path).map_err(|e| format!("删除配置失败: {e}"))?;
+        }
+        Ok(())
+    })?;
     Ok(ConnectResult {
         ok: true,
         message: "已断开服务器".into(),
@@ -129,6 +151,21 @@ pub async fn probe_server(url: String) -> Result<ConnectResult, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn server_scope_requires_origin_and_prefix_boundary() {
+        let a = Url::parse("https://server/a").unwrap();
+        for value in ["https://server/a", "https://server/a/api/v1/me"] {
+            assert!(url_in_server_scope(&a, &Url::parse(value).unwrap()));
+        }
+        for value in [
+            "https://server/b",
+            "https://server/a2/me",
+            "https://server/a/../b",
+            "https://elsewhere/a/me",
+        ] {
+            assert!(!url_in_server_scope(&a, &Url::parse(value).unwrap()));
+        }
+    }
     #[test]
     fn validates_and_normalizes_server_addresses() {
         assert_eq!(

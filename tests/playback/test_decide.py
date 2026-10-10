@@ -1134,7 +1134,7 @@ def test_multi_clip_disc_is_direct_played_as_folder_for_disc_capable_player():
 
 def test_dvd_folder_is_pushed_as_a_folder_to_disc_capable_players():
     """DVD 目录（VIDEO_TS）没有单个文件可直连：能读目录的播放器按目录直推（自己读 IFO、拼 VOB）；
-    原来落到「原文件直连」，取的是个文件夹，一律 404。别的播放器不受影响。"""
+    其他播放器需要明确拒绝，不能把文件夹当视频文件返回。"""
     from dataclasses import replace
 
     dvd = media(container="dvd", video_codec="mpeg2video", resolution="480p", dvd_folder=True)
@@ -1145,8 +1145,10 @@ def test_dvd_folder_is_pushed_as_a_folder_to_disc_capable_players():
     assert decision.disc == "folder" and decision.disc_playlist is None
     assert "DVD" in decision.reason
 
-    decision = decide_playback(dvd, universal_capability(), NO_GPU)
-    assert isinstance(decision, PlaybackPlan) and decision.disc is None
+    for capability in (universal_capability(), CHROME_HEVC):
+        decision = decide_playback(dvd, capability, NO_GPU)
+        assert isinstance(decision, PlaybackRejected)
+        assert "DVD" in decision.reason and "普通视频" in decision.suggestion
 
 
 def test_single_clip_disc_is_folder_for_disc_capable_player_and_plain_file_otherwise():
@@ -1167,10 +1169,8 @@ def test_single_clip_disc_is_folder_for_disc_capable_player_and_plain_file_other
     assert decision.tier is PlaybackTier.DIRECT_PLAY and decision.disc is None
 
 
-def test_iso_is_raw_bytes_for_full_decode_players_and_explained_to_browsers():
-    """光盘镜像：服务端读不了盘内结构。自己拉原文件的全解码播放器一律给原字节直推（Infuse、
-    带 libbluray 的播放器未必放不了），申报了能读镜像的额外标 disc="image"；指望服务端换封装的
-    浏览器明确告知放不了，而不是开一个注定 404 的会话。"""
+def test_iso_requires_explicit_disc_image_support_even_for_full_decode_players():
+    """HTTP ISO has no extension: codec universality must not imply a disc reader."""
     from dataclasses import replace
 
     iso = media(container="iso", video_codec=None)
@@ -1180,8 +1180,8 @@ def test_iso_is_raw_bytes_for_full_decode_players_and_explained_to_browsers():
     assert decision.tier is PlaybackTier.DIRECT_PLAY and decision.disc == "image"
 
     decision = decide_playback(iso, universal_capability(), NO_GPU)
-    assert isinstance(decision, PlaybackPlan)
-    assert decision.tier is PlaybackTier.DIRECT_PLAY and decision.disc is None
+    assert isinstance(decision, PlaybackRejected)
+    assert "ISO" in decision.reason
 
     decision = decide_playback(iso, SAFARI_MAC, WITH_GPU)
     assert isinstance(decision, PlaybackRejected)

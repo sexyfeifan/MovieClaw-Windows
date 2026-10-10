@@ -239,6 +239,9 @@ test('each tab restores its detail stack and loaded wall scroll, while reselect 
   const scroll=await page.locator('#content').evaluate(el=>el.scrollTop);
   await page.locator('#posterGrid [data-item-id="101"]').click();
   await expect(page.locator('.detail-title')).toHaveText('影片 101');
+  await page.locator('#accountButton').click(); await expect(page.locator('#accountPanel')).toBeVisible();
+  await page.keyboard.press('Escape'); await expect(page.locator('#accountPanel')).toHaveCount(0);
+  await expect(page.locator('.detail-title')).toHaveText('影片 101');
   await page.locator('[data-page="favorites"]').click(); await page.locator('#libraryNav [data-library-id="1"]').click();
   await expect(page.locator('.detail-title')).toHaveText('影片 101');
   await page.locator('#btnBack').click();

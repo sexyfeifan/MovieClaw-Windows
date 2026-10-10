@@ -16,7 +16,7 @@ async function nativeTracks(page, request) {
     await route.fulfill({ response, json: body });
   });
   await page.addInitScript(() => {
-    localStorage.setItem('mc_audioLang', 'en'); localStorage.setItem('mc_subLang', 'off');
+    localStorage.setItem('mc_audioLang', 'en'); localStorage.setItem('mc_subLang', '');
   });
   await openDesktop(page, request); await browseLibrary(page);
   await page.evaluate(() => Object.assign(window.__fixture.props, {
@@ -41,7 +41,7 @@ test('native track menus control actual mpv IDs, subtitle off, delay and speed',
   await nativeTracks(page, request);
   await page.locator('#btnSettings').click();
   await page.locator('.player-settings-tab[data-tab="audio"]').click();
-  await page.locator('.player-settings-item[onclick*="embedded:1"]').click();
+  await page.locator('.player-settings-item[data-audio-ref="embedded:1"]').click();
   await expect.poll(() => property(page, 'aid')).toBe(42);
   await page.locator('.player-settings-tab[data-tab="subtitles"]').click();
   await page.locator('[data-sub-index="1"]').click();
@@ -51,7 +51,7 @@ test('native track menus control actual mpv IDs, subtitle off, delay and speed',
   await page.locator('[data-sub-index="-1"]').click();
   await expect.poll(() => property(page, 'sid')).toBe('no');
   await page.locator('.player-settings-tab[data-tab="speed"]').click();
-  await page.locator('.player-settings-item[onclick="Player.setSpeed(1.5)"]').click();
+  await page.locator('.player-settings-item[data-speed="1.5"]').click();
   await expect.poll(() => property(page, 'speed')).toBe(1.5);
   expect(await page.evaluate(() => document.querySelector('#playerVideo').playbackRate)).toBe(1);
   const calls = await page.evaluate(() => window.__fixture.calls.filter(c => c.command === 'send_mpv_command_embedded').map(c => c.args.command));
@@ -75,4 +75,37 @@ test('keyboard controls drive the active native engine and close once', async ({
   await page.keyboard.press('Control+.');
   await expect(page.locator('#playerView')).toBeHidden();
   await expect.poll(async () => (await state(request)).stopped).toEqual(['session-1']);
+});
+
+test('native input fullscreen bypasses browser activation and Escape exits before closing', async ({ page, request }) => {
+  await nativeTracks(page, request);
+  await page.evaluate(() => {
+    document.querySelector('#playerView').requestFullscreen = () => { throw new Error('no browser transient activation'); };
+    window.__fixture.emit('movieclaw:player-input', { instanceId: Player.mpvInstanceId, args: ['movieclaw-input', 'double-click'] });
+  });
+  await expect.poll(() => page.evaluate(() => window.__fixture.fullscreen)).toBe(true);
+  await page.keyboard.press('Escape');
+  await expect.poll(() => page.evaluate(() => window.__fixture.fullscreen)).toBe(false);
+  await expect(page.locator('#playerView')).toBeVisible();
+  await page.evaluate(() => { window.__fixture.fullscreenDelay = 200; Player.toggleFullscreen(); });
+  await expect.poll(() => page.evaluate(() => window.__fixture.windows.filter(w => w?.name === 'setFullscreen').length)).toBe(3);
+  await page.locator('#playerBack').click();
+  await expect(page.locator('#playerView')).toBeHidden();
+  await expect.poll(() => page.evaluate(() => window.__fixture.windows.filter(w => w?.name === 'setFullscreen').length)).toBe(4);
+  await expect.poll(() => page.evaluate(() => window.__fixture.fullscreen)).toBe(false);
+  const changes = await page.evaluate(() => window.__fixture.windows.filter(w => w?.name === 'setFullscreen').map(w => w.value));
+  expect(changes).toEqual([true, false, true, false]);
+  await expect.poll(async () => (await state(request)).stopped).toEqual(['session-1']);
+});
+
+test('probed DVD bitmap subtitles stay disabled and explain the actual limitation', async ({ page, request }) => {
+  await nativeTracks(page, request);
+  await page.evaluate(() => {
+    Player.sessionData.source = { subtitle_codecs: ['dvd_subtitle'] };
+    Player.sessionData.decision.subtitles = []; Player.sessionData.subtitle_urls = [];
+  });
+  await page.locator('#btnSettings').click();
+  await expect(page.locator('#playerSettingsContent .disabled')).toContainText('此播放路径暂不支持 DVD 位图字幕');
+  await expect(page.locator('#playerSettingsContent')).not.toContainText('无可用字幕');
+  await page.locator('#playerBack').click();
 });

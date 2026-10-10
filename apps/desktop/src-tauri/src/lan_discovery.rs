@@ -186,9 +186,10 @@ pub async fn discover_servers() -> Result<Vec<Value>, String> {
         let permits = permits.clone();
         tasks.spawn(async move {
         let _permit=permits.acquire_owned().await.ok()?;
-        let response=client.get(format!("{url}/api/v1/health")).send().await.ok()?;
+        let mut response=client.get(format!("{url}/api/v1/health")).send().await.ok()?;
         if !response.status().is_success() {return None;}
-        let bytes=response.bytes().await.ok()?;if bytes.len()>16*1024 {return None;}
+        let mut bytes=Vec::new();
+        while let Some(chunk)=response.chunk().await.ok()? { if bytes.len()+chunk.len()>16*1024 {return None;} bytes.extend_from_slice(&chunk); }
         let health:Value=serde_json::from_slice(&bytes).ok()?;
         if health["status"]!="ok" {return None;}
         Some(json!({"name":name,"url":url,"version":health.get("version").cloned().unwrap_or(Value::Null)}))

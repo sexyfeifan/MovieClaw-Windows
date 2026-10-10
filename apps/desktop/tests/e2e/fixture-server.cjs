@@ -5,13 +5,18 @@ const path = require('node:path');
 const ui = path.resolve(__dirname, '../../ui');
 const csp = Object.entries(require('../../src-tauri/tauri.conf.json').app.security.csp)
   .map(([directive, values]) => `${directive} ${values}`).join('; ');
+const imageData = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
+const imageBytes = Buffer.from(imageData, 'base64');
 const ok = data => ({ code: 0, message: 'ok', data });
 let state;
 const reset = options => state = { authenticated: true, initialized: true, requests: [], created: [], stopped: [], ...options };
 reset({});
 const item = n => ({ media_item_id: n, library_id: 1, kind: n === 3 ? 'tv' : 'movie',
   title: n === 3 ? '第三季续播' : `影片 ${String(n).padStart(3, '0')}`, year: 2025,
-  poster_url: null, backdrop_url: null, file_count: 1, total_size_bytes: 1024,
+  poster_url: state.images ? '/fixture-images/protected.png' : null,
+  backdrop_url: state.images ? '/fixture-images/good.png' : null,
+  logo_url: state.images ? '/fixture-images/missing-logo.png' : null,
+  file_count: 1, total_size_bytes: 1024,
   seasons: n === 3 ? [1, 2, 3] : [], episode_count: n === 3 ? 9 : 0, resolutions: ['1080p'], missing_count: 0 });
 const file = n => ({ id: n, file_id: n, state: 'in_place', container: 'mkv', video_codec: 'hevc',
   duration_ms: 3600000, size_bytes: 1024, resolution: '1080p', audio_streams: [], subtitle_streams: [],
@@ -36,6 +41,59 @@ http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
     if (url.pathname === '/__test/reset') { reset(await bodyOf(req) || {}); return json(res, { ok: true }); }
     if (url.pathname === '/__test/state') return json(res, state);
+    if (url.pathname === '/__test/image') {
+      const imagePath = url.searchParams.get('path');
+      state.imageRequests ||= []; state.imageRequests.push(imagePath);
+      if (!state.images || imagePath !== '/api/v1/fixture-images/protected.png') return json(res, {}, 404);
+      res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('data:image/png;base64,' + imageData);
+    }
+    if (url.pathname.startsWith('/api/v1/fixture-images/')) {
+      if (state.images && url.pathname.endsWith('/good.png')) {
+        res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': imageBytes.length }); return res.end(imageBytes);
+      }
+      return json(res, {}, url.pathname.endsWith('/protected.png') ? 401 : 404);
+    }
+    if (url.pathname === '/__test/update/start') {
+      const args = await bodyOf(req); state.updateDownloads ||= {};
+      const downloadId = 'fixture-update-' + (Object.keys(state.updateDownloads).length + 1);
+      state.updateDownloads[downloadId] = { version: args.version, cancelled: false, completed: false, settled: false };
+      return json(res, { downloadId, total: 10240 });
+    }
+    if (url.pathname === '/__test/update') {
+      const { command, args, fixtureDownloadId } = await bodyOf(req);
+      state.updateRequests ||= []; state.updateRequests.push({ command, args });
+      if (command === 'check_for_updates') {
+        if (state.updateCheckFailure) return json(res, { code: 'UPDATE_NETWORK', message: '更新服务暂不可用' }, 503);
+        return json(res, { has_update: true, current_version: '0.2.111', latest_version: 'desktop-v0.2.112',
+          message: '发现新版本 desktop-v0.2.112', release_notes: state.updateNotes || '修复播放与账号体验。' });
+      }
+      if (command === 'download_update') {
+        const entry = state.updateDownloads?.[fixtureDownloadId];
+        const delay = state.updateDelays?.shift() ?? state.updateDelay ?? 20;
+        if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+        if (entry) entry.settled = true;
+        if (!entry || entry.cancelled) return json(res, { code: 'DOWNLOAD_CANCELLED', message: '下载已取消' }, 409);
+        if (state.updateDownloadFailure) return json(res, { code: 'HASH_MISMATCH', message: 'SHA-256 不匹配，安装包已删除' }, 422);
+        entry.completed = true;
+        return json(res, { downloadId: fixtureDownloadId, version: entry.version, size: 10240, sha256: 'a'.repeat(64),
+          signature: state.updateSignature || 'valid', signer: state.updateSignature === 'unsigned' ? null : 'CN=MovieClaw Fixture',
+          format: state.updateFormat || 'nsis', filename: state.updateFormat === 'portable' ? 'MovieClaw-portable-x64.zip' : 'MovieClaw-Setup-x64.exe' });
+      }
+      if (command === 'cancel_update_download') {
+        const entry = state.updateDownloads?.[args.downloadId]; if (entry) entry.cancelled = true;
+        return json(res, !!entry);
+      }
+      if (command === 'install_downloaded_update') {
+        const entry = state.updateDownloads?.[args.downloadId];
+        if (!entry?.completed || entry.cancelled) return json(res, { code: 'PACKAGE_MISSING', message: '没有可安装的更新' }, 409);
+        if (state.updateSignature === 'unsigned' && !args.allowUnsigned) return json(res, { code: 'UNSIGNED_PACKAGE', message: '未签名安装包需要明确确认' }, 403);
+        if (state.updateFormat === 'portable') return json(res, { code: 'PORTABLE_PACKAGE', message: '便携版需要手动安装' }, 409);
+        return json(res, { installing: true });
+      }
+      if (command === 'open_release_page') return json(res, true);
+      if (command === 'open_downloaded_update') return json(res, !!state.updateDownloads?.[args.downloadId]?.completed);
+      return json(res, { code: 'UNKNOWN_UPDATE_COMMAND', message: 'Unknown update fixture command' }, 404);
+    }
     if (url.pathname === '/__test/native') {
       const { command, args } = await bodyOf(req);
       state.nativeRequests ||= []; state.nativeRequests.push({ command, username: args.username, pairingId: args.pairingId });
@@ -148,13 +206,13 @@ http.createServer(async (req, res) => {
     if (route === '/playback/resume') return json(res, ok({ season_number: 3, episode_number: 2, position_ms: 300000, duration_ms: 3600000 }));
     if (/^\/libraries\/1\/items\/\d+$/.test(route)) {
       const n = Number(route.split('/').pop());
-      return json(res, ok({ ...item(n), files: [file(n)], local_meta: { plot: '测试简介', genres: [], runtime_minutes: 60, actors: [{ name: '测试演员', tmdb_person_id: 9 }] }, collections: [] }));
+      return json(res, ok({ ...item(n), files: [file(n)], local_meta: { plot: '测试简介', genres: [], runtime_minutes: 60, actors: [{ name: '测试演员', tmdb_person_id: 9, thumb_url: state.images ? '/fixture-images/good.png' : null }] }, collections: [] }));
     }
     if (route.endsWith('/episodes')) {
       const season = Number(url.searchParams.get('season_number') || 3);
       return json(res, ok({ season_number: season, resume_episode: state.longSeason ? 1051 : 2, episodes: Array.from({ length: state.longSeason ? 1101 : 3 }, (_, i) => i + 1).map(n => ({ season_number: season, episode_number: n, name: `第 ${n} 集`, title: `第 ${n} 集`, owned: n !== (state.longSeason ? 1052 : 0), played: state.marks?.[`3:${season}:${n}`]?.played ?? n === 1, files: [file(3)], duration_ms: 3600000 })) }));
     }
-    if (route === '/people/9') return json(res, ok({ name: '测试演员', credits: [{ ...item(3), department: 'cast', character: '演员', library_id: 1 }] }));
+    if (route === '/people/9') return json(res, ok({ name: '测试演员', profile_url: state.images ? '/fixture-images/good.png' : null, credits: [{ ...item(3), department: 'cast', character: '演员', library_id: 1 }] }));
     if (route === '/playback/sessions' && req.method === 'POST') {
       if (!body?.media_item_id || !body?.capability || body.capability.quality_tier != null) return json(res, { message: 'invalid playback contract' }, 422);
       const result = session(body);

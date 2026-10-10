@@ -2,7 +2,7 @@ param([string]$OutputPath = (Join-Path $PSScriptRoot '..\dist\smoke-environment.
 $ErrorActionPreference = 'Stop'
 $os = Get-CimInstance Win32_OperatingSystem
 $cpus = @(Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors)
-$gpus = @(Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion)
+$gpus = @(Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion, CurrentHorizontalResolution, CurrentVerticalResolution)
 $webviews = @()
 foreach ($root in @('HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients', 'HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients')) {
     if (Test-Path $root) {
@@ -26,6 +26,7 @@ $environment = [ordered]@{
         rustc = ((& rustc --version) | Out-String).Trim()
         cargo = ((& cargo --version) | Out-String).Trim()
         node = ((& node --version) | Out-String).Trim()
+        python = ((& python --version) | Out-String).Trim()
     }
     mpv = @{ manifestVersion = $manifest.version; archiveSha256 = $manifest.sha256; vulkanLoaderVersion = $manifest.vulkanLoader.version; vulkanLoaderSha256 = $manifest.vulkanLoader.binarySha256 }
     webview2 = @{ registryVersions = $webviews }

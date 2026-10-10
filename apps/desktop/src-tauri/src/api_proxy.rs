@@ -10,11 +10,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-// Credentials belong to one complete origin, including its port. Legacy global
+// Credentials belong to one configured server base URL, including path and port. Legacy global
 // cookies cannot safely be assigned to a server and are deliberately not imported.
 type CookieStore = HashMap<String, HashMap<String, SavedCookie>>;
 static COOKIES: LazyLock<Mutex<CookieStore>> = LazyLock::new(|| Mutex::new(load_cookies()));
-static REQUESTS: LazyLock<Mutex<HashMap<String, CancellationToken>>> =
+struct PendingRequest {
+    cancellation: CancellationToken,
+    generation: u64,
+}
+static REQUESTS: LazyLock<Mutex<HashMap<String, PendingRequest>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 static CLIENT: LazyLock<Client> = LazyLock::new(|| {
@@ -75,8 +79,11 @@ fn save_cookies(store: &CookieStore) -> Result<(), String> {
     std::fs::rename(temp, path).map_err(|e| format!("保存登录状态失败: {e}"))
 }
 
-fn cookie_header_from(store: &CookieStore, url: &Url) -> Option<String> {
-    let jar = store.get(&url.origin().ascii_serialization())?;
+fn cookie_header_for(store: &CookieStore, base: &Url, url: &Url) -> Option<String> {
+    if !crate::connect::url_in_server_scope(base, url) {
+        return None;
+    }
+    let jar = store.get(&crate::connect::server_namespace(base))?;
     let mut values: Vec<_> = jar
         .iter()
         .filter(|(_, c)| {
@@ -98,8 +105,61 @@ fn cookie_header_from(store: &CookieStore, url: &Url) -> Option<String> {
     }
 }
 
-pub(crate) fn cookie_header(url: &Url) -> Option<String> {
-    cookie_header_from(&COOKIES.lock().unwrap(), url)
+fn cookie_header(base: &Url, url: &Url) -> Option<String> {
+    cookie_header_for(&COOKIES.lock().unwrap(), base, url)
+}
+#[cfg(test)]
+fn cookie_header_from(store: &CookieStore, url: &Url) -> Option<String> {
+    cookie_header_for(
+        store,
+        &Url::parse(&url.origin().ascii_serialization()).unwrap(),
+        url,
+    )
+}
+#[cfg(test)]
+pub(crate) fn test_cookie_header(url: &Url) -> Option<String> {
+    cookie_header(
+        &Url::parse(&url.origin().ascii_serialization()).unwrap(),
+        url,
+    )
+}
+#[derive(Clone, Default)]
+pub(crate) struct CookieSnapshot {
+    store: CookieStore,
+    base: Option<Url>,
+}
+impl CookieSnapshot {
+    pub(crate) fn header(&self, url: &Url) -> Option<String> {
+        cookie_header_for(&self.store, self.base.as_ref()?, url)
+    }
+    #[cfg(test)]
+    pub(crate) fn test_cookie(url: &Url, name: &str, value: &str, path: &str) -> Self {
+        Self {
+            base: Some(Url::parse(&url.origin().ascii_serialization()).unwrap()),
+            store: HashMap::from([(
+                url.origin().ascii_serialization(),
+                HashMap::from([(
+                    name.into(),
+                    SavedCookie {
+                        value: value.into(),
+                        path: path.into(),
+                        secure: false,
+                        expires_at: None,
+                    },
+                )]),
+            )]),
+        }
+    }
+}
+pub(crate) fn cookie_snapshot(base: &Url) -> CookieSnapshot {
+    let name = crate::connect::server_namespace(base);
+    let jar = COOKIES.lock().unwrap().get(&name).cloned();
+    CookieSnapshot {
+        base: Some(base.clone()),
+        store: jar
+            .map(|jar| HashMap::from([(name, jar)]))
+            .unwrap_or_default(),
+    }
 }
 
 fn cookie_domain_matches(host: &str, domain: &str) -> bool {
@@ -110,7 +170,7 @@ fn cookie_domain_matches(host: &str, domain: &str) -> bool {
             || (host.parse::<std::net::IpAddr>().is_err() && host.ends_with(&format!(".{domain}"))))
 }
 
-fn capture_cookies(resp: &reqwest::Response, url: &Url) -> Result<(), String> {
+fn capture_cookies(resp: &reqwest::Response, base: &Url, url: &Url) -> Result<(), String> {
     let mut store = COOKIES.lock().unwrap();
     let mut changed = false;
     for val in resp.headers().get_all(header::SET_COOKIE) {
@@ -131,7 +191,9 @@ fn capture_cookies(resp: &reqwest::Response, url: &Url) -> Result<(), String> {
             .max_age()
             .map(|age| now_seconds() + age.whole_seconds())
             .or_else(|| parsed.expires_datetime().map(|date| date.unix_timestamp()));
-        let jar = store.entry(url.origin().ascii_serialization()).or_default();
+        let jar = store
+            .entry(crate::connect::server_namespace(base))
+            .or_default();
         if parsed.value().is_empty() || expires_at.is_some_and(|expiry| expiry <= now_seconds()) {
             jar.remove(parsed.name());
         } else {
@@ -162,6 +224,7 @@ impl Drop for RequestRegistration {
 
 fn register_request(
     request_id: Option<String>,
+    generation: u64,
 ) -> Result<(RequestRegistration, CancellationToken), String> {
     let id = request_id
         .unwrap_or_else(|| format!("rust-{}", NEXT_REQUEST.fetch_add(1, Ordering::Relaxed)));
@@ -173,15 +236,21 @@ fn register_request(
     if requests.contains_key(&id) {
         return Err("请求标识正在使用".into());
     }
-    requests.insert(id.clone(), token.clone());
+    requests.insert(
+        id.clone(),
+        PendingRequest {
+            cancellation: token.clone(),
+            generation,
+        },
+    );
     Ok((RequestRegistration(id), token))
 }
 
 #[tauri::command]
 pub fn cancel_proxy_request(request_id: String) -> bool {
     let requests = REQUESTS.lock().unwrap();
-    if let Some(token) = requests.get(&request_id) {
-        token.cancel();
+    if let Some(request) = requests.get(&request_id) {
+        request.cancellation.cancel();
         true
     } else {
         false
@@ -189,8 +258,18 @@ pub fn cancel_proxy_request(request_id: String) -> bool {
 }
 
 pub fn cancel_all_requests() {
-    for token in REQUESTS.lock().unwrap().values() {
-        token.cancel();
+    for request in REQUESTS.lock().unwrap().values() {
+        request.cancellation.cancel();
+    }
+}
+pub(crate) fn cancel_requests_before(epoch: u64) {
+    for request in REQUESTS
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|request| request.generation < epoch)
+    {
+        request.cancellation.cancel();
     }
 }
 
@@ -252,24 +331,25 @@ pub async fn proxy_api(
     headers: Option<HashMap<String, String>>,
     request_id: Option<String>,
 ) -> Result<ProxyResponse, String> {
-    let server = crate::connect::load_server_url()?;
-    if server.is_empty() {
-        return Err("未配置服务器地址".into());
-    }
-    let origin = crate::connect::validate_http_url(&server)?.origin();
+    let context = crate::native_auth::load_context()?;
+    let server = &context.server;
+    let base = crate::connect::validate_http_url(&server)?;
     let (url, kind) = resolve_request(&server, &path)?;
     let username = url
         .query_pairs()
         .find(|(name, _)| name == "mc_account")
         .map(|(_, value)| value.into_owned());
     let identity = crate::native_auth::identity(&server, username.as_deref())?;
-    let (_registration, cancellation) = register_request(request_id)?;
+    let (_registration, cancellation) = crate::native_auth::with_current(&context, || {
+        register_request(request_id, context.generation)
+    })?;
     tokio::select! {
         biased;
         _ = cancellation.cancelled() => Err("请求已取消".into()),
+        _ = context.cancellation.cancelled() => Err("服务器或账号已更改".into()),
         result = tokio::time::timeout(
             Duration::from_secs(if matches!(kind, ResponseKind::Api) { 30 } else { 90 }),
-            fetch(&CLIENT, url, origin, method, body, headers.unwrap_or_default(), kind, identity)
+            fetch(&CLIENT, url, base, method, body, headers.unwrap_or_default(), kind, identity, Some(context.generation))
         ) => result.map_err(|_| "请求超时".to_owned())?,
     }
 }
@@ -277,30 +357,32 @@ pub async fn proxy_api(
 pub(crate) async fn cookie_api(
     server: &str,
     context_cancellation: &CancellationToken,
+    context_generation: u64,
     method: &str,
     path: &str,
     body: Option<String>,
 ) -> Result<ProxyResponse, String> {
-    let origin = crate::connect::validate_http_url(server)?.origin();
+    let base = crate::connect::validate_http_url(server)?;
     let (url, kind) = resolve_request(server, path)?;
-    let (_registration, cancellation) = register_request(None)?;
+    let (_registration, cancellation) = register_request(None, context_generation)?;
     tokio::select! {
         biased;
         _ = cancellation.cancelled() => Err("请求已取消".into()),
         _ = context_cancellation.cancelled() => Err("服务器或账号已更改".into()),
-        result = tokio::time::timeout(Duration::from_secs(30), fetch(&CLIENT, url, origin, method.to_owned(), body, HashMap::new(), kind, None)) => result.map_err(|_| "请求超时".to_owned())?,
+        result = tokio::time::timeout(Duration::from_secs(30), fetch(&CLIENT, url, base, method.to_owned(), body, HashMap::new(), kind, None, Some(context_generation))) => result.map_err(|_| "请求超时".to_owned())?,
     }
 }
 
 async fn fetch(
     client: &Client,
     mut url: Url,
-    credential_origin: url::Origin,
+    credential_base: Url,
     method: String,
     body: Option<String>,
     headers: HashMap<String, String>,
     kind: ResponseKind,
     identity: Option<crate::native_auth::Identity>,
+    context_generation: Option<u64>,
 ) -> Result<ProxyResponse, String> {
     let mut method = Method::from_bytes(method.as_bytes()).map_err(|_| "无效的请求方法")?;
     if !matches!(
@@ -345,11 +427,26 @@ async fn fetch(
             }
             req = req.header(name, value);
         }
-        if url.origin() == credential_origin {
+        if crate::connect::url_in_server_scope(&credential_base, &url) {
             if let Some(identity) = &identity {
                 req = req.bearer_auth(&identity.token);
-            } else if let Some(value) = cookie_header(&url) {
-                req = req.header(header::COOKIE, value);
+            } else {
+                let value = if let Some(epoch) = context_generation {
+                    crate::native_auth::with_generation(epoch, || {
+                        Ok(
+                            if crate::native_auth::cookie_credentials_allowed(&credential_base) {
+                                cookie_header(&credential_base, &url)
+                            } else {
+                                None
+                            },
+                        )
+                    })?
+                } else {
+                    cookie_header(&credential_base, &url)
+                };
+                if let Some(value) = value {
+                    req = req.header(header::COOKIE, value);
+                }
             }
         }
         if let Some(value) = &body {
@@ -359,13 +456,19 @@ async fn fetch(
         }
         let mut response = req.send().await.map_err(|e| format!("请求失败: {e}"))?;
         let status = response.status().as_u16();
-        if status == 401 && url.origin() == credential_origin {
+        if status == 401 && crate::connect::url_in_server_scope(&credential_base, &url) {
             if let Some(identity) = &identity {
                 crate::native_auth::invalidate(identity);
             }
         }
-        if url.origin() == credential_origin {
-            capture_cookies(&response, &url)?;
+        if crate::connect::url_in_server_scope(&credential_base, &url) {
+            if let Some(epoch) = context_generation {
+                crate::native_auth::with_generation(epoch, || {
+                    capture_cookies(&response, &credential_base, &url)
+                })?;
+            } else {
+                capture_cookies(&response, &credential_base, &url)?;
+            }
         }
         if matches!(status, 301 | 302 | 303 | 307 | 308) {
             if let Some(location) = response
@@ -378,7 +481,7 @@ async fn fetch(
                 }
                 let next = url.join(location).map_err(|_| "无效的重定向地址")?;
                 crate::connect::validate_http_url(next.as_str())?;
-                if next.origin() != credential_origin
+                if !crate::connect::url_in_server_scope(&credential_base, &next)
                     && !matches!(method, Method::GET | Method::HEAD)
                 {
                     return Err("拒绝向另一服务器重定向请求正文".into());
@@ -534,17 +637,18 @@ mod tests {
         let result = fetch(
             &CLIENT,
             url.clone(),
-            url.origin(),
+            Url::parse(&url.origin().ascii_serialization()).unwrap(),
             "GET".into(),
             None,
             HashMap::new(),
             ResponseKind::Api,
             None,
+            None,
         )
         .await
         .unwrap();
         assert!(!result.headers.contains_key("set-cookie"));
-        let header = cookie_header(&url).unwrap();
+        let header = test_cookie_header(&url).unwrap();
         assert!(header.contains("mc_accounts_bag=bag-value"));
         assert!(header.contains("mc_active_account=active-value"));
         COOKIES
@@ -555,16 +659,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn independent_server_prefix_cookie_jars_and_redirects_are_isolated() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let a = Url::parse(&format!("{host}/a")).unwrap();
+        let b = Url::parse(&format!("{host}/b")).unwrap();
+        let handler = std::thread::spawn(move || {
+            for (path, cookie, reply) in [
+                (
+                    "/a/login",
+                    false,
+                    "HTTP/1.1 200 OK\r\nSet-Cookie: private=a-cookie; Path=/; HttpOnly\r\n",
+                ),
+                ("/b/me", false, "HTTP/1.1 200 OK\r\n"),
+                (
+                    "/a/media",
+                    true,
+                    "HTTP/1.1 302 Found\r\nLocation: /b/media\r\n",
+                ),
+                ("/b/media", false, "HTTP/1.1 200 OK\r\n"),
+            ] {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut bytes = [0; 4096];
+                let count = socket.read(&mut bytes).unwrap();
+                let text = String::from_utf8_lossy(&bytes[..count]).to_ascii_lowercase();
+                assert_eq!(
+                    text.lines().next().unwrap().split_whitespace().nth(1),
+                    Some(path)
+                );
+                assert_eq!(text.contains("cookie: private=a-cookie"), cookie);
+                socket
+                    .write_all(
+                        format!("{reply}Content-Length: 2\r\nConnection: close\r\n\r\nok")
+                            .as_bytes(),
+                    )
+                    .unwrap();
+            }
+        });
+        for (target, base) in [
+            (format!("{host}/a/login"), a.clone()),
+            (format!("{host}/b/me"), b.clone()),
+            (format!("{host}/a/media"), a.clone()),
+        ] {
+            fetch(
+                &CLIENT,
+                Url::parse(&target).unwrap(),
+                base,
+                "GET".into(),
+                None,
+                HashMap::new(),
+                ResponseKind::Api,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        let snapshot = cookie_snapshot(&a);
+        assert!(snapshot
+            .header(&Url::parse(&format!("{host}/a/media")).unwrap())
+            .is_some());
+        assert!(snapshot
+            .header(&Url::parse(&format!("{host}/b/media")).unwrap())
+            .is_none());
+        assert!(snapshot
+            .header(&Url::parse(&format!("{host}/a2/media")).unwrap())
+            .is_none());
+        COOKIES
+            .lock()
+            .unwrap()
+            .remove(&crate::connect::server_namespace(&a));
+        tokio::task::spawn_blocking(move || handler.join().unwrap())
+            .await
+            .unwrap();
+    }
+    #[tokio::test]
     async fn range_206_and_server_timing_survive_the_proxy() {
         let (url, handle) = local_server("HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Length: 3\r\nContent-Range: bytes 10-12/100\r\nServer-Timing: prep;dur=3\r\nConnection: close\r\n\r\nabc");
         let result = fetch(
             &CLIENT,
             url.clone(),
-            url.origin(),
+            Url::parse(&url.origin().ascii_serialization()).unwrap(),
             "GET".into(),
             None,
             HashMap::from([("Range".into(), "bytes=10-12".into())]),
             ResponseKind::Stream,
+            None,
             None,
         )
         .await
@@ -611,11 +794,12 @@ mod tests {
         fetch(
             &CLIENT,
             own.clone(),
-            own.origin(),
+            own.clone(),
             "GET".into(),
             None,
             HashMap::new(),
             ResponseKind::Api,
+            None,
             None,
         )
         .await
@@ -658,12 +842,12 @@ mod tests {
                 _ => false,
             }
         });
-        let (registration, token) = register_request(Some("cancel-test".into())).unwrap();
+        let (registration, token) = register_request(Some("cancel-test".into()), u64::MAX).unwrap();
         let task = tokio::spawn(async move {
             let _registration = registration;
             tokio::select! {
                 _ = token.cancelled() => Err("cancelled".to_owned()),
-                result = fetch(&CLIENT, url.clone(), url.origin(), "GET".into(), None, HashMap::new(), ResponseKind::Api, None) => result,
+                result = fetch(&CLIENT, url.clone(), Url::parse(&url.origin().ascii_serialization()).unwrap(), "GET".into(), None, HashMap::new(), ResponseKind::Api, None, None) => result,
             }
         });
         started_rx.await.unwrap();

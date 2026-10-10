@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "repository": "movieclaw/MovieClaw",
+  "revision": "9139a638a391ed91bcb2d48940b6e8d595de5a56",
+  "components": {
+    "macOS UI": ["apps/apple/MovieClawMac/", "apps/apple/MovieClawMacTests/"],
+    "shared UI and playback": ["apps/apple/Shared/", "apps/apple/AetherCore/"],
+    "API and media contracts": ["src/movieclaw_api/", "src/movieclaw_playback/"],
+    "Apple build configuration": ["apps/apple/project.yml", "apps/apple/MovieClaw.xcodeproj/"]
+  }
+}

@@ -11,7 +11,6 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-http = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-ureq = { version = "2", features = ["json"] }
 url = "2"
 open = "5"
 raw-window-handle = "0.6"
@@ -23,7 +22,7 @@ cookie = "0.18"
 sha2 = "0.10.9"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62.2", features = ["Foundation", "Media", "Storage_Streams", "Win32_System_WinRT", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
+windows = { version = "0.62.2", features = ["Foundation", "Media", "Storage_Streams", "Win32_Foundation", "Win32_System_Power", "Win32_System_WinRT", "Win32_UI_WindowsAndMessaging", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

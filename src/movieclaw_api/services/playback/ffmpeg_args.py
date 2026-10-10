@@ -560,6 +560,8 @@ def build_hls_command(
                 argv += [f"-{key}", value]
     if input_format == "concat":
         # -safe 0：清单里是绝对路径（默认的 safe 模式只认相对路径）
+        if not output_base_url:
+            argv += ["-protocol_whitelist", "file,subfile,concat"]
         argv += ["-f", "concat", "-safe", "0"]
     argv += ["-i", source_path]
 

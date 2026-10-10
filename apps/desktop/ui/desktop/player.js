@@ -201,9 +201,9 @@ function trickplayTile(index, fileMs) {
 // 不用 canPlayType（分不清「能解」和「能流畅解」），走 mediaCapabilities.decodingInfo：
 // 探测喂 RFC 6381 全串，上报归一到家族名（服务端与 ffprobe 落库的 codec_name 比对）。
 // video/audio 报空数组 = 告诉服务端「浏览器什么都不支持」→ 所有影片全量转码，起播慢。
-// v2：hdr_passthrough 改为恒 true（Chromium 自行 tone-map），v1 缓存里
-// matchMedia 判出的 false 会让服务端拒绝 HDR 影片，必须作废
-const CAPABILITY_SCHEMA_VERSION = 2;
+// Browser codec decoding support does not prove HDR rendering or display output.
+// Until the whole HDR path is measured, request server SDR output for HTML5.
+const CAPABILITY_SCHEMA_VERSION = 3;
 const CAPABILITY_CACHE_KEY = 'movieclaw.desktop.capability';
 // 4K 一档特意用 Main 10 / 高 profile：真实 4K 片源几乎都是 10bit/高码率，用 1080p 串探出来的结论对不上
 const CAPABILITY_VIDEO_MATRIX = {
@@ -290,9 +290,8 @@ async function getCapabilitySnapshot() {
     if (mseAvailable || nativeHls) containers.push('hls-fmp4');
     const snapshot = {
       video, audio, containers,
-      // 恒报 true：Chromium 自己会把 HDR tone-map 到 SDR 屏（与 macOS 自研引擎
-      // 同策略）。报 false 会让服务端接管 tone-map——服务器无 GPU 时直接拒绝播放
-      hdr_passthrough: true,
+      // false asks the server to tone-map HDR into SDR; codec probes above remain independent.
+      hdr_passthrough: false,
       mse, is_mobile: false, native_hls: nativeHls,
     };
     try {
@@ -319,6 +318,8 @@ function getUniversalCapabilitySnapshot() {
     audio: ['aac', 'ac3', 'eac3', 'dts', 'flac', 'alac', 'opus', 'mp3']
       .map(codec => ({ codec, max_channels: 8 })),
     containers: ['mp4', 'hls-fmp4', 'mkv', 'webm', 'ts', 'm2ts', 'avi'],
+    // This protocol flag permits HDR source bytes. mpv gpu-next maps them to its target;
+    // it does not claim the attached monitor is HDR. Actual target is observed below.
     hdr_passthrough: true,
     mse: 'full', is_mobile: false, native_hls: false,
     universal: true, disc_image: false, disc_folder: false,
@@ -752,7 +753,7 @@ const Player = {
           }
           // Esc 阶梯（同 macOS escape()）：收起面板 → 退出全屏 → 关闭播放器
           if (this.closeAnyPanel()) { e.preventDefault(); break; }
-          if (document.fullscreenElement) { e.preventDefault(); this.toggleFullscreen(); break; }
+          if (this.isFullscreen()) { e.preventDefault(); this.toggleFullscreen(); break; }
           this.close();
           break;
       }
@@ -1029,7 +1030,9 @@ const Player = {
       perfLine = [out.w && out.h ? `输出 ${out.w}×${out.h}` : null,
         `实际解码 ${hw === 'no' ? '软件' : hw}`, `掉帧 ${(Number(native['frame-drop-count']) || 0) + (Number(native['decoder-frame-drop-count']) || 0)}`,
         this.context?.__hardwareDecode !== false && hw === 'no' ? '硬解未启用或已回退' : null,
-        out.primaries || null, out.gamma || null].filter(Boolean).join(' · ');
+        `渲染目标 ${[native['video-target-params']?.primaries, native['video-target-params']?.gamma].filter(Boolean).join(' / ') || '未知'}`,
+        this.sessionData?.source?.hdr && native['video-target-params']?.gamma && !['pq', 'hlg'].includes(native['video-target-params'].gamma) ? 'HDR 转 SDR' : null,
+        '显示器最终输出需实测'].filter(Boolean).join(' · ');
       dropAlert = this.context?.__hardwareDecode !== false && hw === 'no';
     }
 
@@ -1193,6 +1196,10 @@ const Player = {
         displayTitle: this.subtitleDisplayTitle(p), detail: this.subtitleDetail(p),
       });
     });
+    const sourceCodecs = this.sessionData?.source?.subtitle_codecs || [];
+    if (sourceCodecs.some(codec => ['dvd_subtitle', 'vobsub'].includes(String(codec).toLowerCase()))) {
+      unavailable.push({ index: null, ref: null, label: 'DVD 位图字幕', reason: '此播放路径暂不支持 DVD 位图字幕，可使用外挂文本字幕' });
+    }
     return { options, unavailable };
   },
 
@@ -1236,7 +1243,7 @@ const Player = {
       const currentOffset = this.subtitleOffset || 0;
       const sel = this.selectedSubtitle;
       let html = `
-        <div class="player-settings-item ${sel === null ? 'active' : ''}" data-sub-index="-1" onclick="Player.selectSubtitle(-1)">
+        <div class="player-settings-item ${sel === null ? 'active' : ''}" data-sub-index="-1" data-player-action="subtitle">
           <span class="item-label">关闭字幕</span>
           ${check}
         </div>
@@ -1244,7 +1251,7 @@ const Player = {
       for (const g of this.subtitleGroups(options)) {
         html += `<div class="player-settings-group">${g.title}</div>`;
         html += g.options.map((o) => `
-          <div class="player-settings-item stacked ${sel === o.index ? 'active' : ''}" data-sub-index="${o.index}" onclick="Player.selectSubtitle(${o.index})">
+          <div class="player-settings-item stacked ${sel === o.index ? 'active' : ''}" data-sub-index="${o.index}" data-player-action="subtitle">
             <div class="item-text">
               <span class="item-label">${playerText(o.displayTitle)}</span>
               <span class="item-info">${playerText(o.detail)}</span>
@@ -1273,16 +1280,16 @@ const Player = {
         <div class="player-settings-item" style="cursor:default">
           <span class="item-label">字幕延迟</span>
           <div class="subtitle-offset-controls">
-            <button class="offset-btn" ${decision.video?.burn_subtitle ? 'disabled' : ''} onclick="Player.adjustSubtitleOffset(-0.5)">-0.5s</button>
+            <button class="offset-btn" ${decision.video?.burn_subtitle ? 'disabled' : ''} data-player-action="offset" data-offset="-0.5">-0.5s</button>
             <span class="offset-value" id="subOffsetValue">${currentOffset > 0 ? '+' : ''}${currentOffset.toFixed(1)}s</span>
-            <button class="offset-btn" ${decision.video?.burn_subtitle ? 'disabled' : ''} onclick="Player.adjustSubtitleOffset(0.5)">+0.5s</button>
+            <button class="offset-btn" ${decision.video?.burn_subtitle ? 'disabled' : ''} data-player-action="offset" data-offset="0.5">+0.5s</button>
           </div>
         </div>
       `;
       html += `<div class="player-settings-item"><span class="item-label">字幕大小</span><div class="subtitle-offset-controls">
-        <button class="offset-btn" ${decision.video?.burn_subtitle ? 'disabled' : ''} onclick="Player.adjustSubtitleScale(-0.1)">−</button>
+        <button class="offset-btn" ${decision.video?.burn_subtitle ? 'disabled' : ''} data-player-action="scale" data-scale="-0.1">−</button>
         <span>${Math.round(this.subtitleFontScale * 100)}%</span>
-        <button class="offset-btn" ${decision.video?.burn_subtitle ? 'disabled' : ''} onclick="Player.adjustSubtitleScale(0.1)">+</button></div></div>`;
+        <button class="offset-btn" ${decision.video?.burn_subtitle ? 'disabled' : ''} data-player-action="scale" data-scale="0.1">+</button></div></div>`;
       if (decision.video?.burn_subtitle) html += '<div class="player-settings-group">字幕已压制进画面；大小与延迟不可在播放端调整。</div>';
       content.innerHTML = html;
     }
@@ -1295,7 +1302,7 @@ const Player = {
         const detail = [parts.detail, t.is_default ? '默认' : null, t.unavailableReason].filter(Boolean).join(' · ');
         const active = t.ref === currentRef || (currentRef == null && t.is_default);
         return `
-          <div class="player-settings-item stacked ${active ? 'active' : ''}${t.unavailableReason ? ' disabled' : ''}"${t.unavailableReason ? '' : ` onclick="Player.selectAudio('${t.ref}')"`}>
+          <div class="player-settings-item stacked ${active ? 'active' : ''}${t.unavailableReason ? ' disabled' : ''}"${t.unavailableReason ? '' : ` data-player-action="audio" data-audio-ref="${playerText(t.ref)}"`}>
             <div class="item-text">
               <span class="item-label">${playerText(parts.title)}</span>
               ${detail ? `<span class="item-info">${playerText(detail)}</span>` : ''}
@@ -1314,31 +1321,31 @@ const Player = {
       const tier = decision.tier;
       const currentQuality = this.currentQuality || 0; // 0=原画
       const html = `
-        <div class="player-settings-item ${currentQuality === 0 ? 'active' : ''}" onclick="Player.selectQuality(0)">
+        <div class="player-settings-item ${currentQuality === 0 ? 'active' : ''}" data-player-action="quality" data-quality="0">
           <span class="item-label">原画</span>
           <span class="item-info">不压缩</span>
           <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
         </div>
-        <div class="player-settings-item ${currentQuality === 1080 ? 'active' : ''}" onclick="Player.selectQuality(1080)">
+        <div class="player-settings-item ${currentQuality === 1080 ? 'active' : ''}" data-player-action="quality" data-quality="1080">
           <span class="item-label">1080p</span>
           <span class="item-info">~6 Mbps</span>
           <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
         </div>
-        <div class="player-settings-item ${currentQuality === 720 ? 'active' : ''}" onclick="Player.selectQuality(720)">
+        <div class="player-settings-item ${currentQuality === 720 ? 'active' : ''}" data-player-action="quality" data-quality="720">
           <span class="item-label">720p</span>
           <span class="item-info">~3 Mbps</span>
           <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
         </div>
-        <div class="player-settings-item ${currentQuality === 480 ? 'active' : ''}" onclick="Player.selectQuality(480)">
+        <div class="player-settings-item ${currentQuality === 480 ? 'active' : ''}" data-player-action="quality" data-quality="480">
           <span class="item-label">480p</span>
           <span class="item-info">~1.5 Mbps</span>
           <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
         </div>
         <div style="padding:12px 16px;border-top:1px solid rgba(255,255,255,0.06)">
           <div style="font-size:11px;color:rgba(255,255,255,0.35);margin-bottom:8px">当前画质信息</div>
-          ${source.resolution ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:4px">源：${source.resolution} · ${source.video_codec || ''} · ${source.hdr || ''}</div>` : ''}
-          ${video.height ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:4px">输出：${video.height}p${video.action === 'copy' ? ' (直通)' : ' (转码)'}</div>` : ''}
-          ${tier != null ? `<div style="font-size:12px;color:rgba(255,255,255,0.6)">档位：${tier}</div>` : ''}
+          ${source.resolution ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:4px">源：${playerText(source.resolution)} · ${playerText(source.video_codec || '')} · ${playerText(source.hdr || '')}</div>` : ''}
+          ${video.height ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:4px">输出：${playerText(video.height)}p${video.action === 'copy' ? ' (直通)' : ' (转码)'}</div>` : ''}
+          ${tier != null ? `<div style="font-size:12px;color:rgba(255,255,255,0.6)">档位：${playerText(tier)}</div>` : ''}
           ${source.bit_rate ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-top:4px">码率：${(source.bit_rate / 1000000).toFixed(1)} Mbps</div>` : ''}
         </div>
       `;
@@ -1349,11 +1356,24 @@ const Player = {
       const speeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
       const current = this.engRate();
       content.innerHTML = speeds.map(s => `
-        <div class="player-settings-item ${s === current ? 'active' : ''}" onclick="Player.setSpeed(${s})">
+        <div class="player-settings-item ${s === current ? 'active' : ''}" data-player-action="speed" data-speed="${s}">
           <span class="item-label">${s}x${s === 1 ? ' (正常)' : ''}</span>
           <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
         </div>
       `).join('');
+    }
+    // Server metadata is text/data only. Do not embed track refs in executable attributes.
+    for (const row of content.querySelectorAll('[data-player-action]')) {
+      row.addEventListener('click', () => {
+        if (row.disabled || row.classList.contains('disabled')) return;
+        const data = row.dataset;
+        if (data.playerAction === 'audio') this.selectAudio(data.audioRef);
+        else if (data.playerAction === 'subtitle') this.selectSubtitle(Number(data.subIndex));
+        else if (data.playerAction === 'offset') this.adjustSubtitleOffset(Number(data.offset));
+        else if (data.playerAction === 'scale') this.adjustSubtitleScale(Number(data.scale));
+        else if (data.playerAction === 'quality') this.selectQuality(Number(data.quality));
+        else if (data.playerAction === 'speed') this.setSpeed(Number(data.speed));
+      });
     }
   },
 
@@ -1932,13 +1952,14 @@ const Player = {
   close(options = {}) {
     if (options.invalidate !== false && typeof App !== 'undefined') App._playbackSeq = (App._playbackSeq || 0) + 1;
     if (typeof App !== 'undefined') { App.cancelAutoNext(); clearTimeout(App._networkRetryTimer); App._networkRetryTimer = null; }
+    const nativeFullscreenRestore = options.hide !== false ? this.restoreNativeFullscreen() : Promise.resolve();
     if (!this.activeEngine && this._closePromise) {
       if (options.hide !== false) {
         const view = document.getElementById('playerView');
         if (view) view.hidden = true;
         this.hidePlayerDialog();
       }
-      return this._closePromise;
+      return boundedPlaybackWait(Promise.allSettled([this._closePromise, nativeFullscreenRestore]), 1200);
     }
     const snapshot = this.snapshot();
     const metrics = options.final !== false ? this.finishAttempt() : Promise.resolve();
@@ -1996,7 +2017,7 @@ const Player = {
     const nativeStop = wasMpv && window.__TAURI__?.core?.invoke
       ? window.__TAURI__.core.invoke('stop_embedded_player', { instanceId }).catch(() => {}) : Promise.resolve();
     this._nativeStop = nativeStop;
-    const task = boundedPlaybackWait(Promise.allSettled([stopReport, sessionStop, nativeStop, metrics]), 1200);
+    const task = boundedPlaybackWait(Promise.allSettled([stopReport, sessionStop, nativeStop, metrics, nativeFullscreenRestore]), 1200);
     this._closePromise = task;
     task.finally(() => { if (this._closePromise === task) this._closePromise = null; });
     return task;
@@ -2649,6 +2670,7 @@ const Player = {
       this.showIcon(wasPaused ? 'pause' : 'play');
       if (wasPaused) { this.hideCenterBtn(); this.autoHideControls(); }
       else { this.showCenterBtn(); this.showControls(); }
+      window.MovieClawPlatform?.update();
     } else if (this.video) {
       if (this.video.paused) this.video.play().catch(() => {});
       else this.video.pause();
@@ -2662,11 +2684,44 @@ const Player = {
     if (slider) slider.value = next ? 0 : this.engVolume();
   },
 
+  isFullscreen() {
+    return !!document.fullscreenElement || !!this._nativeFullscreen;
+  },
+
   toggleFullscreen() {
     const view = document.getElementById('playerView');
-    if (!view) return;
-    if (document.fullscreenElement) document.exitFullscreen();
-    else view.requestFullscreen().catch(() => {});
+    if (!view) return Promise.resolve();
+    if (this.isMpv() && window.__TAURI__?.window?.getCurrentWindow) {
+      const generation = this.generation;
+      const state = this._nativeFullscreenState ||= { before: undefined, active: false };
+      const task = (this._nativeFullscreenTask || Promise.resolve()).catch(() => {}).then(async () => {
+        const nativeWindow = window.__TAURI__.window.getCurrentWindow();
+        const current = await nativeWindow.isFullscreen();
+        if (state.before === undefined) state.before = current;
+        if (generation !== this.generation || this._nativeFullscreenState !== state) return;
+        const next = !current;
+        await nativeWindow.setFullscreen(next);
+        state.active = next;
+        if (this._nativeFullscreenState === state) this._nativeFullscreen = next;
+        requestAnimationFrame(() => this.syncEmbeddedPlayerRect());
+      });
+      this._nativeFullscreenTask = task;
+      return task.catch(() => { if (generation === this.generation) this.controlError('无法切换窗口全屏'); });
+    }
+    if (document.fullscreenElement) return document.exitFullscreen().catch(() => {});
+    return view.requestFullscreen().catch(() => {});
+  },
+
+  restoreNativeFullscreen() {
+    const state = this._nativeFullscreenState;
+    this._nativeFullscreenState = null;
+    this._nativeFullscreen = false;
+    if (!state || !window.__TAURI__?.window?.getCurrentWindow) return Promise.resolve();
+    const task = (this._nativeFullscreenTask || Promise.resolve()).catch(() => {}).then(async () => {
+      if (state.before !== undefined) await window.__TAURI__.window.getCurrentWindow().setFullscreen(state.before);
+    });
+    this._nativeFullscreenTask = task;
+    return task.catch(() => {});
   },
 
   togglePip() {
@@ -2825,7 +2880,9 @@ const Player = {
       network_class: 'unknown', route: q.tier === 0 ? 'remote_bypass' : 'server_transcode',
       error_category: q.error_category || '', error_kind: q.error_kind || '', error_stage: q.error_stage || '',
       outcome: q.outcome || (q.first_frame_ms != null ? 'exited' : 'exit_before_start'),
-      detail: { timeline: q.timeline, context: { hwdec: String(v['hwdec-current'] || 'unknown') } } };
+      detail: { timeline: q.timeline, context: { hwdec: String(v['hwdec-current'] || 'unknown'),
+        target_primaries: String(v['video-target-params']?.primaries || 'unknown'),
+        target_gamma: String(v['video-target-params']?.gamma || 'unknown') } } };
     if (body.outcome === 'failed') API.request('/playback/client-log', { method: 'POST', timeoutMs: 1200, cancelable: true,
       body: { event: 'playback_failure', detail: { attempt_id: q.attempt_id, client: 'windows', engine: q.engine,
         category: body.error_category, kind: body.error_kind, stage: body.error_stage, tier: q.tier } } }).catch(() => {});
@@ -2874,7 +2931,7 @@ const Player = {
     else if (action === 'enter') this._dialog?.primary?.();
     else if (action === 'previous') this.playEpisode(this.prevEpisode());
     else if (action === 'next') this.playEpisode(this.nextEpisode());
-    else if (action === 'escape') { if (this._dialog) { this._dialog.secondary?.(); return; } if (this.closeAnyPanel()) return; if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); else this.close(); }
+    else if (action === 'escape') { if (this._dialog) { this._dialog.secondary?.(); return; } if (this.closeAnyPanel()) return; if (this.isFullscreen()) this.toggleFullscreen(); else this.close(); }
   },
 
   initialSubtitle() {

@@ -408,6 +408,7 @@ pub fn launch_embedded_player(
         })
         .arg("--vo=gpu-next")
         .arg("--gpu-context=d3d11")
+        .arg("--target-colorspace-hint=auto")
         // 保留文件与 eof-reached，宿主可准确收尾并支持重新 seek。
         .arg("--keep-open=yes")
         .arg("--osd-level=0")

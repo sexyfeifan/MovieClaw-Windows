@@ -28,6 +28,7 @@ $pipe = $null
 $oldDataDir = $env:MOVIECLAW_DATA_DIR
 $oldWebviewDir = $env:WEBVIEW2_USER_DATA_FOLDER
 $oldDiagnostics = $env:MOVIECLAW_DIAGNOSTICS
+$oldPlatformSmoke = $env:MOVIECLAW_PLATFORM_SMOKE
 . (Join-Path $PSScriptRoot 'native-process.ps1')
 try {
     & (Join-Path $PSScriptRoot 'mpv-preflight.ps1') -RuntimeDirectory $runtime
@@ -102,6 +103,7 @@ public static class MovieClawSmokeWindow {
         $env:MOVIECLAW_DATA_DIR = Join-Path $temp "data-$Label"
         $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $temp "webview2-$Label"
         $env:MOVIECLAW_DIAGNOSTICS = '1'
+        $env:MOVIECLAW_PLATFORM_SMOKE = '1'
         $measurement = @{ status = 'starting' }
         $environment.nativeSmoke[$Label] = $measurement
         $startupTimer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -129,7 +131,7 @@ public static class MovieClawSmokeWindow {
             Start-Sleep -Milliseconds 100
         }
         if (-not $webviewFound) { throw 'WebView2 browser process did not start' }
-        $measurement.startupSeconds = [Math]::Round($startupTimer.Elapsed.TotalSeconds, 3)
+        $measurement.windowSeconds = [Math]::Round($startupTimer.Elapsed.TotalSeconds, 3)
         $webviewExecutable = $children[0].ExecutablePath
         if ($webviewExecutable -and (Test-Path $webviewExecutable)) {
             $environment.webview2.runningVersion = (Get-Item $webviewExecutable).VersionInfo.ProductVersion
@@ -143,7 +145,16 @@ public static class MovieClawSmokeWindow {
         }
         $measurement.bridgeReady = Get-Content $readyPath -Raw | ConvertFrom-Json -AsHashtable
         $startupTimer.Stop()
-        $measurement.readySeconds = [Math]::Round($startupTimer.Elapsed.TotalSeconds, 3)
+        $measurement.startupSeconds = [Math]::Round($startupTimer.Elapsed.TotalSeconds, 3)
+        $measurement.readySeconds = $measurement.startupSeconds
+        $platformPath = Join-Path $env:MOVIECLAW_DATA_DIR 'platform-smoke.json'
+        $platformDeadline = [DateTime]::UtcNow.AddSeconds(15)
+        while (-not (Test-Path $platformPath)) {
+            if ($script:app.HasExited -or [DateTime]::UtcNow -gt $platformDeadline) { throw 'Native platform probe did not finish within 15 seconds' }
+            Start-Sleep -Milliseconds 100
+        }
+        $measurement.platform = Get-Content $platformPath -Raw | ConvertFrom-Json -AsHashtable
+        if ($measurement.platform.passed -ne $true) { throw 'Native platform lifecycle probe failed' }
         $measurement.status = 'closing'
         $shutdownTimer = [System.Diagnostics.Stopwatch]::StartNew()
         $posted = [MovieClawSmokeWindow]::PostMessage($window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
@@ -195,5 +206,6 @@ public static class MovieClawSmokeWindow {
     $env:MOVIECLAW_DATA_DIR = $oldDataDir
     $env:WEBVIEW2_USER_DATA_FOLDER = $oldWebviewDir
     $env:MOVIECLAW_DIAGNOSTICS = $oldDiagnostics
+    $env:MOVIECLAW_PLATFORM_SMOKE = $oldPlatformSmoke
     Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
 }

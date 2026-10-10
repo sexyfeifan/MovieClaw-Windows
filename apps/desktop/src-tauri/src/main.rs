@@ -7,6 +7,7 @@ mod lan_discovery;
 mod media_stream;
 mod mpv_ipc;
 mod native_auth;
+mod native_playback_platform;
 mod player_embedded;
 mod updater;
 
@@ -41,21 +42,32 @@ fn finish_shutdown(app: tauri::AppHandle) {
     // Never dispatch inline while inside a Tauri window/IPC callback. The Wry
     // dispatcher can execute main-thread tasks immediately and re-enter locks.
     std::thread::spawn(move || {
+        native_auth::retire_for_shutdown();
         api_proxy::cancel_all_requests();
         media_stream::revoke_all();
-        let cleanup_app = app.clone();
-        if app
-            .run_on_main_thread(move || {
-                shutdown_trace("native-cleanup-started");
-                let _ = player_embedded::stop_embedded_player(None);
-                SHUTDOWN.store(3, Ordering::SeqCst);
-                shutdown_trace("native-exit-requested");
-                cleanup_app.exit(0);
-            })
-            .is_err()
-        {
-            shutdown_trace("native-dispatch-failed");
-        }
+        tauri::async_runtime::spawn(async move {
+            let settled =
+                updater::verified::cancel_all_and_wait(std::time::Duration::from_millis(750)).await;
+            shutdown_trace(if settled {
+                "update-cleanup-settled"
+            } else {
+                "update-cleanup-deadline"
+            });
+            let cleanup_app = app.clone();
+            if app
+                .run_on_main_thread(move || {
+                    shutdown_trace("native-cleanup-started");
+                    native_playback_platform::shutdown(&cleanup_app);
+                    let _ = player_embedded::stop_embedded_player(None);
+                    SHUTDOWN.store(3, Ordering::SeqCst);
+                    shutdown_trace("native-exit-requested");
+                    cleanup_app.exit(0);
+                })
+                .is_err()
+            {
+                shutdown_trace("native-dispatch-failed");
+            }
+        });
     });
 }
 
@@ -95,7 +107,7 @@ fn complete_shutdown(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
-fn native_ready() -> Result<&'static str, String> {
+fn native_ready(app: tauri::AppHandle) -> Result<&'static str, String> {
     shutdown_trace("bridge-ready");
     if std::env::var("MOVIECLAW_DIAGNOSTICS").as_deref() == Ok("1") {
         std::fs::write(
@@ -104,6 +116,7 @@ fn native_ready() -> Result<&'static str, String> {
         )
         .map_err(|_| "无法写入启动诊断")?;
     }
+    native_playback_platform::diagnostic_probe(app);
     Ok(env!("CARGO_PKG_VERSION"))
 }
 
@@ -196,8 +209,8 @@ fn main() {
                         }
                         "check_update" => {
                             let app_handle = app.clone();
-                            std::thread::spawn(move || {
-                                match updater::check_for_updates() {
+                            tauri::async_runtime::spawn(async move {
+                                match updater::check_for_updates().await {
                                     Ok(info) => {
                                         if info.has_update {
                                             // 显示更新提示：弹窗 + 打开下载页
@@ -248,9 +261,9 @@ fn main() {
             // 启动后静默检查更新（延迟 5 秒，不影响启动速度）
             {
                 let app_handle = app.handle().clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(5));
-                    if let Ok(info) = updater::check_for_updates() {
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    if let Ok(info) = updater::check_for_updates().await {
                         if info.has_update {
                             use tauri::Emitter;
                             let _ = app_handle.emit("update_available", serde_json::json!({
@@ -269,6 +282,9 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::ScaleFactorChanged { .. } | tauri::WindowEvent::Resized(_)) {
+                native_playback_platform::window_changed(window);
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 shutdown_trace("close-requested");
                 if SHUTDOWN.load(Ordering::SeqCst) != 3 {
@@ -289,6 +305,9 @@ fn main() {
             media_stream::grant_media_stream,
             media_stream::release_media_stream,
             media_stream::renew_media_stream,
+            native_playback_platform::begin_native_playback,
+            native_playback_platform::update_native_playback,
+            native_playback_platform::end_native_playback,
             native_ready,
             complete_shutdown,
             get_app_version,
@@ -300,6 +319,10 @@ fn main() {
             updater::check_for_updates,
             updater::open_download_page,
             updater::open_release_page,
+            updater::verified::download_update,
+            updater::verified::cancel_update_download,
+            updater::verified::install_downloaded_update,
+            updater::verified::open_downloaded_update,
             api_proxy::proxy_api,
             api_proxy::cancel_proxy_request,
             get_main_window_hwnd,

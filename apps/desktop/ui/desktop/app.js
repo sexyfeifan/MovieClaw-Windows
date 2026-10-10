@@ -31,7 +31,9 @@ function imgFallback(imgEl, rawUrl) {
     return;
   }
   imgEl.dataset.retried = '1';
+  const source = imgEl.getAttribute('src'), epoch = API.contextEpoch;
   API.proxyImage(rawUrl).then(dataUri => {
+    if (API.contextEpoch !== epoch || imgEl.dataset.raw !== rawUrl || imgEl.getAttribute('src') !== source) return;
     if (dataUri) {
       imgEl.src = dataUri;
     } else {
@@ -39,6 +41,26 @@ function imgFallback(imgEl, rawUrl) {
       imgEl.parentElement?.classList.add('no-img');
     }
   });
+}
+
+function imageTitleFallback(img, visible) {
+  if (img.dataset.titleFallback === undefined) return;
+  const title = img.nextElementSibling;
+  if (title?.tagName === 'H1') title.hidden = !visible;
+}
+
+function onImageLoad(event) {
+  const img = event.target;
+  if (img?.tagName !== 'IMG' || img.dataset.raw === undefined) return;
+  if (img.dataset.fade !== undefined) img.style.opacity = '1';
+  imageTitleFallback(img, false);
+}
+
+function onImageError(event) {
+  const img = event.target;
+  if (img?.tagName !== 'IMG' || img.dataset.raw === undefined) return;
+  imageTitleFallback(img, true);
+  imgFallback(img, img.dataset.raw);
 }
 
 // 「12:34」/「1:02:33」——与 Apple 端 Formatters.clock 同一口径（详情页续播按钮）
@@ -571,6 +593,9 @@ const App = {
   bindEvents() {
     if (this._eventsBound) return;
     this._eventsBound = true;
+    // Image events do not bubble; capture keeps authenticated fallback CSP-compatible.
+    document.addEventListener('load', onImageLoad, true);
+    document.addEventListener('error', onImageError, true);
     window.__MOVIECLAW_CHANGE_SERVER__ = () => this.changeServer();
     window.addEventListener('movieclaw:playback-stopped', e => this.refreshStoppedItem(e.detail || {}));
     // 侧栏导航
@@ -637,6 +662,7 @@ const App = {
 
     // 键盘快捷键
     document.addEventListener('keydown', (e) => {
+      if (document.querySelector?.('dialog[open]')) return;
       // Esc: 返回上一页
       if (e.key === 'Escape') {
         if (!document.getElementById('playerView').hidden) return;
@@ -866,7 +892,7 @@ const App = {
       this._homeData = { epoch: API.contextEpoch, rows: loaded };
       const continueItems = this.unwrapItems(loaded.find(entry => entry.row.type === 'up-next')?.response).slice(0, 20);
       const heroHtml = continueItems.length ? `<section class="hero-banner" id="heroBanner" aria-label="接下来继续">
-        <div class="hero-bg"><img id="heroImg" alt="" data-raw="" onerror="imgFallback(this, this.dataset.raw)"></div>
+        <div class="hero-bg"><img id="heroImg" alt="" data-raw=""></div>
         <div class="hero-info"><div id="heroIdentity"></div><div class="hero-meta" id="heroMeta"></div>
           <p class="hero-overview" id="heroOverview"></p><div class="hero-actions"><button class="btn-play" id="heroPlayBtn">▶ <span>继续播放</span></button><button class="btn-secondary" id="heroDetailBtn">详情</button></div>
           <div class="hero-navigation"><button id="heroPrev" aria-label="上一部">‹</button><div id="heroDots"></div><button id="heroNext" aria-label="下一部">›</button></div>
@@ -874,9 +900,9 @@ const App = {
       const shelves = loaded.map(({ row, response, error }) => {
         if (error) return `<section class="shelf-section" data-home-row="${escapeHtml(row.id)}"><h2 class="shelf-title">${escapeHtml(row.title)}</h2><div class="empty-state" role="alert">${escapeHtml(error.message)} <button class="btn-secondary home-retry">重试</button></div></section>`;
         let cards = '';
-        if (row.type === 'libraries') cards = this.libraries.map(lib => `<button class="library-tile" data-open-library="${Number(lib.id)}"><div class="library-cover"><img loading="lazy" src="${escapeHtml(resolveUrl('/libraries/' + lib.id + '/cover'))}" alt="" data-raw="/libraries/${Number(lib.id)}/cover" onerror="imgFallback(this, this.dataset.raw)"><span>${escapeHtml(HomeRows.label(lib.kind))}</span></div><strong>${escapeHtml(lib.name)}</strong><span>${Number(lib.stats?.item_count || 0)} 个项目</span></button>`).join('')
-          + HomeRows.pinned(this.homeRows || []).map(collection => `<button class="library-tile collection-tile" data-open-collection="${Number(collection.id)}"><div class="library-cover">${collection.covers?.length ? `<img loading="lazy" src="${escapeHtml(resolveUrl('/collections/' + collection.id + '/cover'))}" alt="" data-raw="/collections/${Number(collection.id)}/cover" onerror="imgFallback(this, this.dataset.raw)">` : ''}<span>合集</span></div><strong>${escapeHtml(collection.name)}</strong><span>${Number(collection.item_count || 0)} 个项目</span></button>`).join('');
-        else if (row.type === 'genres') cards = this.unwrapItems(response).map(genre => `<button class="genre-tile" data-kind="${escapeHtml(row.media_kind)}" data-genre="${escapeHtml(genre.value)}" data-label="${escapeHtml(genre.label)}"><img loading="lazy" src="${escapeHtml(resolveUrl(genre.cover_url))}" alt="" data-raw="${escapeHtml(genre.cover_url)}" onerror="imgFallback(this, this.dataset.raw)"><span>${escapeHtml(genre.label)}</span><small>${Number(genre.count || 0)} 部</small></button>`).join('');
+        if (row.type === 'libraries') cards = this.libraries.map(lib => `<button class="library-tile" data-open-library="${Number(lib.id)}"><div class="library-cover"><img loading="lazy" src="${escapeHtml(resolveUrl('/libraries/' + lib.id + '/cover'))}" alt="" data-raw="/libraries/${Number(lib.id)}/cover"><span>${escapeHtml(HomeRows.label(lib.kind))}</span></div><strong>${escapeHtml(lib.name)}</strong><span>${Number(lib.stats?.item_count || 0)} 个项目</span></button>`).join('')
+          + HomeRows.pinned(this.homeRows || []).map(collection => `<button class="library-tile collection-tile" data-open-collection="${Number(collection.id)}"><div class="library-cover">${collection.covers?.length ? `<img loading="lazy" src="${escapeHtml(resolveUrl('/collections/' + collection.id + '/cover'))}" alt="" data-raw="/collections/${Number(collection.id)}/cover">` : ''}<span>合集</span></div><strong>${escapeHtml(collection.name)}</strong><span>${Number(collection.item_count || 0)} 个项目</span></button>`).join('');
+        else if (row.type === 'genres') cards = this.unwrapItems(response).map(genre => `<button class="genre-tile" data-kind="${escapeHtml(row.media_kind)}" data-genre="${escapeHtml(genre.value)}" data-label="${escapeHtml(genre.label)}"><img loading="lazy" src="${escapeHtml(resolveUrl(genre.cover_url))}" alt="" data-raw="${escapeHtml(genre.cover_url)}"><span>${escapeHtml(genre.label)}</span><small>${Number(genre.count || 0)} 部</small></button>`).join('');
         else {
           const items = this.filterMediaItems(this.unwrapItems(response)).slice(0, 20);
           cards = items.map(item => this.posterCard(item, row.library_id, row.type === 'up-next')).join('');
@@ -912,9 +938,9 @@ const App = {
         if (!this.isCurrent(generation) || index < 0 || index >= continueItems.length) return;
         heroIndex = index; const item = continueItems[index], request = ++heroRequest;
         const raw = item.backdrop_url || item.episode_still_url || item.poster_url;
-        const img = container.querySelector('#heroImg'); img.dataset.raw = raw || ''; img.style.display = raw ? '' : 'none';
+        const img = container.querySelector('#heroImg'); img.dataset.raw = raw || ''; delete img.dataset.retried; img.style.display = raw ? '' : 'none';
         if (raw) api.proxyImage(raw).then(uri => { if (this.isCurrent(generation) && request === heroRequest) img.src = uri || resolveUrl(raw); }).catch(() => {});
-        container.querySelector('#heroIdentity').innerHTML = item.logo_url ? `<img class="hero-logo" src="${escapeHtml(resolveUrl(item.logo_url))}" alt="${escapeHtml(item.title)}" data-raw="${escapeHtml(item.logo_url)}" onerror="this.nextElementSibling.hidden=false;imgFallback(this, this.dataset.raw)" onload="this.nextElementSibling.hidden=true"><h1 class="hero-title" hidden>${escapeHtml(item.title)}</h1>` : `<h1 class="hero-title">${escapeHtml(item.title)}</h1>`;
+        container.querySelector('#heroIdentity').innerHTML = item.logo_url ? `<img class="hero-logo" src="${escapeHtml(resolveUrl(item.logo_url))}" alt="${escapeHtml(item.title)}" data-raw="${escapeHtml(item.logo_url)}" data-title-fallback><h1 class="hero-title" hidden>${escapeHtml(item.title)}</h1>` : `<h1 class="hero-title">${escapeHtml(item.title)}</h1>`;
         container.querySelector('#heroMeta').textContent = [item.year, ...(item.genres || []).slice(0, 2), item.kind === 'tv' ? `第 ${item.season_number} 季第 ${item.episode_number} 集 · ${item.episode_title || ''}` : null,
           item.duration_ms > item.position_ms ? `还剩 ${fmtRuntime(Math.ceil((item.duration_ms - item.position_ms) / 60000))}` : null].filter(Boolean).join(' · ');
         container.querySelector('#heroOverview').textContent = item.overview || '';
@@ -1278,12 +1304,12 @@ const App = {
 
       container.innerHTML = `
         <div class="person-hero">
-          <button class="detail-back-btn" onclick="App.goBack()">
+          <button class="detail-back-btn" id="personBack" aria-label="返回">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
           </button>
           <div class="person-header">
             ${person.avatar_url || person.profile_url ? `
-              <img class="person-avatar" src="${escapeHtml(resolveUrl(person.avatar_url || person.profile_url))}" alt="" data-raw="${escapeHtml(person.avatar_url || person.profile_url)}" style="opacity:0;transition:opacity 0.3s" onload="this.style.opacity='1'" onerror="imgFallback(this, this.dataset.raw)">
+              <img class="person-avatar" src="${escapeHtml(resolveUrl(person.avatar_url || person.profile_url))}" alt="" data-raw="${escapeHtml(person.avatar_url || person.profile_url)}" data-fade style="opacity:0;transition:opacity 0.3s">
             ` : '<div class="person-avatar person-avatar-placeholder"></div>'}
             <div class="person-info">
               <h1 class="person-name">${escapeHtml(person.name)}</h1>
@@ -1299,6 +1325,7 @@ const App = {
             match_label: item.library_id == null ? '片源已移除' : item.department === 'director' ? (item.kind === 'tv' ? '主创' : '导演') : item.character ? '饰 ' + item.character : '',
           }, item.library_id)).join('')}</div></div>`).join('') || '<div class="empty-state"><p>库内没有这位影人的作品</p></div>'}
       `;
+      container.querySelector('#personBack').addEventListener('click', () => this.goBack());
       this.bindPosterCards(container);
     } catch (e) {
       if (!this.isCurrent(generation) || e.name === 'AbortError') return;
@@ -1350,7 +1377,7 @@ const App = {
       container.innerHTML = `
         <div class="detail-hero">
           <div class="detail-hero-bg">
-            <img src="${escapeHtml(resolveUrl(backdropRaw))}" alt="" style="opacity:0;transition:opacity 0.4s" data-raw="${escapeHtml(backdropRaw)}" onload="this.style.opacity='1'" onerror="imgFallback(this, this.dataset.raw)">
+            <img src="${escapeHtml(resolveUrl(backdropRaw))}" alt="" style="opacity:0;transition:opacity 0.4s" data-raw="${escapeHtml(backdropRaw)}" data-fade>
           </div>
           <button class="detail-back-btn" id="btnBack" title="返回 (Esc)">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
@@ -1361,7 +1388,7 @@ const App = {
           </div>
         </div>
         <div class="detail-body">
-          <div class="detail-body-bg"><img src="${escapeHtml(resolveUrl(backdropRaw))}" alt="" data-raw="${escapeHtml(backdropRaw)}" onerror="imgFallback(this, this.dataset.raw)"></div>
+          <div class="detail-body-bg"><img src="${escapeHtml(resolveUrl(backdropRaw))}" alt="" data-raw="${escapeHtml(backdropRaw)}"></div>
           <div class="detail-lower">
             <div id="detailSeasonArea"></div>
             <div id="detailSeriesArea"></div>
@@ -1407,10 +1434,8 @@ const App = {
 
         document.getElementById('detailStage').innerHTML = `
           ${logoRaw
-            ? `<img class="detail-logo" src="${escapeHtml(resolveUrl(logoRaw))}" alt="${escapeHtml(info.title)}" data-raw="${escapeHtml(logoRaw)}"
-                 onerror="if (!this.dataset.retried) document.getElementById('detailTitleFallback').style.display=''; imgFallback(this, this.dataset.raw)"
-                 onload="document.getElementById('detailTitleFallback').style.display='none'">
-               <h1 class="detail-title" id="detailTitleFallback" style="display:none">${escapeHtml(info.title)}</h1>`
+            ? `<img class="detail-logo" src="${escapeHtml(resolveUrl(logoRaw))}" alt="${escapeHtml(info.title)}" data-raw="${escapeHtml(logoRaw)}" data-title-fallback>
+               <h1 class="detail-title" id="detailTitleFallback" hidden>${escapeHtml(info.title)}</h1>`
             : `<h1 class="detail-title">${escapeHtml(info.title)}</h1>`}
           ${metaLine || badges.length ? `
             <div class="detail-meta">
@@ -1888,7 +1913,7 @@ const App = {
     return `
       <div class="episode-card ${ep.owned ? '' : 'missing'} ${isStage ? 'stage' : ''}" role="button" tabindex="${ep.owned ? '0' : '-1'}" aria-disabled="${!ep.owned}" aria-label="第 ${Number(ep.episode_number)} 集${ep.owned ? '' : '，缺集'}" data-episode-number="${Number(ep.episode_number)}">
         <div class="episode-art">
-          ${ep.still_url ? `<img src="${escapeHtml(resolveUrl(ep.still_url))}" alt="" data-raw="${escapeHtml(ep.still_url)}" onerror="imgFallback(this, this.dataset.raw)">` : ''}
+          ${ep.still_url ? `<img src="${escapeHtml(resolveUrl(ep.still_url))}" alt="" data-raw="${escapeHtml(ep.still_url)}">` : ''}
           ${ep.played ? `
             <div class="episode-watched">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="5 13 10 18 19 6"/></svg>
@@ -1925,7 +1950,7 @@ const App = {
     return `
       <div class="person-card" ${p.personId ? `data-person-id="${Number(p.personId)}"` : ''}>
         ${p.avatar
-          ? `<img class="person-card-avatar" src="${escapeHtml(resolveUrl(p.avatar))}" alt="" data-raw="${escapeHtml(p.avatar)}" onerror="imgFallback(this, this.dataset.raw)">`
+          ? `<img class="person-card-avatar" src="${escapeHtml(resolveUrl(p.avatar))}" alt="" data-raw="${escapeHtml(p.avatar)}">`
           : '<div class="person-card-avatar person-card-avatar-placeholder"></div>'}
         <div class="person-card-name">${escapeHtml(p.name)}</div>
         <div class="person-card-role">${escapeHtml(p.role)}</div>
@@ -1940,7 +1965,7 @@ const App = {
     return `
       <div class="series-card ${missing ? 'missing' : ''}" ${part.media_item_id != null ? `data-item-id="${Number(part.media_item_id)}"` : ''} data-library-id="${Number(libraryId)}">
         <div class="series-art">
-          ${part.poster_url ? `<img src="${escapeHtml(resolveUrl(part.poster_url))}" alt="" data-raw="${escapeHtml(part.poster_url)}" onerror="imgFallback(this, this.dataset.raw)">` : ''}
+          ${part.poster_url ? `<img src="${escapeHtml(resolveUrl(part.poster_url))}" alt="" data-raw="${escapeHtml(part.poster_url)}">` : ''}
           ${current ? '<div class="series-badge">本片</div>' : missing ? '<div class="series-badge">未入库</div>' : ''}
         </div>
         <div class="series-title">${escapeHtml(part.title)}</div>
@@ -2053,7 +2078,7 @@ const App = {
     return `
       <div class="poster-card ${landscape ? 'continue-card' : ''}" role="button" tabindex="${item.source_missing ? '-1' : '0'}" aria-label="${escapeHtml(title)}" aria-disabled="${item.source_missing ? 'true' : 'false'}" style="${item.source_missing ? 'opacity:0.45' : ''}" data-item-id="${escapeHtml(itemId)}" data-library-id="${escapeHtml(libId)}">
         <div class="poster-art">
-          ${rawPoster ? `<img src="${escapeHtml(posterUrl)}" alt="" loading="lazy" style="opacity:0;transition:opacity 0.3s" data-raw="${escapeHtml(rawPoster)}" onload="this.style.opacity='1'" onerror="imgFallback(this, this.dataset.raw)">` : ''}
+          ${rawPoster ? `<img src="${escapeHtml(posterUrl)}" alt="" loading="lazy" style="opacity:0;transition:opacity 0.3s" data-raw="${escapeHtml(rawPoster)}" data-fade>` : ''}
           <div class="focus-glow"></div>
           <div class="poster-hover"><button class="card-play" aria-label="播放 ${escapeHtml(title)}" ${item.source_missing ? 'disabled' : ''}>▶</button><button class="card-more" aria-label="更多 ${escapeHtml(title)}">•••</button></div>
           ${item.source_missing ? '<span class="source-missing">片源已移除</span>' : ''}
@@ -2163,14 +2188,14 @@ const App = {
           <div class="settings-row">
             <span>自动播放下一集</span>
             <label class="settings-toggle">
-              <input type="checkbox" id="setAutoNext" ${localStorage.getItem('mc_autoNext') !== '0' ? 'checked' : ''}>
+              <input type="checkbox" id="setAutoNext" aria-label="自动播放下一集" ${localStorage.getItem('mc_autoNext') !== '0' ? 'checked' : ''}>
               <span class="toggle-slider"></span>
             </label>
           </div>
           <div class="settings-row">
             <span>硬件解码</span>
             <label class="settings-toggle">
-              <input type="checkbox" id="setHwDecode" ${localStorage.getItem('mc_hwDecode') !== '0' ? 'checked' : ''}>
+              <input type="checkbox" id="setHwDecode" aria-label="硬件解码" ${localStorage.getItem('mc_hwDecode') !== '0' ? 'checked' : ''}>
               <span class="toggle-slider"></span>
             </label>
           </div>
@@ -2181,6 +2206,20 @@ const App = {
               <option value="zh" ${localStorage.getItem('mc_subLang') === 'zh' ? 'selected' : ''}>中文</option>
               <option value="en" ${localStorage.getItem('mc_subLang') === 'en' ? 'selected' : ''}>English</option>
             </select>
+          </div>
+          <div class="settings-row">
+            <span>播放时置顶</span>
+            <label class="settings-toggle">
+              <input type="checkbox" id="setAlwaysOnTop" aria-label="播放时置顶" ${localStorage.getItem('mc_alwaysOnTop') !== 'false' ? 'checked' : ''}>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="settings-row">
+            <span>窗口贴合画面</span>
+            <label class="settings-toggle">
+              <input type="checkbox" id="setFitWindow" aria-label="窗口贴合画面" ${localStorage.getItem('mc_fitWindow') !== 'false' ? 'checked' : ''}>
+              <span class="toggle-slider"></span>
+            </label>
           </div>
           <div class="settings-row">
             <span>默认音轨语言</span>
@@ -2244,6 +2283,12 @@ const App = {
     document.getElementById('setHwDecode')?.addEventListener('change', (e) => {
       localStorage.setItem('mc_hwDecode', e.target.checked ? '1' : '0');
     });
+    for (const [id, key] of [['setAlwaysOnTop', 'mc_alwaysOnTop'], ['setFitWindow', 'mc_fitWindow']]) {
+      document.getElementById(id)?.addEventListener('change', e => {
+        localStorage.setItem(key, String(e.target.checked));
+        window.MovieClawPlatform?.update();
+      });
+    }
     document.getElementById('setSubLang')?.addEventListener('change', (e) => {
       localStorage.setItem('mc_subLang', e.target.value);
     });
@@ -2443,7 +2488,7 @@ const App = {
           } catch (_) { /* 查不到片源元数据就不报 universal，按浏览器真值走 */ }
         }
         const unitFile = files?.find(f => Number(f.id) === Number(item.file_id)) || this.pickUnitFile(files, item.seasonNumber, item.episodeNumber);
-        wantsMpv = !!unitFile && !['iso', 'dvd'].includes(String(unitFile.container || '').toLowerCase()) && this.needsNativePlayer(unitFile, unitFile.audio_streams);
+        wantsMpv = !!unitFile && this.needsNativePlayer(unitFile, unitFile.audio_streams);
       }
       item.__universalClaim = wantsMpv;
 
@@ -2767,7 +2812,8 @@ const App = {
   needsNativePlayer(source, audioTracks) {
     // 杜比视界
     const hdr = (source.hdr || '').toLowerCase();
-    if (hdr.includes('dolby') || hdr.includes('dv') || hdr.includes('dovi')) return true;
+    // Native gpu-next can accept HDR source and map to its target; HTML5 requests server SDR.
+    if (hdr && hdr !== 'sdr' && hdr !== 'none') return true;
     // 全景声/TrueHD/DTS-HD
     for (const t of audioTracks || []) {
       const text = `${t.codec || ''} ${t.profile || ''}`.toLowerCase();
@@ -2775,7 +2821,7 @@ const App = {
     }
     // 不支持的容器
     const container = (source.container || '').toLowerCase();
-    if (['mkv', 'bluray', 'ts', 'm2ts', 'avi', 'wmv', 'flv'].includes(container)) return true;
+    if (['mkv', 'bluray', 'iso', 'dvd', 'ts', 'm2ts', 'avi', 'wmv', 'flv'].includes(container)) return true;
     // 特殊视频编码
     const vcodec = (source.video_codec || '').toLowerCase();
     if (['vp9', 'vc-1', 'vc1', 'mpeg2', 'mpeg-2', 'theora'].includes(vcodec)) return true;
@@ -2810,8 +2856,13 @@ const App = {
   // 打开嵌入式 mpv 播放器
   async openEmbeddedPlayer(item, streamUrl, subtitleUrls, startMs, session, seq) {
     const alive = () => this._playbackSeq === seq;
+    if (session.decision?.disc || /\/playback\/files\/\d+\/disc(?:[?#]|$)/.test(streamUrl)
+      || ['iso', 'dvd'].includes(String(session.source?.container || '').toLowerCase()) && session.decision?.tier === 0) {
+      await this.releasePlaybackSession(session);
+      if (alive()) this._showPlaybackError('该光盘输入需要服务端生成可播放的视频流');
+      return;
+    }
     try {
-      if (session.decision?.disc || ['iso', 'dvd'].includes(String(session.source?.container || '').toLowerCase()) && session.decision?.tier === 0) throw new Error('该光盘输入需要服务端生成可播放的视频流');
       // 获取视频区域位置
       const playerView = document.getElementById('playerView');
       const videoWrap = document.querySelector('.player-video-wrap');

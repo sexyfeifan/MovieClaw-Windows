@@ -200,3 +200,38 @@ commands.allow = ["native_ready"]
 identifier = "allow-renew-media-stream"
 description = "Allows renewing an active media capability"
 commands.allow = ["renew_media_stream"]
+
+[[permission]]
+identifier = "allow-begin-native-playback"
+description = "Register an identified playback with Windows platform services"
+commands.allow = ["begin_native_playback"]
+
+[[permission]]
+identifier = "allow-update-native-playback"
+description = "Update current playback timeline, power and window state"
+commands.allow = ["update_native_playback"]
+
+[[permission]]
+identifier = "allow-end-native-playback"
+description = "Release current playback platform services and restore window"
+commands.allow = ["end_native_playback"]
+
+[[permission]]
+identifier = "allow-download-update"
+description = "Download an exact stable MovieClaw release with integrity verification"
+commands.allow = ["download_update"]
+
+[[permission]]
+identifier = "allow-cancel-update-download"
+description = "Cancel an identified update transfer and clean temporary data"
+commands.allow = ["cancel_update_download"]
+
+[[permission]]
+identifier = "allow-install-downloaded-update"
+description = "Install an integrity-verified update with explicit unsigned-package policy"
+commands.allow = ["install_downloaded_update"]
+
+[[permission]]
+identifier = "allow-open-downloaded-update"
+description = "Reveal a verified portable update for manual installation"
+commands.allow = ["open_downloaded_update"]

@@ -33,9 +33,9 @@ static CLIENT: LazyLock<Client> = LazyLock::new(|| {
 #[derive(Clone)]
 struct Lease {
     target: Url,
-    origin: url::Origin,
+    base: Url,
     identity: Option<native_auth::Identity>,
-    cookie: Option<String>,
+    cookies: api_proxy::CookieSnapshot,
     generation: u64,
     expires: Instant,
     cancellation: CancellationToken,
@@ -85,8 +85,9 @@ fn start() -> Result<u16, String> {
 }
 
 pub fn grant_native(value: &str) -> Result<StreamGrant, String> {
-    let captured_generation = native_auth::generation();
-    let server = connect::load_server_url()?;
+    let context = native_auth::load_context()?;
+    let captured_generation = context.generation;
+    let server = &context.server;
     if server.is_empty() {
         return Err("未配置服务器".into());
     }
@@ -113,16 +114,16 @@ pub fn grant_native(value: &str) -> Result<StreamGrant, String> {
         target.set_query(None);
         target.query_pairs_mut().extend_pairs(remaining);
     }
-    let same_origin = target.origin() == base.origin();
-    let identity = if same_origin {
+    let in_scope = connect::url_in_server_scope(&base, &target);
+    let identity = if in_scope {
         native_auth::identity(&server, username.as_deref())?
     } else {
         None
     };
-    let cookie = if same_origin && identity.is_none() {
-        api_proxy::cookie_header(&target)
+    let cookies = if in_scope && identity.is_none() {
+        api_proxy::cookie_snapshot(&base)
     } else {
-        None
+        api_proxy::CookieSnapshot::default()
     };
     if captured_generation != native_auth::generation() {
         return Err("服务器或账号已更改".into());
@@ -133,26 +134,32 @@ pub fn grant_native(value: &str) -> Result<StreamGrant, String> {
         credential_vault::random_id()?
     );
     let port = start()?;
-    let mut leases = LEASES.lock().unwrap();
-    leases.retain(|_, lease| lease.expires > Instant::now() && !lease.cancellation.is_cancelled());
-    if leases.len() >= 128 {
-        return Err("媒体传输句柄过多，请关闭旧播放后重试".into());
-    }
-    leases.insert(
-        id.clone(),
-        Lease {
-            target,
-            origin: base.origin(),
-            identity,
-            cookie,
-            generation: captured_generation,
-            expires: Instant::now() + Duration::from_secs(4 * 3600),
-            cancellation: CancellationToken::new(),
-        },
-    );
-    Ok(StreamGrant {
-        url: format!("http://127.0.0.1:{port}/media/{id}"),
-        stream_id: id,
+    native_auth::with_current(&context, || {
+        let mut leases = LEASES.lock().unwrap();
+        remove_expired_leases(&mut leases, Instant::now());
+        if leases.len() >= 128 {
+            return Err("媒体传输句柄过多，请关闭旧播放后重试".into());
+        }
+        leases.insert(
+            id.clone(),
+            Lease {
+                target,
+                base: base.clone(),
+                identity,
+                cookies: if native_auth::cookie_credentials_allowed(&base) {
+                    cookies
+                } else {
+                    api_proxy::CookieSnapshot::default()
+                },
+                generation: captured_generation,
+                expires: Instant::now() + Duration::from_secs(4 * 3600),
+                cancellation: CancellationToken::new(),
+            },
+        );
+        Ok(StreamGrant {
+            url: format!("http://127.0.0.1:{port}/media/{id}"),
+            stream_id: id,
+        })
     })
 }
 #[tauri::command]
@@ -170,6 +177,18 @@ pub fn release(id: &str) -> bool {
     } else {
         false
     }
+}
+fn remove_expired_leases(leases: &mut HashMap<String, Lease>, now: Instant) {
+    leases.retain(|_, lease| {
+        if lease.expires <= now || lease.cancellation.is_cancelled() {
+            // A transfer owns a clone of this token. Cancel before removing the
+            // registry entry, otherwise that transfer would lose its revoker.
+            lease.cancellation.cancel();
+            false
+        } else {
+            true
+        }
+    });
 }
 fn renew_at(lease: &mut Lease, now: Instant) -> bool {
     if lease.generation != native_auth::generation()
@@ -191,6 +210,16 @@ pub fn renew(id: &str) -> bool {
 #[tauri::command]
 pub fn renew_media_stream(stream_id: String) -> bool {
     renew(&stream_id)
+}
+pub(crate) fn revoke_before(epoch: u64) {
+    LEASES.lock().unwrap().retain(|_, lease| {
+        if lease.generation < epoch {
+            lease.cancellation.cancel();
+            false
+        } else {
+            true
+        }
+    });
 }
 pub fn revoke_all() {
     for (_, lease) in LEASES.lock().unwrap().drain() {
@@ -255,7 +284,13 @@ async fn serve(mut socket: TcpStream) -> Result<(), String> {
     };
     let lease = {
         let mut leases = LEASES.lock().unwrap();
-        leases.get_mut(id).and_then(|lease| if renew_at(lease, Instant::now()) {Some(lease.clone())} else {None})
+        leases.get_mut(id).and_then(|lease| {
+            if renew_at(lease, Instant::now()) {
+                Some(lease.clone())
+            } else {
+                None
+            }
+        })
     };
     let Some(lease) = lease.filter(|v| {
         v.generation == native_auth::generation()
@@ -308,10 +343,10 @@ async fn upstream(
                 request = request.header(name, value);
             }
         }
-        if url.origin() == lease.origin {
+        if connect::url_in_server_scope(&lease.base, &url) {
             if let Some(identity) = &lease.identity {
                 request = request.bearer_auth(&identity.token);
-            } else if let Some(cookie) = &lease.cookie {
+            } else if let Some(cookie) = lease.cookies.header(&url) {
                 request = request.header(header::COOKIE, cookie);
             }
         }
@@ -319,7 +354,7 @@ async fn upstream(
             .await
             .map_err(|_| "media response timeout")?
             .map_err(|_| "media upstream failed")?;
-        if response.status().as_u16() == 401 {
+        if response.status().as_u16() == 401 && connect::url_in_server_scope(&lease.base, &url) {
             if let Some(identity) = &lease.identity {
                 native_auth::invalidate(identity);
             }
@@ -443,9 +478,14 @@ mod tests {
         });
         let lease = Lease {
             target: Url::parse(&format!("http://{address}/video")).unwrap(),
-            origin: Url::parse("https://configured.test").unwrap().origin(),
+            base: Url::parse("https://configured.test").unwrap(),
             identity: None,
-            cookie: Some("must-not-leak".into()),
+            cookies: api_proxy::CookieSnapshot::test_cookie(
+                &Url::parse("https://configured.test").unwrap(),
+                "private",
+                "must-not-leak",
+                "/",
+            ),
             generation: generation(),
             expires: Instant::now() + Duration::from_secs(5),
             cancellation: CancellationToken::new(),
@@ -462,27 +502,158 @@ mod tests {
         assert_eq!(response.bytes().await.unwrap(), "cdef");
         server.join().unwrap();
     }
+    #[tokio::test]
+    async fn redirected_cookie_snapshot_obeys_each_hop_path() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let target = Url::parse(&format!(
+            "http://{}/media/private/file",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let captured = api_proxy::CookieSnapshot::test_cookie(
+            &target,
+            "private",
+            "narrow-cookie",
+            "/media/private",
+        );
+        let handler = std::thread::spawn(move || {
+            for hop in 0..2 {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut bytes = [0; 8192];
+                let count = socket.read(&mut bytes).unwrap();
+                let text = String::from_utf8_lossy(&bytes[..count]).to_ascii_lowercase();
+                if hop == 0 {
+                    assert!(text.contains("cookie: private=narrow-cookie"));
+                    socket.write_all(b"HTTP/1.1 302 Found\r\nLocation: /api/public\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                } else {
+                    assert!(text.starts_with("get /api/public "));
+                    assert!(!text.contains("cookie:"));
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                        )
+                        .unwrap();
+                }
+            }
+        });
+        let lease = Lease {
+            base: Url::parse(&target.origin().ascii_serialization()).unwrap(),
+            target,
+            cookies: captured,
+            identity: None,
+            generation: generation(),
+            expires: Instant::now() + Duration::from_secs(5),
+            cancellation: CancellationToken::new(),
+        };
+        assert_eq!(
+            upstream(&lease, "GET", &HashMap::new())
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            "ok"
+        );
+        handler.join().unwrap();
+    }
     fn generation() -> u64 {
         native_auth::generation()
     }
-    #[test]
-    fn active_capability_renews_but_revoked_or_expired_capability_cannot_return() {
-        let now = Instant::now();
-        let mut lease = Lease {
-            target: Url::parse("https://server/media").unwrap(),
-            origin: Url::parse("https://server").unwrap().origin(),
+    #[tokio::test]
+    async fn short_ttl_cleanup_closes_actual_inflight_upstream_stream() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let target =
+            Url::parse(&format!("http://{}/video", listener.local_addr().unwrap())).unwrap();
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let handler = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut buffer = [0; 4096];
+            socket.read(&mut buffer).unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\nConnection: close\r\n\r\npartial-stream").unwrap();
+            started.send(()).unwrap();
+            match socket.read(&mut buffer) {
+                Ok(0) => true,
+                Err(error) => matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ),
+                _ => false,
+            }
+        });
+        let lease = Lease {
+            base: Url::parse(&target.origin().ascii_serialization()).unwrap(),
+            target,
             identity: None,
-            cookie: None,
+            cookies: api_proxy::CookieSnapshot::default(),
             generation: generation(),
-            expires: now + Duration::from_secs(1),
+            expires: Instant::now() + Duration::from_millis(30),
             cancellation: CancellationToken::new(),
         };
-        assert!(renew_at(&mut lease, now));
-        assert!(lease.expires >= now + Duration::from_secs(4 * 3600));
-        lease.cancellation.cancel();
-        assert!(!renew_at(&mut lease, now));
-        lease.cancellation = CancellationToken::new();
-        lease.expires = now - Duration::from_secs(1);
-        assert!(!renew_at(&mut lease, now));
+        let transfer = lease.clone();
+        let mut leases = HashMap::from([("short".into(), lease)]);
+        let task = tokio::spawn(async move {
+            let operation = async {
+                upstream(&transfer, "GET", &HashMap::new())
+                    .await
+                    .unwrap()
+                    .bytes()
+                    .await
+                    .unwrap()
+            };
+            tokio::select! {biased;_=transfer.cancellation.cancelled()=>true,_=operation=>false}
+        });
+        waiting.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        remove_expired_leases(&mut leases, Instant::now());
+        assert!(leases.is_empty());
+        assert!(task.await.unwrap());
+        assert!(tokio::task::spawn_blocking(move || handler.join().unwrap())
+            .await
+            .unwrap());
+    }
+    #[test]
+    fn expired_registry_cleanup_cancels_inflight_transfer_clone() {
+        let now = Instant::now();
+        let lease = Lease {
+            target: Url::parse("https://server/media").unwrap(),
+            base: Url::parse("https://server").unwrap(),
+            identity: None,
+            cookies: api_proxy::CookieSnapshot::default(),
+            generation: generation(),
+            expires: now - Duration::from_secs(1),
+            cancellation: CancellationToken::new(),
+        };
+        let in_flight = lease.clone();
+        let mut leases = HashMap::from([("expired".into(), lease)]);
+        remove_expired_leases(&mut leases, now);
+        assert!(leases.is_empty());
+        assert!(in_flight.cancellation.is_cancelled());
+    }
+    #[test]
+    fn active_capability_renews_but_revoked_or_expired_capability_cannot_return() {
+        native_auth::with_context_read(|| {
+            let now = Instant::now();
+            let mut lease = Lease {
+                target: Url::parse("https://server/media").unwrap(),
+                base: Url::parse("https://server").unwrap(),
+                identity: None,
+                cookies: api_proxy::CookieSnapshot::default(),
+                generation: generation(),
+                expires: now + Duration::from_secs(1),
+                cancellation: CancellationToken::new(),
+            };
+            assert!(renew_at(&mut lease, now));
+            assert!(lease.expires >= now + Duration::from_secs(4 * 3600));
+            lease.cancellation.cancel();
+            assert!(!renew_at(&mut lease, now));
+            lease.cancellation = CancellationToken::new();
+            lease.expires = now - Duration::from_secs(1);
+            assert!(!renew_at(&mut lease, now));
+        });
     }
 }
