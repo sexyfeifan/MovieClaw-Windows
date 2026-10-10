@@ -36,7 +36,7 @@
 | 字段 | 说明 |
 |---|---|
 | `member_id` | 主人：成员 id，0 = 超管（成员级表的哨兵约定；删除成员时统一清理） |
-| `kind` | 客户端类型：`web` / `ios` / `tvos` / `macos` / `android` / `cli` / `worker` / `manual` |
+| `kind` | 客户端类型：`web` / `ios` / `tvos` / `macos` / `windows` / `android` / `cli` / `worker` / `manual` |
 | `name` | 给人看的设备名，可改名 |
 | `token_hash` | 令牌明文（`mclaw_` 前缀）的 sha256，唯一索引；明文只在签发时交付一次 |
 | `scope` | `full` = 等同本人；`transcode` = 只能转码（转码器凭证的形态上限） |

@@ -118,29 +118,79 @@ def test_app_login_issues_a_long_lived_device_token(client: TestClient) -> None:
     assert listed[0]["id"] == device["id"] and listed[0]["current"] is True
 
 
-def test_mac_app_logs_in_as_a_login_device_without_push(client: TestClient) -> None:
-    """Mac App 与 iPhone / Apple TV 同一种登录设备（人直接操作、随改密下线）；
-    本期不接推送，「我的设备」里不给它挂推送状态（PUSH_KINDS 刻意不含 macos）。"""
+@pytest.mark.parametrize(
+    ("kind", "name", "platform", "label"),
+    [
+        ("macos", "书房的 MacBook", "macOS 26.0 · arm64", "Mac App"),
+        ("windows", "客厅 Windows 电脑", "Windows 11 · x64", "Windows App"),
+    ],
+)
+def test_desktop_app_logs_in_as_a_login_device_without_push(
+    client: TestClient, kind: str, name: str, platform: str, label: str
+) -> None:
+    """桌面 App 是人直接操作、随改密下线的登录设备，未接推送不挂推送状态。"""
     resp = TestClient(client.app).post(
         f"{_AUTH}/device/login",
         json={
             **_ADMIN,
             "client": {
-                "kind": "macos",
-                "installation_id": "macos-install-0001",
-                "name": "书房的 MacBook",
-                "platform": "macOS 26.0 · arm64",
+                "kind": kind,
+                "installation_id": f"{kind}-install-0001",
+                "name": name,
+                "platform": platform,
             },
         },
     )
     assert resp.status_code == 200, resp.text
     device = resp.json()["data"]["device"]
-    assert (device["kind"], device["kind_label"], device["family"]) == ("macos", "Mac App", "login")
+    assert (device["kind"], device["kind_label"], device["family"]) == (kind, label, "login")
     listed = _as(client, resp.json()["data"]["token"]).get(f"{_AUTH}/devices").json()["data"]
-    mac = next(d for d in listed if d["kind"] == "macos")
+    desktop = next(d for d in listed if d["kind"] == kind)
     # 服务器开着推送时也不挂推送状态、不能登记：
     # 见 test_cloud_push.test_apps_without_push_get_no_push_hint
-    assert mac["push"] is None
+    assert desktop["push"] is None
+
+
+def test_windows_relogin_replaces_token_and_password_change_revokes_it(client: TestClient) -> None:
+    """Windows 密码登录走真实登录设备生命周期，并有第一方客户端的批准权限。"""
+    anon = TestClient(client.app)
+
+    def login(password: str) -> dict:
+        response = anon.post(
+            f"{_AUTH}/device/login",
+            json={
+                "username": _ADMIN["username"],
+                "password": password,
+                "client": {
+                    "kind": "windows",
+                    "installation_id": "windows-install-lifecycle",
+                    "name": "Windows 生命周期测试",
+                    "platform": "Windows 11 · x64",
+                },
+            },
+        )
+        assert response.status_code == 200, response.text
+        return response.json()["data"]
+
+    first = login(_ADMIN["password"])
+    second = login(_ADMIN["password"])
+    assert _as(client, first["token"]).get(f"{_AUTH}/me").status_code == 401
+    windows = _as(client, second["token"])
+    me = windows.get(f"{_AUTH}/me")
+    assert me.status_code == 200 and me.json()["data"]["device"]["kind"] == "windows"
+    # 第一方 Windows 可以批准 CLI；程序凭证仍不能签发自己的替代凭证。
+    cli_token = _pair_cli(windows, name="由 Windows 批准的 CLI")
+    changed = client.put(
+        f"{_AUTH}/password",
+        json={"old_password": _ADMIN["password"], "new_password": "new-windows-pass-9"},
+    )
+    assert changed.status_code == 200, changed.text
+    assert windows.get(f"{_AUTH}/me").status_code == 401
+    assert _as(client, cli_token).get(f"{_AUTH}/me").status_code == 200
+    current = login("new-windows-pass-9")
+    removed = client.delete(f"{_AUTH}/devices/{current['device']['id']}")
+    assert removed.status_code == 200, removed.text
+    assert _as(client, current["token"]).get(f"{_AUTH}/me").status_code == 401
 
 
 def test_app_login_wrong_password_is_rejected_and_throttled(client: TestClient) -> None:
