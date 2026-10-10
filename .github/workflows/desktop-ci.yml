@@ -46,6 +46,10 @@ jobs:
         run: npm ci
       - name: Record CI smoke environment
         run: ./scripts/probe-environment.ps1
+      - name: Verify pinned mpv before compiling Rust
+        run: |
+          ./scripts/prepare-runtime.ps1
+          ./scripts/mpv-preflight.ps1
       - name: JavaScript contracts
         run: npm run test:unit
       - name: Install browser for E2E

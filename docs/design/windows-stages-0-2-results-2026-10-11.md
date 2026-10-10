@@ -12,7 +12,7 @@
 
 ## 验证范围
 
-- 本机执行 43 条 JavaScript 合同回归与 12 条 Chromium 页面端到端回归，全部通过。页面测试使用实际发布 UI、真实本地 HTTP fixture 和原生 bridge fixture；HTML5 首帧用仓库内 8 秒合成 MP4 实际解码，HLS 用真实 fMP4 分片经代理加载并解码。账号凭证变化前作废旧进度身份、关闭期间的回退/同意请求、未看列表删除与分页交错均有回归。它不代表 Windows WebView2 或嵌入 mpv 画面已经验收。
+- 本机执行 45 条 JavaScript 合同回归与 13 条 Chromium 页面端到端回归，全部通过。页面测试使用实际发布 UI、真实本地 HTTP fixture 和原生 bridge fixture；HTML5 首帧用仓库内 8 秒合成 MP4 实际解码，HLS 用真实 fMP4 分片经代理加载并解码。账号凭证变化前作废旧进度身份、关闭期间的回退/同意请求、未看列表删除与分页交错均有回归。慢登录期间禁用取消/换服并守卫重复提交，鉴权写请求等待 Rust 完整结束，避免 UI 假超时后迟到 Cookie 造成身份错配；有失败后恢复、取消和重新登录成功的真实页面回归。它不代表 Windows WebView2 或嵌入 mpv 画面已经验收。
 - macOS 执行 `cargo check --locked --offline` 和测试代码类型检查；Windows Rust 链接、运行、打包与原生烟测由 GitHub Actions 执行。
 - 用户提供的局域网服务端版本 0.34.0：登录、bootstrap、账号列表、8 个媒体库、合集、60 项库分页、嵌套搜索命中、详情、up-next、收藏的真实合同已核对；实际 UI 的首页、片库、搜索、详情和鉴权海报/背景/Logo 正常，无页面脚本错误；原文件播放协商为 tier 0、session_id=null，带 Range 的取流返回 206 和正确 Content-Range。未修改收藏、已看标记或原有观看进度。凭证不进入仓库或 CI，测试 Cookie 与元数据临时文件已删除。
 - Windows CI 最终提交、运行链接、测试数量和产物校验和将在运行结束后补充。

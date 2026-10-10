@@ -136,6 +136,45 @@ test('accounts switch by username and mark the active account', async ({ page, r
   expect(requestBody).toEqual({ username: 'second' });
 });
 
+test('slow account login locks cancellation, restores it on failure and keeps the final identity consistent', async ({ page, request }) => {
+  await openDesktop(page, request, { username: 'alice', loginDelay: 1800, loginFailures: 1 });
+  await page.locator('[data-page="settings"]').click();
+  await page.locator('#btnAddAccount').click();
+  await page.locator('#loginUser').fill('bob');
+  await page.locator('#loginPass').fill('fixture-password');
+  await page.locator('#loginBtn').click();
+  await expect(page.locator('#loginBtn')).toBeDisabled();
+  await expect(page.locator('#cancelAddAccount')).toBeDisabled();
+  await expect(page.locator('#loginChangeServer')).toBeDisabled();
+  // Dispatch directly as well: the handler must enforce the lock even without browser button semantics.
+  await page.evaluate(() => {
+    document.getElementById('cancelAddAccount').dispatchEvent(new Event('click'));
+    document.getElementById('loginChangeServer').dispatchEvent(new Event('click'));
+    document.getElementById('loginForm').dispatchEvent(new Event('submit', { cancelable: true }));
+  });
+  await expect(page.locator('#loginError')).toContainText('密码错误');
+  await expect(page.locator('#loginBtn')).toBeEnabled();
+  await expect(page.locator('#cancelAddAccount')).toBeEnabled();
+  await expect(page.locator('#loginChangeServer')).toBeEnabled();
+  expect((await state(request)).username).toBe('alice');
+  await page.locator('#cancelAddAccount').click();
+  await expect(page.locator('#accountList')).toContainText('当前');
+  expect(await page.evaluate(() => App.session.username)).toBe('alice');
+  await page.locator('#btnAddAccount').click();
+  await page.locator('#loginUser').fill('bob');
+  await page.locator('#loginPass').fill('fixture-password');
+  await page.locator('#loginBtn').click();
+  await expect(page.locator('#cancelAddAccount')).toBeDisabled();
+  await page.evaluate(() => document.getElementById('cancelAddAccount').dispatchEvent(new Event('click')));
+  await expect(page.locator('#heroBanner')).toBeVisible();
+  expect(await page.evaluate(() => App.session.username)).toBe('bob');
+  const snapshot = await state(request);
+  expect(snapshot.username).toBe('bob');
+  expect(snapshot.requests.filter(r => r.path === '/auth/login')).toHaveLength(2);
+  expect(await page.evaluate(() => window.__fixture.calls.filter(c => c.command === 'clear_server_url'))).toHaveLength(0);
+  expect(await page.evaluate(() => [App._authPending, App._changingContext])).toEqual([false, false]);
+});
+
 test('third-season resume and mpv close report the final file position then release session', async ({ page, request }) => {
   await openDesktop(page, request);
   await browseLibrary(page);

@@ -131,7 +131,9 @@ const API = {
       body = JSON.stringify(body);
     }
 
-    const res = await this.rawFetch(path, { ...options, method, body });
+    // Cookie mutations must fully settle in Rust before UI identity can recover or change again.
+    const timeoutMs = options.timeoutMs ?? (path.startsWith('/auth/') && method !== 'GET' && method !== 'HEAD' ? 0 : undefined);
+    const res = await this.rawFetch(path, { ...options, timeoutMs, method, body });
 
     if (res.status === 204) return null;
 
@@ -298,8 +300,9 @@ const API = {
     return this.request('/auth/me');
   },
 
-  async login(username, password, remember = true) {
+  async login(username, password, remember = true, options = {}) {
     return this.request('/auth/login', {
+      ...options,
       method: 'POST',
       body: { username, password, remember },
     });
@@ -309,8 +312,9 @@ const API = {
     return this.request('/auth/bootstrap');
   },
 
-  async createAdmin(username, password) {
+  async createAdmin(username, password, options = {}) {
     return this.request('/auth/bootstrap', {
+      ...options,
       method: 'POST',
       body: { username, password },
     });

@@ -68,6 +68,11 @@ http.createServer(async (req, res) => {
     if (route === '/health') return json(res, { status: 'ok', service: 'movieclaw', version: '0.34.0' });
     if (route === '/auth/bootstrap') return json(res, ok({ initialized: state.initialized }));
     if (route === '/auth/login') {
+      if (state.loginDelay) await new Promise(resolve => setTimeout(resolve, state.loginDelay));
+      if (state.loginFailures > 0) {
+        state.loginFailures--;
+        return json(res, { message: '密码错误，请重试' }, 401);
+      }
       if (!body?.username || !body?.password) return json(res, { message: '密码错误' }, 401);
       state.authenticated = true; state.username = body.username;
       return json(res, ok({ username: state.username, role: 'admin', capabilities: [] }));

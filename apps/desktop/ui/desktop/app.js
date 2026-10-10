@@ -265,11 +265,22 @@ const App = {
       </div>
     `;
 
-    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+    const form = document.getElementById('loginForm');
+    const btn = document.getElementById('loginBtn');
+    const cancel = document.getElementById('cancelAddAccount');
+    const changeServer = document.getElementById('loginChangeServer');
+    let submitting = false;
+    const setSubmitting = busy => {
+      submitting = busy;
+      btn.disabled = busy;
+      if (cancel) cancel.disabled = busy;
+      changeServer.disabled = busy;
+    };
+    form.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const btn = document.getElementById('loginBtn');
+      if (submitting) return;
       const err = document.getElementById('loginError');
-      btn.disabled = true;
+      setSubmitting(true);
       btn.textContent = '正在登录...';
       err.textContent = '';
       let attemptGeneration = this.viewGeneration;
@@ -281,18 +292,21 @@ const App = {
         // Stop against the old Cookie first, then retire its request/progress identity before Cookie mutation.
         await this.resetContext();
         attemptGeneration = this.viewGeneration;
-        const result = setup ? await API.createAdmin(user, pass) : await API.login(user, pass);
+        // Await the transport's final result; a UI-only timeout cannot undo a late Set-Cookie.
+        const result = setup ? await API.createAdmin(user, pass, { timeoutMs: 0 }) : await API.login(user, pass, true, { timeoutMs: 0 });
         if (attemptGeneration !== this.viewGeneration) return;
         await this.enterSession(result);
       } catch (ex) {
         if (attemptGeneration !== this.viewGeneration) return;
         err.textContent = ex.message || '登录失败';
-        btn.disabled = false;
         btn.textContent = setup ? '创建管理员' : '登录';
+      } finally {
+        if (attemptGeneration === this.viewGeneration && document.getElementById('loginForm') === form) setSubmitting(false);
       }
     });
-    document.getElementById('loginChangeServer').addEventListener('click', () => this.changeServer());
-    document.getElementById('cancelAddAccount')?.addEventListener('click', async () => {
+    changeServer.addEventListener('click', () => { if (!submitting) return this.changeServer(); });
+    cancel?.addEventListener('click', async () => {
+      if (submitting) return;
       try {
         this._resumeRoute = { page: 'settings', params: {} };
         await this.enterSession(await API.getSession());

@@ -27,16 +27,12 @@ $app = $null
 $pipe = $null
 $oldDataDir = $env:MOVIECLAW_DATA_DIR
 $oldWebviewDir = $env:WEBVIEW2_USER_DATA_FOLDER
+. (Join-Path $PSScriptRoot 'native-process.ps1')
 try {
-    $consoleMpv = Join-Path $runtime 'mpv.com'
-    $versionOutput = & $consoleMpv --no-config --version 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch 'mpv ') { throw 'Bundled mpv cannot start' }
-    $environment.mpv.actualVersion = $versionOutput.Trim()
-    Write-Host $versionOutput.Trim()
-    # Real video decoding with deterministic CPU/null output (CI has no HDR display).
-    $decoder = Start-Process $consoleMpv -ArgumentList @('--no-config', '--vo=null', '--ao=null', '--frames=5', 'av://lavfi:testsrc=size=64x64:rate=24') -PassThru -NoNewWindow
-    if (-not $decoder.WaitForExit(15000)) { $decoder.Kill(); throw 'mpv synthetic video decode timed out' }
-    if ($decoder.ExitCode -ne 0) { throw 'mpv synthetic video decode failed' }
+    & (Join-Path $PSScriptRoot 'mpv-preflight.ps1') -RuntimeDirectory $runtime
+    $environment = Get-Content $environmentPath -Raw | ConvertFrom-Json -AsHashtable
+    $environment.nativeSmoke = @{}
+    $null = $environment.Remove('nativeSmokeError')
 
     # A finite WAV is seekable and does not require FFmpeg on the runner.
     $wav = Join-Path $temp 'sample.wav'
@@ -51,7 +47,7 @@ try {
         $writer.Write([byte[]]::new($dataBytes))
     } finally { $writer.Dispose() }
     $pipeName = "movieclaw-smoke-$([guid]::NewGuid().ToString('N'))"
-    $player = Start-Process (Join-Path $runtime 'mpv.exe') -ArgumentList @('--no-config', '--vo=null', '--ao=null', '--pause=yes', '--idle=yes', '--keep-open=yes', "--input-ipc-server=\\.\pipe\$pipeName", $wav) -PassThru
+    $player = Start-NativeProcess (Join-Path $runtime 'mpv.exe') @('--no-config', '--vo=null', '--ao=null', '--pause=yes', '--idle=yes', '--keep-open=yes', "--input-ipc-server=\\.\pipe\$pipeName", $wav)
     $pipe = [System.IO.Pipes.NamedPipeClientStream]::new('.', $pipeName, [System.IO.Pipes.PipeDirection]::InOut)
     $pipe.Connect(5000)
     $inputReader = [System.IO.StreamReader]::new($pipe)
@@ -158,6 +154,7 @@ public static class MovieClawSmokeWindow {
     }
     Write-Host 'PASS: package integrity, mpv synthetic decode/IPC, native WebView2 startup and bounded shutdown'
 } catch {
+    $environment.mpv = (Get-Content $environmentPath -Raw | ConvertFrom-Json -AsHashtable).mpv
     $environment.nativeSmokeError = $_.Exception.Message
     throw
 } finally {

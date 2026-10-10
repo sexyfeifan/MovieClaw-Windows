@@ -79,6 +79,71 @@ test('Cookie account mutations use username, active and the real DELETE route', 
   assert.equal(requests[2].path, '/auth/accounts/%E5%A7%93%E5%90%8D%2Fa');
 });
 
+test('Cookie mutations await Rust completion and retain explicit timeouts while reads stay bounded', async () => {
+  const h = harness(), timers = [];
+  const timer = h.context.setTimeout;
+  h.context.setTimeout = (callback, delay) => { timers.push(delay); return timer(callback, delay); };
+  await h.API.login('bob', 'fixture-password');
+  await h.API.createAdmin('bob', 'fixture-password');
+  await h.API.switchAccount('bob');
+  await h.API.removeAccount('alice');
+  await h.API.request('/auth/logout', { method: 'POST' });
+  assert.deepEqual(timers, [], 'a JS-only timeout cannot safely abandon a Cookie mutation');
+  await h.API.getSession();
+  await h.API.listLibraries();
+  assert.deepEqual(timers, [20000, 20000]);
+  await h.API.login('bob', 'fixture-password', true, { timeoutMs: 123 });
+  await h.API.createAdmin('bob', 'fixture-password', { timeoutMs: 124 });
+  assert.deepEqual(timers, [20000, 20000, 123, 124]);
+});
+
+test('pending login guards duplicate submit, cancel and server change until failure or final identity settles', async () => {
+  const first = deferred(), second = deferred();
+  let attempts = 0, cookie = 'alice';
+  const h = harness(async args => {
+    if (args.path === '/auth/login') {
+      attempts++;
+      if (attempts === 1) return first.promise;
+      await second.promise;
+      cookie = 'bob';
+      return { data: { username: cookie } };
+    }
+    if (args.path === '/auth/me') return { data: { username: cookie } };
+    return { data: [] };
+  });
+  h.context.document.querySelector = () => null;
+  h.A.renderHome = async () => {};
+  h.A.session = { username: 'alice' };
+  h.A.renderLogin({ addAccount: true });
+  h.context.document.getElementById('loginUser').value = 'bob';
+  h.context.document.getElementById('loginPass').value = 'fixture-password';
+  const form = h.elements.get('loginForm'), cancel = h.elements.get('cancelAddAccount'), change = h.elements.get('loginChangeServer'), button = h.elements.get('loginBtn');
+  const pending = form.emit('submit', { preventDefault() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(attempts, 1);
+  assert.equal(cancel.disabled, true);
+  assert.equal(change.disabled, true);
+  await cancel.emit('click'); await change.emit('click'); await form.emit('submit', { preventDefault() {} });
+  assert.equal(attempts, 1);
+  assert.equal(h.calls.some(call => call.command === 'clear_server_url' || call.path === '/auth/me'), false);
+  first.resolve({ status: 401, body: JSON.stringify({ message: '密码错误' }) });
+  await pending;
+  assert.equal(button.disabled, false);
+  assert.equal(cancel.disabled, false);
+  assert.equal(change.disabled, false);
+  assert.equal(h.elements.get('loginError').textContent, '密码错误');
+  const retry = form.emit('submit', { preventDefault() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  await cancel.emit('click'); await change.emit('click');
+  assert.equal(attempts, 2);
+  assert.equal(cookie, 'alice');
+  second.resolve(); await retry;
+  assert.equal(cookie, 'bob');
+  assert.equal(h.A.session.username, 'bob');
+  assert.equal(h.A._authPending, false);
+  assert.equal(h.A._changingContext, false);
+});
+
 for (const action of ['login', 'bootstrap', 'logout', 'remove', 'switch']) {
   test(`${action} retires the old progress identity before the server can change its Cookie`, async () => {
     const closing = deferred(), progress = deferred();
