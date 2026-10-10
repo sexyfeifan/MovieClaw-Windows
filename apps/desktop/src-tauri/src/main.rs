@@ -9,18 +9,48 @@ mod updater;
 use std::sync::atomic::{AtomicU8, Ordering};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
-// 0 = running, 1 = JS is flushing playback, 2 = native cleanup complete.
+// 0 = running, 1 = JS flushing, 2 = cleanup queued, 3 = cleanup complete.
 static SHUTDOWN: AtomicU8 = AtomicU8::new(0);
 
-fn finish_shutdown(app: tauri::AppHandle) {
-    if SHUTDOWN.swap(2, Ordering::SeqCst) == 2 {
+fn shutdown_trace(phase: &str) {
+    if std::env::var("MOVIECLAW_DIAGNOSTICS").as_deref() != Ok("1") {
         return;
     }
-    api_proxy::cancel_all_requests();
-    let cleanup_app = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        let _ = player_embedded::stop_embedded_player(None);
-        cleanup_app.exit(0);
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(connect::config_dir().join("shutdown.log"))
+    {
+        let _ = writeln!(file, "{phase}");
+    }
+}
+
+fn finish_shutdown(app: tauri::AppHandle) {
+    if SHUTDOWN
+        .compare_exchange(1, 2, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    shutdown_trace("cleanup-queued");
+    // Never dispatch inline while inside a Tauri window/IPC callback. The Wry
+    // dispatcher can execute main-thread tasks immediately and re-enter locks.
+    std::thread::spawn(move || {
+        api_proxy::cancel_all_requests();
+        let cleanup_app = app.clone();
+        if app
+            .run_on_main_thread(move || {
+                shutdown_trace("native-cleanup-started");
+                let _ = player_embedded::stop_embedded_player(None);
+                SHUTDOWN.store(3, Ordering::SeqCst);
+                shutdown_trace("native-exit-requested");
+                cleanup_app.exit(0);
+            })
+            .is_err()
+        {
+            shutdown_trace("native-dispatch-failed");
+        }
     });
 }
 
@@ -31,13 +61,26 @@ fn request_shutdown(app: &tauri::AppHandle) {
     {
         return;
     }
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.eval(r#"Promise.resolve().then(() => window.__MOVIECLAW_SHUTDOWN__?.()).catch(() => {}).finally(() => window.__TAURI__.core.invoke("complete_shutdown"))"#);
-    }
+    shutdown_trace("shutdown-requested");
+    // Start the deadline before contacting WebView2. The close event callback
+    // must return before any work attempts to acquire the window again.
     let fallback_app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(1500));
+        shutdown_trace("deadline-reached");
         finish_shutdown(fallback_app);
+    });
+    let script_app = app.clone();
+    std::thread::spawn(move || {
+        shutdown_trace("js-dispatch");
+        if let Some(window) = script_app.get_webview_window("main") {
+            let result = window.eval(r#"Promise.resolve().then(() => window.__MOVIECLAW_SHUTDOWN__?.()).catch(() => {}).finally(() => window.__TAURI__.core.invoke("complete_shutdown"))"#);
+            shutdown_trace(if result.is_ok() {
+                "js-eval-queued"
+            } else {
+                "js-eval-failed"
+            });
+        }
     });
 }
 
@@ -202,7 +245,8 @@ fn main() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if SHUTDOWN.load(Ordering::SeqCst) != 2 {
+                shutdown_trace("close-requested");
+                if SHUTDOWN.load(Ordering::SeqCst) != 3 {
                     api.prevent_close();
                     request_shutdown(window.app_handle());
                 }
@@ -235,7 +279,8 @@ fn main() {
         .expect("error while building MovieClaw Desktop")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                if SHUTDOWN.load(Ordering::SeqCst) != 2 {
+                shutdown_trace("exit-requested-event");
+                if SHUTDOWN.load(Ordering::SeqCst) != 3 {
                     api.prevent_exit();
                     request_shutdown(app);
                 }

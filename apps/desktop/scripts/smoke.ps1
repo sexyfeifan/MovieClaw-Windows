@@ -27,6 +27,7 @@ $app = $null
 $pipe = $null
 $oldDataDir = $env:MOVIECLAW_DATA_DIR
 $oldWebviewDir = $env:WEBVIEW2_USER_DATA_FOLDER
+$oldDiagnostics = $env:MOVIECLAW_DIAGNOSTICS
 . (Join-Path $PSScriptRoot 'native-process.ps1')
 try {
     & (Join-Path $PSScriptRoot 'mpv-preflight.ps1') -RuntimeDirectory $runtime
@@ -92,12 +93,15 @@ try {
 using System;
 using System.Runtime.InteropServices;
 public static class MovieClawSmokeWindow {
-    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", SetLastError=true)] public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder name, int length);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 }
 '@
     function Test-NativeApp([string]$Executable, [string]$Label) {
-        $env:MOVIECLAW_DATA_DIR = Join-Path $temp 'data'
-        $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $temp 'webview2'
+        $env:MOVIECLAW_DATA_DIR = Join-Path $temp "data-$Label"
+        $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $temp "webview2-$Label"
+        $env:MOVIECLAW_DIAGNOSTICS = '1'
         $measurement = @{ status = 'starting' }
         $environment.nativeSmoke[$Label] = $measurement
         $startupTimer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -111,6 +115,13 @@ public static class MovieClawSmokeWindow {
             Start-Sleep -Milliseconds 100
         }
         if ($window -eq [IntPtr]::Zero) { throw 'Tauri main window was not created' }
+        $windowClass = [System.Text.StringBuilder]::new(256)
+        $null = [MovieClawSmokeWindow]::GetClassName($window, $windowClass, 256)
+        [uint32]$windowProcess = 0
+        $null = [MovieClawSmokeWindow]::GetWindowThreadProcessId($window, [ref]$windowProcess)
+        $measurement.window = @{ handle = $window.ToInt64(); class = $windowClass.ToString(); title = $script:app.MainWindowTitle; processId = $windowProcess }
+        Write-Host "Native window: $($script:app.MainWindowTitle), class=$windowClass, hwnd=$window, owner=$windowProcess"
+        if ($windowProcess -ne $script:app.Id) { throw 'Native smoke selected a window from another process' }
         $webviewFound = $false
         for ($attempt = 0; $attempt -lt 50; $attempt++) {
             $children = @(Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" | Where-Object { $_.ParentProcessId -eq $script:app.Id })
@@ -126,7 +137,9 @@ public static class MovieClawSmokeWindow {
         }
         $measurement.status = 'closing'
         $shutdownTimer = [System.Diagnostics.Stopwatch]::StartNew()
-        $null = [MovieClawSmokeWindow]::PostMessage($window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+        $posted = [MovieClawSmokeWindow]::PostMessage($window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+        $measurement.closeMessagePosted = $posted
+        if (-not $posted) { throw "WM_CLOSE PostMessage failed: $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
         if (-not $script:app.WaitForExit(5000)) { throw 'Tauri shutdown exceeded its bounded cleanup window' }
         $shutdownTimer.Stop()
         $measurement.shutdownSeconds = [Math]::Round($shutdownTimer.Elapsed.TotalSeconds, 3)
@@ -158,11 +171,20 @@ public static class MovieClawSmokeWindow {
     $environment.nativeSmokeError = $_.Exception.Message
     throw
 } finally {
+    foreach ($label in @('portable', 'installed')) {
+        $tracePath = Join-Path $temp "data-$label\shutdown.log"
+        if (Test-Path $tracePath) {
+            $trace = Get-Content $tracePath -Raw
+            $environment.nativeSmoke[$label].shutdownTrace = $trace
+            Write-Host "$label shutdown trace: $trace"
+        }
+    }
     $environment | ConvertTo-Json -Depth 8 | Set-Content $environmentPath -Encoding utf8
     if ($pipe) { $pipe.Dispose() }
     if ($player -and -not $player.HasExited) { $player.Kill() }
     if ($script:app -and -not $script:app.HasExited) { $script:app.Kill() }
     $env:MOVIECLAW_DATA_DIR = $oldDataDir
     $env:WEBVIEW2_USER_DATA_FOLDER = $oldWebviewDir
+    $env:MOVIECLAW_DIAGNOSTICS = $oldDiagnostics
     Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
 }
