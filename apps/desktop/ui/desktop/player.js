@@ -16,14 +16,20 @@ function ProxyHlsLoader(config) {
 }
 
 ProxyHlsLoader.prototype.destroy = function () {
+  this.abort();
   this.callbacks = null;
 };
 
 ProxyHlsLoader.prototype.abort = function () {
   if (this.stats) this.stats.aborted = true;
+  if (this.requestId && window.__TAURI__?.core?.invoke) {
+    window.__TAURI__.core.invoke('cancel_proxy_request', { requestId: this.requestId }).catch(() => {});
+  }
+  this.requestId = null;
 };
 
 ProxyHlsLoader.prototype.load = function (context, config, callbacks) {
+  if (this.requestId) this.abort();
   this.context = context;
   this.callbacks = callbacks;
   // 重置字段，绝不换对象 — frag.stats 持有构造时创建的引用
@@ -48,18 +54,28 @@ ProxyHlsLoader.prototype.load = function (context, config, callbacks) {
     fullUrl = base + (url.startsWith('/') ? url : '/' + url);
   }
   var path = '/__stream__?url=' + encodeURIComponent(fullUrl);
+  var headers = {};
+  if (Number.isFinite(context.rangeStart)) {
+    headers.Range = 'bytes=' + context.rangeStart + '-' +
+      (Number.isFinite(context.rangeEnd) ? context.rangeEnd - 1 : '');
+  }
+  var requestId = 'hls-' + Date.now().toString(36) + Math.random().toString(36).slice(2);
+  this.requestId = requestId;
 
   var self = this;
   window.__TAURI__.core.invoke('proxy_api', {
     method: 'GET',
     path: path,
     body: null,
+    headers: headers,
+    requestId: requestId,
   }).then(function (result) {
-    if (self.stats.aborted) return;
+    if (self.stats.aborted || self.requestId !== requestId) return;
+    self.requestId = null;
     self.stats.loading.first = performance.now();
     self.stats.loading.end = performance.now();
 
-    if (result.status !== 200) {
+    if (result.status !== 200 && result.status !== 206) {
       callbacks.onError({ code: result.status, text: 'HTTP ' + result.status }, self.stats, context, null);
       return;
     }
@@ -84,9 +100,11 @@ ProxyHlsLoader.prototype.load = function (context, config, callbacks) {
       self.stats.total = result.body.length;
     }
 
-    callbacks.onSuccess({ url: url, data: responseData, code: result.status }, self.stats, context, null);
+    var networkDetails = { status: result.status, headers: result.headers || {} };
+    callbacks.onSuccess({ url: url, data: responseData, code: result.status }, self.stats, context, networkDetails);
   }).catch(function (err) {
-    if (self.stats.aborted) return;
+    if (self.stats.aborted || self.requestId !== requestId) return;
+    self.requestId = null;
     self.stats.loading.end = performance.now();
     console.error('[ProxyHlsLoader] failed:', url, err);
     callbacks.onError({ code: 0, text: (err && err.message) || '代理请求失败' }, self.stats, context, null);
@@ -95,6 +113,13 @@ ProxyHlsLoader.prototype.load = function (context, config, callbacks) {
 
 // 挂到 window 确保全局可见
 window.ProxyHlsLoader = ProxyHlsLoader;
+
+// 收尾不能让窗口退出或换片无限等待网络。
+function boundedPlaybackWait(promise, milliseconds) {
+  let timer;
+  return Promise.race([promise, new Promise(resolve => { timer = setTimeout(resolve, milliseconds); })])
+    .finally(() => clearTimeout(timer));
+}
 
 // ===== 解码能力探测（移植自 web 客户端 lib/player/capability.ts，字段与服务端 ClientCapabilityIn 对应）=====
 // 不用 canPlayType（分不清「能解」和「能流畅解」），走 mediaCapabilities.decodingInfo：
@@ -405,6 +430,16 @@ const Player = {
   progressTimer: null,
   pingTimer: null,
   lastProgressReport: 0,
+  context: null,
+  originMs: 0,
+  durationMs: 0,
+  activeEngine: null,
+  generation: 0,
+  _reportedStart: false,
+  _ended: false,
+  _closePromise: null,
+  _reportQueue: [],
+  _reportRunning: false,
   // JASSUB 字幕渲染
   jassub: null,
   jassubTracks: [],
@@ -518,10 +553,12 @@ const Player = {
 
     // 视频事件
     this.video.addEventListener('timeupdate', () => {
+      if (this.activeEngine !== 'html5') return;
       this.updateProgress();
       this.checkSegments();
     });
     this.video.addEventListener('loadedmetadata', () => {
+      if (this.activeEngine !== 'html5') return;
       this.renderChapters(this.sessionData?.chapters);
       // 片长在这里才定下来，下行两端要立刻跟上；只等 timeupdate 的话，起播慢时
       // 右侧会一直挂着占位（mpv 那条链靠轮询的首个 tick 补上，HTML5 得在这补）
@@ -540,27 +577,32 @@ const Player = {
       this.showControls();
     });
     this.video.addEventListener('ended', () => {
+      if (this.activeEngine !== 'html5') return;
       this.showIcon('play');
       this.showCenterBtn();
       this.showControls();
       this.reportPlaybackEnd();
     });
     this.video.addEventListener('waiting', () => {
+      if (this.activeEngine !== 'html5') return;
       this._buffering = true;
       const loading = document.getElementById('playerLoading');
       if (loading) loading.hidden = false;
     });
     this.video.addEventListener('playing', () => {
+      if (this.activeEngine !== 'html5') return;
       this._everPlayed = true;
       this._buffering = false;
       const loading = document.getElementById('playerLoading');
       if (loading) loading.hidden = true;
+      this.startProgressReporting();
     });
     this.video.addEventListener('error', () => {
+      if (this.activeEngine !== 'html5') return;
       const text = document.getElementById('playerLoadingText');
       const loading = document.getElementById('playerLoading');
       // 首帧前解不了（浏览器不认该格式/编码）→ 走 failed_tiers 降档回路换转码
-      if (!this._everPlayed && typeof App !== 'undefined' && App.onPlaybackContentFailed) {
+      if (typeof App !== 'undefined' && App.onPlaybackContentFailed) {
         App.onPlaybackContentFailed('无法解码该视频格式');
         return;
       }
@@ -1297,109 +1339,100 @@ const Player = {
   currentQuality: 0, // 0=原画, 否则 maxHeight
 
   async selectQuality(maxHeight) {
-    // mpv 会话不走下面那条 HTML5 重协商链：带着 max_height 重开起播链，由它按
-    // 「限了画质就别报 universal」重谈会话（decide.py 的 universal 分支不受 max_height
-    // 影响，报了还是原文件直出，上限整个失效）。这一开是新协商，failed_tiers 一并清掉
-    // （对齐 macOS switchQuality）
-    if (window.__MOVIECLAW_MPV_ACTIVE) {
-      this.hideSettings();
-      // 上限记下来：画质菜单要亮对档，下一张建议卡的 currentHeight 也按它夹
-      this.currentQuality = maxHeight;
-      const sd = this.sessionData;
-      if (sd && typeof App !== 'undefined') {
-        App.startPlayback({
-          media_item_id: sd.media_item_id,
-          title: this.currentTitle,
-          library_id: sd.library_id,
-          seasonNumber: sd.season_number,
-          episodeNumber: sd.episode_number,
-          startMs: Math.floor(this.engPos() * 1000),
-          __maxHeight: maxHeight,
-        });
-      }
-      return;
-    }
-    this.currentQuality = maxHeight;
-    // 如果 session data 存在，重新请求播放会话
-    if (this.sessionData?.media_item_id && typeof App !== 'undefined') {
-      const currentTime = this.video ? this.video.currentTime : 0;
-      this.video?.pause();
-      const loading = document.getElementById('playerLoading');
-      const loadingText = document.getElementById('playerLoadingText');
-      if (loading) loading.hidden = false;
-      if (loadingText) loadingText.textContent = '正在切换画质...';
-
-      // 重新协商 session：能力按当前引擎如实申报，画质上限放请求顶层 max_height。
-      // 原来把 universal:true 和 video:[{max_height}] 塞进 capability 是两处错位：
-      // universal 分支直接给档 0 原文件（上限整个失效），video[] 里的 max_height
-      // 服务端也不读（读的是请求顶层，decide.py 的 max_height 参数）
-      const mediaId = this.sessionData.media_item_id;
-      try {
-        const capability = await getCapabilitySnapshot();
-        const body = {
-          media_item_id: mediaId,
-          capability,
-          client: 'web',
-          start_ms: Math.floor(currentTime * 1000),
-          attempt_id: Date.now().toString(36) + Math.random().toString(36).slice(2),
-        };
-        if (maxHeight > 0) body.max_height = maxHeight;
-        const resp = await API.request('/playback/sessions', { method: 'POST', body });
-        const session = resp?.data || resp;
-        if (!session?.stream_url) throw new Error('切换画质失败');
-        const origin = API.baseUrl;
-        const streamUrl = session.stream_url.startsWith('http')
-          ? session.stream_url
-          : origin + (session.stream_url.startsWith('/api/') ? session.stream_url : '/api/v1' + (session.stream_url.startsWith('/') ? session.stream_url : '/' + session.stream_url));
-        this.sessionData = session;
-        if (!session.media_item_id) session.media_item_id = mediaId;
-
-        // 重新加载流
-        if (this.hls) { this.hls.destroy(); this.hls = null; }
-        const isHls = streamUrl.includes('.m3u8') || streamUrl.includes('/hls');
-        if (isHls && window.Hls && Hls.isSupported()) {
-          this.hls = new Hls({
-            maxBufferLength: 60,
-            maxMaxBufferLength: 60,
-            // 与主路径一致：TTFB 盖过服务端 ensure_segment 30s 等待
-            fragLoadPolicy: {
-              default: {
-                maxTimeToFirstByteMs: 45000,
-                maxLoadTimeMs: 120000,
-                timeoutRetry: { maxNumRetry: 4, retryDelayMs: 0, maxRetryDelayMs: 0 },
-                errorRetry: { maxNumRetry: 6, retryDelayMs: 1000, maxRetryDelayMs: 8000 },
-              },
-            },
-            loader: window.__TAURI__ ? ProxyHlsLoader : undefined,
-          });
-          this.hls.loadSource(streamUrl);
-          this.hls.attachMedia(this.video);
-          this.attachNetHooks(this.hls);
-          this.startNetMeter();
-          this.hls.on(Hls.Events.MANIFEST_PARSED, () => {
-            this.video.currentTime = currentTime;
-            this.video.play().catch(() => {});
-            if (loading) loading.hidden = true;
-          });
-        } else {
-          this.video.src = streamUrl;
-          this.video.addEventListener('loadedmetadata', () => {
-            this.video.currentTime = currentTime;
-            this.video.play().catch(() => {});
-            if (loading) loading.hidden = true;
-          }, { once: true });
-        }
-      } catch (e) {
-        console.error('Quality switch failed:', e);
-        if (loadingText) loadingText.textContent = '切换画质失败: ' + (e.message || e);
-        setTimeout(() => { if (loading) loading.hidden = true; }, 2000);
-      }
-    }
-    // 更新 UI
-    document.querySelectorAll('#playerSettingsContent .player-settings-item').forEach(el => {
-      el.classList.remove('active');
-    });
     this.hideSettings();
+    if (!this.context || typeof App === 'undefined') return;
+    return App.startPlayback({ ...this.context, startMs: Math.floor(this.engPos() * 1000),
+      __maxHeight: maxHeight, __resetFailures: true }, true);
+  },
+
+  // 两个引擎共用的播放上下文；所有外部时间均为文件时间，只有引擎边界换算。
+  adoptSession(title, session, context, engine) {
+    this.generation += 1;
+    this.context = { ...(context || {}), title };
+    if (this.context.file_id == null && session.decision?.file_id != null) this.context.file_id = session.decision.file_id;
+    this.sessionData = session;
+    this.sessionId = session.session_id || null;
+    this.mediaItemId = session.media_item_id ?? this.context.media_item_id;
+    this.seasonNumber = session.season_number ?? this.context.seasonNumber ?? 0;
+    this.episodeNumber = session.episode_number ?? this.context.episodeNumber ?? 0;
+    this.originMs = session.session_id && session.timeline === 'session' ? (session.start_ms ?? 0) : 0;
+    const file = (this.context.files || []).find(f => Number(f.id) === Number(session.decision?.file_id));
+    this.durationMs = [session.source?.duration_ms, session.watch?.duration_ms,
+      file?.duration_seconds != null ? file.duration_seconds * 1000 : null, this.context.durationMs]
+      .map(Number).find(ms => Number.isFinite(ms) && ms > 0) || 0;
+    this.currentTitle = title || 'MovieClaw';
+    this.currentQuality = this.context.__maxHeight ?? 0;
+    this.episodes = Array.isArray(this.context.episodes) ? this.context.episodes : [];
+    this.activeEngine = engine;
+    this._reportedStart = false;
+    this._ended = false;
+    this._everPlayed = false;
+    this._buffering = true;
+    this.lastProgressReport = 0;
+    this._reportIdentity = { server: API.baseUrl, account: App.session?.username || '', epoch: API.contextEpoch };
+    this.initSegments(session.segments);
+    this.syncEpisodeNav();
+    this.startSessionPing();
+  },
+
+  snapshot() {
+    return {
+      mediaItemId: this.mediaItemId, libraryId: this.context?.library_id,
+      seasonNumber: this.seasonNumber, episodeNumber: this.episodeNumber,
+      sessionId: this.sessionId, positionMs: Math.floor(this.engPos() * 1000),
+      durationMs: Math.floor(this.engDuration() * 1000), started: this._reportedStart,
+      extras: { paused: this.engPaused(), file_id: this.sessionData?.decision?.file_id },
+      identity: this._reportIdentity,
+    };
+  },
+
+  sendSnapshot(event, snapshot) {
+    if (!snapshot.mediaItemId) return Promise.resolve();
+    const queue = this._reportQueue;
+    // 断网时只留每个单元最近一次的周期进度；开始和结束仍按顺序发送。
+    const matching = event === 'progress' ? queue.find(job => job.event === 'progress' &&
+      job.snapshot.mediaItemId === snapshot.mediaItemId && job.snapshot.seasonNumber === snapshot.seasonNumber &&
+      job.snapshot.episodeNumber === snapshot.episodeNumber && job.snapshot.identity === snapshot.identity) : null;
+    if (matching) { matching.snapshot = snapshot; return matching.promise; }
+    if (queue.length + (this._reportRunning ? 1 : 0) >= 8) {
+      if (event === 'progress') return Promise.resolve(false);
+      const index = queue.findIndex(job => job.event === 'progress');
+      const discarded = queue.splice(index >= 0 ? index : 0, 1)[0];
+      discarded?.reject(new Error('进度队列已满，旧上报已丢弃'));
+    }
+    const job = { event, snapshot };
+    job.promise = new Promise((resolve, reject) => { job.resolve = resolve; job.reject = reject; });
+    queue.push(job);
+    this.drainReports();
+    return job.promise;
+  },
+
+  async drainReports() {
+    if (this._reportRunning) return;
+    this._reportRunning = true;
+    try {
+      while (this._reportQueue.length) {
+        const job = this._reportQueue.shift();
+        try {
+          for (let attempt = 0; ; attempt++) {
+            const s = job.snapshot;
+            const identity = s.identity;
+            if (identity && (identity.server !== API.baseUrl || identity.account !== (App.session?.username || '') ||
+              identity.epoch !== API.contextEpoch)) throw new Error('播放上下文已更换，取消旧进度上报');
+            try {
+              await API.reportProgress(s.mediaItemId, job.event, s.positionMs, s.durationMs,
+                s.seasonNumber, s.episodeNumber, s.extras, { timeoutMs: 3000, cancelable: true });
+              break;
+            } catch (error) {
+              const retryable = error.name !== 'AbortError' && (!error.status || error.status >= 500);
+              if (!retryable || attempt >= 2) throw error;
+              await new Promise(resolve => setTimeout(resolve, 200 * (attempt + 1)));
+            }
+          }
+          job.resolve(true);
+        } catch (error) { job.reject(error); }
+      }
+    } finally { this._reportRunning = false; }
   },
 
   // ===== 跳过片头/片尾 =====
@@ -1414,8 +1447,8 @@ const Player = {
   },
 
   checkSegments() {
-    if (!this.video || !this.currentSegments.length) return;
-    const curMs = this.video.currentTime * 1000;
+    if (!this.activeEngine || !this.currentSegments.length) return;
+    const curMs = this.engPos() * 1000;
     const btn = document.getElementById('playerSkipBtn');
     if (!btn) return;
 
@@ -1433,10 +1466,10 @@ const Player = {
   },
 
   skipSegment() {
-    if (this.currentSkipIndex < 0 || !this.video) return;
+    if (this.currentSkipIndex < 0 || !this.activeEngine) return;
     const seg = this.currentSegments[this.currentSkipIndex];
     if (seg) {
-      this.video.currentTime = seg.end_ms / 1000 + 0.5;
+      this.engSeekTo(seg.end_ms / 1000 + 0.5);
     }
     const btn = document.getElementById('playerSkipBtn');
     if (btn) btn.hidden = true;
@@ -1446,11 +1479,11 @@ const Player = {
   // ===== 章节标记 =====
   renderChapters(chapters) {
     const seek = document.getElementById('playerSeek');
-    if (!seek || !chapters?.length) return;
+    if (!seek) return;
     // 清除旧的章节标记
     seek.querySelectorAll('.player-chapter-mark').forEach(el => el.remove());
-    const dur = this.video?.duration;
-    if (!dur) return;
+    const dur = this.engDuration();
+    if (!dur || !chapters?.length) return;
     chapters.forEach(ch => {
       const pct = (ch.start_ms / 1000 / dur) * 100;
       if (pct < 0 || pct > 100) return;
@@ -1491,15 +1524,18 @@ const Player = {
     const title = season == null
       ? ep.name || seriesTitle
       : `${seriesTitle} S${season}E${ep.episode_number}`;
-    this.episodes = this.episodes.slice();
-    this.close();
+    const context = { ...this.context };
+    delete context.attemptId;
+    delete context.file_id;
     App.startPlayback({
+      ...context,
       media_item_id: mediaId,
       title,
-      library_id: this.sessionData?.library_id,
+      library_id: context.library_id,
       seasonNumber: season,
       episodeNumber: ep.episode_number,
       episodes: this.episodes,
+      startMs: null,
     });
   },
 
@@ -1516,7 +1552,7 @@ const Player = {
   },
 
   // 打开播放器并加载流
-  open(title, streamUrl, subtitles, startMs, sessionData) {
+  open(title, streamUrl, subtitles, startMs, sessionData, context) {
     const view = document.getElementById('playerView');
     const titleEl = document.getElementById('playerTitle');
     const loading = document.getElementById('playerLoading');
@@ -1528,19 +1564,9 @@ const Player = {
     if (loadingText) loadingText.textContent = '正在加载...';
 
     view.hidden = false;
-    this.sessionData = sessionData || null;
-    this.sessionId = sessionData?.session_id || sessionData?.id || null;
-    this.mediaItemId = sessionData?.media_item_id || sessionData?.mediaItemId || null;
-    this.seasonNumber = sessionData?.season_number ?? null;
-    this.episodeNumber = sessionData?.episode_number ?? null;
-    this.lastProgressReport = 0;
-
-    // 上一集 / 下一集：只在剧集里出现，缺集那一侧禁用（同 macOS MacPlayerTransport）
-    this.syncEpisodeNav();
-
-    // 启动进度上报定时器
-    this.startProgressReporting();
-    this.startSessionPing();
+    this.adoptSession(title, sessionData || {}, context, 'html5');
+    const generation = this.generation;
+    const alive = () => generation === this.generation && this.activeEngine === 'html5';
 
     // 初始化片段/章节
     this.initSegments(sessionData?.segments);
@@ -1591,27 +1617,33 @@ const Player = {
       this.attachNetHooks(this.hls);
       this.startNetMeter();
       this.hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (!alive()) return;
         if (startMs) this.video.currentTime = startMs / 1000;
         this.video.play().catch(() => {});
       });
       this.hls.on(Hls.Events.ERROR, (_, data) => {
+        if (!alive()) return;
         if (data.fatal) {
           const details = String(data.details || '');
           // 首帧前的 buffer* 错误 = 视频初始化数据本身解不了（如直通重封装的
           // hvcC 缺参数集）→ 交给 App 走 failed_tiers 降档回路换转码重来
-          if (!this._everPlayed && details.startsWith('buffer') &&
+          if (details.startsWith('buffer') &&
               typeof App !== 'undefined' && App.onPlaybackContentFailed) {
-            setTimeout(() => App.onPlaybackContentFailed(details), 0);
+            setTimeout(() => { if (alive()) App.onPlaybackContentFailed(details); }, 0);
             return;
           }
-          if (loadingText) loadingText.textContent = '播放失败: ' + (details || 'HLS 流加载错误');
-          if (loading) loading.hidden = false;
+          if (data.type === Hls.ErrorTypes?.NETWORK_ERROR && typeof App !== 'undefined') {
+            App.onPlaybackNetworkDead(details || '视频连接中断');
+          } else if (typeof App !== 'undefined') {
+            App.onPlaybackContentFailed(details || 'HLS 流加载错误');
+          }
         }
       });
     } else {
       // MP4 / WebM 等原生格式
       this.video.src = streamUrl;
       this.video.addEventListener('loadedmetadata', () => {
+        if (!alive()) return;
         if (startMs) this.video.currentTime = startMs / 1000;
         this.video.play().catch(() => {});
       }, { once: true });
@@ -1621,6 +1653,7 @@ const Player = {
     // 35 秒后明确报错/降档，而不是无限停在「正在加载...」。
     // readyState>=2 = 数据其实到了（如自动播放被浏览器拦下），不算内容失败
     this._stuckTimer = setTimeout(() => {
+      if (!alive()) return;
       if (this._everPlayed || (this.video && this.video.readyState >= 2)) return;
       const lt = loadingText ? loadingText.textContent : '';
       if (lt && lt.startsWith('播放失败')) return; // 已有明确错误，不覆盖
@@ -1654,52 +1687,66 @@ const Player = {
     this.autoHideControls();
   },
 
-  // 关闭播放器
-  close() {
-    // 作废仍在途的 startPlayback：否则请求回来晚一步会把新界面覆盖成旧影片
-    if (typeof App !== 'undefined') App._playbackSeq = (App._playbackSeq || 0) + 1;
-    // mpv 会话结束（含切回 HTML5 的场景）：标志不清会让 selectQuality 一直拒接画质切换；
-    // 顺手收掉 mpv，否则 startPlayback 开新片时旧 mpv 还压在画面上
-    if (window.__MOVIECLAW_MPV_ACTIVE) {
-      window.__MOVIECLAW_MPV_ACTIVE = false;
-      this.stopMpvPoll();
-      if (window.__TAURI__?.core?.invoke) {
-        window.__TAURI__.core.invoke('set_embedded_player_visible', { visible: false }).catch(() => {});
-        window.__TAURI__.core.invoke('stop_embedded_player').catch(() => {});
+  // 先快照再撤引擎；异步收尾有上限，调用者可等 mpv 停完再装下一部。
+  close(options = {}) {
+    if (options.invalidate !== false && typeof App !== 'undefined') App._playbackSeq = (App._playbackSeq || 0) + 1;
+    if (typeof App !== 'undefined') App.cancelAutoNext();
+    if (!this.activeEngine && this._closePromise) {
+      if (options.hide !== false) {
+        const view = document.getElementById('playerView');
+        if (view) view.hidden = true;
+        this.hidePlayerDialog();
       }
+      return this._closePromise;
     }
-    // 上报最终进度
-    this.reportPlaybackStop();
+    const snapshot = this.snapshot();
+    const wasMpv = this.isMpv();
+    const instanceId = this.mpvInstanceId;
+    const started = this._reportedStart;
+    const stopReport = started ? this.sendSnapshot('stop', snapshot).then(() => {
+      window.dispatchEvent(new CustomEvent('movieclaw:playback-stopped', { detail: snapshot }));
+    }).catch(() => {}) : Promise.resolve();
+    const sessionStop = snapshot.sessionId ? API.sessionStop(snapshot.sessionId).catch(() => {}) : Promise.resolve();
+    this.activeEngine = null;
+    this.generation += 1;
+    this._reportedStart = false;
+    this.sessionId = null;
+    this.mediaItemId = null;
+    this.sessionData = null;
+    this.context = null;
+    window.__MOVIECLAW_MPV_ACTIVE = false;
+    this.stopMpvPoll();
     this.stopProgressReporting();
     this.stopSessionPing();
     clearTimeout(this._stuckTimer);
-    // 拖动跟随排到一半的那次别在关播后落地
-    if (this._scrubFollowTask) { clearTimeout(this._scrubFollowTask); this._scrubFollowTask = null; }
+    if (this._scrubFollowTask) clearTimeout(this._scrubFollowTask);
+    this._scrubFollowTask = null;
     this._scrubPct = null;
+    this.isSeeking = false;
     this.stopNetMeter();
     this.stopWatchdogs();
     this.hideInfoPanel();
-    // 错误/同意对话框压在播放器上：关播放器就得一起走，否则黑屏上留个框
     this.hidePlayerDialog();
-    // 通知服务端结束会话，立即释放直通/转码槽位（否则要等 180s 空闲回收，
-    // 连播几部就把 4/4 槽位占满 → 后续播放全 503）
-    if (this.sessionId) {
-      API.sessionStop(this.sessionId).catch(() => {});
-      this.sessionId = null;
-    }
     this.destroyJassub();
-
     const view = document.getElementById('playerView');
-    if (view) view.hidden = true;
+    if (view && options.hide !== false) view.hidden = true;
     if (this.hls) { this.hls.destroy(); this.hls = null; }
     if (this.video) {
+      this.video.style.display = '';
       this.video.pause();
       this.video.removeAttribute('src');
       this.video.innerHTML = '';
       this.video.load();
     }
-    if (document.fullscreenElement) document.exitFullscreen();
+    if (document.fullscreenElement && options.hide !== false) document.exitFullscreen().catch(() => {});
     clearTimeout(this.hideTimer);
+    const nativeStop = wasMpv && window.__TAURI__?.core?.invoke
+      ? window.__TAURI__.core.invoke('stop_embedded_player', { instanceId }).catch(() => {}) : Promise.resolve();
+    this._nativeStop = nativeStop;
+    const task = boundedPlaybackWait(Promise.allSettled([stopReport, sessionStop, nativeStop]), 1200);
+    this._closePromise = task;
+    task.finally(() => { if (this._closePromise === task) this._closePromise = null; });
+    return task;
   },
 
   // ===== 播放引擎读写 =====
@@ -1715,16 +1762,21 @@ const Player = {
   // 发一条 mpv JSON IPC 命令。失败只记日志：mpv 退了由 stop 收尾，不该把 UI 打断
   mpvCmd(command) {
     if (!window.__TAURI__?.core?.invoke) return Promise.resolve(null);
-    return window.__TAURI__.core.invoke('send_mpv_command_embedded', { command })
+    return window.__TAURI__.core.invoke('send_mpv_command_embedded', { command, instanceId: this.mpvInstanceId })
       .catch(e => { console.warn('[mpv]', command && command[0], (e && e.message) || e); return null; });
   },
 
   engPos() {
-    return this.isMpv() ? (this.mpvState ? this.mpvState.time : 0) : (this.video ? this.video.currentTime : 0);
+    const streamTime = this.isMpv() ? (this.mpvState?.time ?? 0) : (this.video?.currentTime ?? 0);
+    return this.originMs / 1000 + (Number.isFinite(streamTime) ? streamTime : 0);
   },
 
   engDuration() {
-    return this.isMpv() ? (this.mpvState ? this.mpvState.duration : 0) : (this.video ? this.video.duration || 0 : 0);
+    if (this.durationMs > 0) return this.durationMs / 1000;
+    // EVENT 会话的 duration 只是目前已产出的尾，不可当成整部片长。
+    if (this.usesSessionTimeline) return 0;
+    const duration = this.isMpv() ? this.mpvState?.duration : this.video?.duration;
+    return Number.isFinite(duration) && duration > 0 ? this.originMs / 1000 + duration : 0;
   },
 
   engPaused() {
@@ -1748,10 +1800,21 @@ const Player = {
     this._frameDrops?.reset();
     this._qualitySuggestion?.restartGrace();
     const dur = this.engDuration();
-    const t = Math.max(0, dur ? Math.min(dur, sec) : sec);
+    const target = Math.max(0, dur ? Math.min(Math.max(0, dur - 0.1), sec) : sec);
+    if (this.usesSessionTimeline) {
+      if (target < this.originMs / 1000 || target > this.engBufferedEndSec()) {
+        if (typeof App !== 'undefined') App.restartPlaybackAt(Math.floor(target * 1000));
+        return;
+      }
+    }
+    if (this._ended && typeof App !== 'undefined') {
+      App.restartPlaybackAt(Math.floor(target * 1000));
+      return;
+    }
+    const t = Math.max(0, target - this.originMs / 1000);
     if (this.isMpv()) {
       if (this.mpvState) this.mpvState.time = t;
-      this.mpvCmd(['seek', t, 'absolute']);
+      this.mpvCmd(['seek', t, 'absolute', 'exact']);
     } else if (this.video) {
       this.video.currentTime = t;
     }
@@ -1765,7 +1828,9 @@ const Player = {
   // 次数，松手那次才算，同 macOS scrubFollow），mpv 用关键帧 seek——扫动途中要的是快
   engFollowTo(sec) {
     const dur = this.engDuration();
-    const t = Math.max(0, dur ? Math.min(dur, sec) : sec);
+    const target = Math.max(0, dur ? Math.min(dur, sec) : sec);
+    if (target < this.originMs / 1000) return;
+    const t = Math.max(0, target - this.originMs / 1000);
     if (this.isMpv()) {
       if (this.mpvState) this.mpvState.time = t;
       this.mpvCmd(['seek', t, 'absolute', 'keyframe']);
@@ -1778,18 +1843,22 @@ const Player = {
   engBufferedEndSec() {
     if (this.isMpv()) {
       const t = this.mpvState ? this.mpvState.time : 0;
-      return t + (this.mpvState && this.mpvState.bufferedAhead ? this.mpvState.bufferedAhead : 0);
+      return this.originMs / 1000 + t + (this.mpvState && this.mpvState.bufferedAhead ? this.mpvState.bufferedAhead : 0);
     }
     const v = this.video;
     if (!v || !v.buffered || !v.buffered.length) return 0;
     for (let i = 0; i < v.buffered.length; i++) {
-      if (v.buffered.start(i) <= v.currentTime && v.currentTime <= v.buffered.end(i)) return v.buffered.end(i);
+      if (v.buffered.start(i) <= v.currentTime && v.currentTime <= v.buffered.end(i)) return this.originMs / 1000 + v.buffered.end(i);
     }
-    return v.buffered.end(v.buffered.length - 1);
+    return this.originMs / 1000 + v.buffered.end(v.buffered.length - 1);
   },
 
   // 原文件直出（档 0）= 每次 seek 都是一条新的 Range 请求，扫动途中跟只会一路抽
   // （同 macOS playsOriginalFile，PlaybackController.swift:764）
+  get usesSessionTimeline() {
+    return !!this.sessionData?.session_id && this.sessionData.timeline === 'session';
+  },
+
   get playsOriginalFile() {
     return this.sessionData?.decision?.tier === 0;
   },
@@ -1812,7 +1881,7 @@ const Player = {
       Date.now(), this._lastScrubFollowAt,
       // cheap：落点在当前位置前 1 秒~已缓冲尾之间（同 macOS）
       targetSec >= this.engPos() - 1 && targetSec <= this.engBufferedEndSec(),
-      targetSec >= 0,          // reachable：文件时间轴上 originMs=0
+      targetSec >= this.originMs / 1000,
       this.playsOriginalFile,  // settleOnly
     );
     if (this._scrubFollowTask) { clearTimeout(this._scrubFollowTask); this._scrubFollowTask = null; }
@@ -1853,34 +1922,56 @@ const Player = {
   },
 
   // mpv 不推属性事件，进度条/时间/暂停态靠轮询喂成和 HTML5 一样
-  startMpvPoll() {
+  startMpvPoll(startMs = 0) {
     this.stopMpvPoll();
-    this.mpvState = { time: 0, duration: 0, paused: true, volume: 1, muted: false };
+    const generation = this.generation;
+    const instanceId = this.mpvInstanceId;
+    const alive = () => generation === this.generation && this.isMpv() && this.mpvState;
+    this.mpvState = { time: (startMs ?? 0) / 1000, duration: 0, paused: true, volume: 1, muted: false };
     this._mpvRectSig = null;
-    // 浮层（加载层/面板）显隐会改变挖洞范围，跟着它们重算
     this.mpvRectTimer = setInterval(() => this.syncEmbeddedPlayerRect(), 200);
+    let pending = false;
     const tick = async () => {
-      if (!this.isMpv() || !this.mpvState) return;
-      const [t, d, p, c] = await Promise.all([
-        this.mpvCmd(['get_property', 'time-pos']),
-        this.mpvCmd(['get_property', 'duration']),
-        this.mpvCmd(['get_property', 'pause']),
-        // 前向缓存秒数：拖动跟随判「落点在不在缓冲里」用（engBufferedEndSec）
-        this.mpvCmd(['get_property', 'demuxer-cache-duration']),
-      ]);
-      if (!this.isMpv() || !this.mpvState) return;
-      if (t && typeof t.data === 'number') this.mpvState.time = t.data;
-      if (d && typeof d.data === 'number') this.mpvState.duration = d.data;
-      this.mpvState.bufferedAhead = (c && typeof c.data === 'number') ? c.data : 0;
-      if (p && typeof p.data === 'boolean') {
-        this.mpvState.paused = p.data;
-        // HTML5 的 play/pause 事件在这里不会来，图标随轮询走
-        this.showIcon(p.data ? 'play' : 'pause');
-      }
-      this.updateProgress();
+      if (!alive() || pending) return;
+      pending = true;
+      try {
+        const [t, d, p, c, eof, output, status] = await Promise.all([
+          this.mpvCmd(['get_property', 'time-pos']),
+          this.mpvCmd(['get_property', 'duration']),
+          this.mpvCmd(['get_property', 'pause']),
+          this.mpvCmd(['get_property', 'demuxer-cache-duration']),
+          this.mpvCmd(['get_property', 'eof-reached']),
+          this.mpvCmd(['get_property', 'video-out-params']),
+          window.__TAURI__.core.invoke('get_embedded_player_status', { instanceId }).catch(() => null),
+        ]);
+        if (!alive()) return;
+        if (typeof t?.data === 'number') this.mpvState.time = t.data;
+        if (typeof d?.data === 'number') this.mpvState.duration = d.data;
+        this.mpvState.bufferedAhead = typeof c?.data === 'number' ? c.data : 0;
+        if (typeof p?.data === 'boolean') this.mpvState.paused = p.data;
+        if (typeof t?.data === 'number' && output?.data && !this._everPlayed) {
+          this._everPlayed = true;
+          this._buffering = false;
+          this.startProgressReporting();
+          const loading = document.getElementById('playerLoading');
+          if (loading) loading.hidden = true;
+        }
+        this.showIcon(this.mpvState.paused ? 'play' : 'pause');
+        this.updateProgress();
+        this.checkSegments();
+        this.renderChapters(this.sessionData?.chapters);
+        if (eof?.data === true || status?.running === false && this._everPlayed && status.exit_code === 0) {
+          this.reportPlaybackEnd();
+        } else if (status?.running === false && !this._ended && typeof App !== 'undefined') {
+          App.onPlaybackContentFailed('本机播放器意外退出');
+        }
+      } finally { pending = false; }
     };
     tick();
     this.mpvPollTimer = setInterval(tick, 500);
+    this._stuckTimer = setTimeout(() => {
+      if (alive() && !this._everPlayed && typeof App !== 'undefined') App.onPlaybackContentFailed('本机播放器加载超时');
+    }, 35000);
     this.startWatchdogs();
   },
 
@@ -1900,7 +1991,14 @@ const Player = {
     this._watchedSeconds = 0;
     this._lastWatchTime = null;
     this._lastNetBytes = null;
-    this._watchdogTick = setInterval(() => this._tickWatchdogs(), 1000);
+    const generation = this.generation;
+    let pending = false;
+    this._watchdogTick = setInterval(async () => {
+      if (pending) return;
+      pending = true;
+      try { await this._tickWatchdogs(generation); }
+      finally { pending = false; }
+    }, 1000);
   },
 
   stopWatchdogs() {
@@ -1919,12 +2017,8 @@ const Player = {
       const v = {};
       res.forEach((r, i) => { v[props[i]] = r && r.data !== undefined ? r.data : null; });
       const time = typeof v['time-pos'] === 'number' ? v['time-pos'] : this.mpvState.time;
-      // mpv 这条链没有 <video> 的 playing 事件：time-pos 走起来过就等于出过帧
-      // （起播前是 0/null）。不置位的话下面 !this._everPlayed 恒真，「缓冲」会在
-      // 正常播放时一直成立，画质卡的「连续等待 ≥8s」被 8 秒普通播放误触发
-      if (time > 0) this._everPlayed = true;
       return {
-        time,
+        time: this.originMs / 1000 + time,
         paused: !!v.pause,
         ended: !!v['eof-reached'],
         seeking: !!v.seeking,
@@ -1969,7 +2063,7 @@ const Player = {
       this._lastNetBytes = bytes;
     }
     return {
-      time: v.currentTime,
+      time: this.engPos(),
       paused: !!v.paused,
       ended: !!v.ended,
       seeking: !!v.seeking,
@@ -1980,12 +2074,13 @@ const Player = {
     };
   },
 
-  async _tickWatchdogs() {
+  async _tickWatchdogs(generation = this.generation) {
     if (!this._frameDrops || !this.sessionData) return;
     const view = document.getElementById('playerView');
     if (view && view.hidden) return;
     const s = await this._sampleEngine();
-    if (!s || !this._frameDrops || !this.sessionData) return;
+    if (generation !== this.generation || !s || !this._frameDrops || !this.sessionData || this._ended) return;
+    if (s.ended) { this.reportPlaybackEnd(); return; }
     // 真播起来了就清网络重开预算（同 macOS reachedPlaying()）
     if (!s.buffering && !s.paused && !s.ended && s.time > 0 && typeof App !== 'undefined' && App.onPlaybackRecovered) {
       App.onPlaybackRecovered();
@@ -2025,7 +2120,7 @@ const Player = {
     if (verdict === 'nudge') {
       // 有数据却不动：推一把踢活解码管线（起播预滚阶段 tracker 不会推）。
       // 故意不走 engSeekTo —— 那条路会清 StallWatch，把「最多推 2 把」清成无限推
-      const t = s.time + this._stallWatch.NUDGE_STEP;
+      const t = Math.max(0, s.time + this._stallWatch.NUDGE_STEP - this.originMs / 1000);
       if (this.isMpv()) {
         if (this.mpvState) this.mpvState.time = t;
         this.mpvCmd(['seek', t, 'absolute']);
@@ -2267,6 +2362,10 @@ const Player = {
   },
 
   togglePlay() {
+    if (this._ended && this.context && typeof App !== 'undefined') {
+      App.restartPlaybackAt(0);
+      return;
+    }
     const wasPaused = this.engPaused();
     if (this.isMpv()) {
       if (this.mpvState) this.mpvState.paused = !wasPaused;
@@ -2384,8 +2483,8 @@ const Player = {
 
   updateBuffer() {
     if (!this.video || !this.video.buffered.length) return;
-    const dur = this.video.duration || 0;
-    const buf = this.video.buffered.end(this.video.buffered.length - 1);
+    const dur = this.engDuration();
+    const buf = this.originMs / 1000 + this.video.buffered.end(this.video.buffered.length - 1);
     const pct = dur ? (buf / dur) * 100 : 0;
     const bufEl = document.getElementById('playerSeekBuffer');
     if (bufEl) bufEl.style.width = pct + '%';
@@ -2451,65 +2550,75 @@ const Player = {
 
   // ===== 进度上报 & 会话保活 =====
   startProgressReporting() {
-    this.stopProgressReporting();
-    // 发送初始 start 事件
-    if (this.mediaItemId) {
-      const posMs = Math.floor(this.engPos() * 1000);
-      const durMs = Math.floor(this.engDuration() * 1000);
-      API.reportProgress(this.mediaItemId, 'start', posMs, durMs, this.seasonNumber, this.episodeNumber).catch(() => {});
-      this.lastProgressReport = Date.now();
-    }
+    if (!this.activeEngine || this._reportedStart) return;
+    this._reportedStart = true;
+    this.lastProgressReport = Date.now();
+    this.sendSnapshot('start', this.snapshot()).catch(() => {});
+    const generation = this.generation;
     this.progressTimer = setInterval(() => {
-      if (!this.mediaItemId) return;
-      const now = Date.now();
-      if (now - this.lastProgressReport < 10000) return;
-      this.lastProgressReport = now;
-      const posMs = Math.floor(this.engPos() * 1000);
-      const durMs = Math.floor(this.engDuration() * 1000);
-      API.reportProgress(this.mediaItemId, 'progress', posMs, durMs, this.seasonNumber, this.episodeNumber).catch(() => {});
-    }, 5000);
+      if (generation !== this.generation || !this.activeEngine || this._ended) return;
+      this.lastProgressReport = Date.now();
+      this.sendSnapshot('progress', this.snapshot()).catch(() => {});
+    }, 10000);
   },
 
   stopProgressReporting() {
-    if (this.progressTimer) { clearInterval(this.progressTimer); this.progressTimer = null; }
+    if (this.progressTimer) clearInterval(this.progressTimer);
+    this.progressTimer = null;
   },
 
   startSessionPing() {
     this.stopSessionPing();
-    if (!this.sessionId) return;
+    const sid = this.sessionId;
+    if (!sid) return;
     this.pingTimer = setInterval(() => {
-      if (!this.sessionId) return;
-      API.sessionPing(this.sessionId).catch(() => {});
+      if (this.sessionId !== sid) return;
+      API.sessionPing(sid).catch((error) => {
+        if (this.sessionId === sid && error.status === 404 && typeof App !== 'undefined') {
+          App.onPlaybackNetworkDead('播放会话已失效，正在重连');
+        }
+      });
     }, 30000);
   },
 
   stopSessionPing() {
-    if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.pingTimer = null;
   },
 
   reportPlaybackEnd() {
-    if (!this.mediaItemId) return;
-    const posMs = Math.floor(this.engPos() * 1000);
-    const durMs = Math.floor(this.engDuration() * 1000);
-    API.reportProgress(this.mediaItemId, 'stop', posMs, durMs, this.seasonNumber, this.episodeNumber).catch(() => {});
+    if (!this.activeEngine || this._ended) return;
+    const position = this.engPos();
+    const duration = this.engDuration();
+    if (duration > 0 && duration - position > 5) {
+      if (typeof App !== 'undefined') App.onPlaybackNetworkDead('视频提前结束，正在恢复播放');
+      return;
+    }
+    this._ended = true;
+    this._buffering = false;
     this.stopProgressReporting();
     this.stopSessionPing();
-    if (this.sessionId) {
-      API.sessionStop(this.sessionId).catch(() => {});
-      this.sessionId = null;
+    if (duration > 0) {
+      if (this.isMpv() && this.mpvState) this.mpvState.time = Math.max(0, duration - this.originMs / 1000);
+      else if (this.video && Number.isFinite(this.video.duration)) this.video.currentTime = Math.max(0, duration - this.originMs / 1000);
     }
-    if (durMs > 0 && posMs / durMs >= 0.9) {
-      if (typeof App !== 'undefined' && App.onPlaybackEnded) {
-        App.onPlaybackEnded(this.sessionData);
-      }
+    const snapshot = this.snapshot();
+    if (this._reportedStart) {
+      this.sendSnapshot('stop', snapshot).then(() => {
+        window.dispatchEvent(new CustomEvent('movieclaw:playback-stopped', { detail: snapshot }));
+      }).catch(() => {});
+      this._reportedStart = false;
     }
+    if (this.sessionId) API.sessionStop(this.sessionId).catch(() => {});
+    this.sessionId = null;
+    this.showIcon('play');
+    this.showControls();
+    if (typeof App !== 'undefined') App.onPlaybackEnded();
   },
 
   reportPlaybackStop() {
-    if (!this.mediaItemId) return;
-    const posMs = Math.floor(this.engPos() * 1000);
-    const durMs = Math.floor(this.engDuration() * 1000);
-    API.reportProgress(this.mediaItemId, 'stop', posMs, durMs, this.seasonNumber, this.episodeNumber).catch(() => {});
+    if (!this._reportedStart) return Promise.resolve();
+    return this.sendSnapshot('stop', this.snapshot());
   },
 
   formatTime(secs) {
@@ -2524,3 +2633,7 @@ const Player = {
 
 // DOM 加载后初始化
 document.addEventListener('DOMContentLoaded', () => Player.init());
+window.__MOVIECLAW_SHUTDOWN__ = async () => {
+  try { await Player.close(); }
+  finally { await window.__TAURI__?.core?.invoke('complete_shutdown'); }
+};

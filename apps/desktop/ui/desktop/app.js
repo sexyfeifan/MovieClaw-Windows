@@ -1,9 +1,15 @@
 // MovieClaw Desktop — Main application
 
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}
+
 // 修复图片 URL：相对路径拼接 {server}/api/v1，远程 URL 走服务器代理
 function resolveUrl(url) {
   if (!url) return '';
-  if (url.startsWith('data:')) return url;
+  if (typeof url !== 'string') return '';
+  if (url.startsWith('data:')) return /^data:image\/(png|jpeg|webp|gif);/i.test(url) ? url : '';
+  if (/^[a-z][a-z0-9+.-]*:/i.test(url) && !/^https?:/i.test(url)) return '';
   const base = (window.__MOVIECLAW_SERVER__ || '').replace(/\/+$/, '');
   // 远程 TMDB 等图片走服务器缓存代理（和 Web 端一致）
   if (url.startsWith('http://') || url.startsWith('https://')) {
@@ -58,33 +64,178 @@ function fmtBytes(bytes) {
   return `${Math.round(bytes / 1024 / 1024)} MB`;
 }
 
+// Offset advances by the raw server page; visible items are deduplicated by media id.
+class DesktopPager {
+  constructor(fetchPage, current) {
+    this.fetchPage = fetchPage;
+    this.current = current;
+    this.items = [];
+    this.offset = 0;
+    this.cursor = null;
+    this.hasMore = true;
+    this.loading = false;
+    this.total = null;
+  }
+
+  async loadMore() {
+    if (this.loading || !this.hasMore || !this.current()) return [];
+    this.loading = true;
+    try {
+      const page = await (this.inFlight = this.fetchPage({ offset: this.offset, cursor: this.cursor, limit: 60 }));
+      if (!this.current()) return [];
+      const known = new Set(this.items.map(item => item.media_item_id));
+      const added = page.items.filter(item => {
+        if (known.has(item.media_item_id)) return false;
+        known.add(item.media_item_id);
+        return true;
+      });
+      this.offset += page.rawCount ?? page.items.length;
+      this.items.push(...added);
+      this.total = page.total ?? this.total;
+      this.hasMore = page.hasMore;
+      this.cursor = page.cursor ?? null;
+      return added;
+    } finally {
+      this.loading = false;
+    }
+  }
+}
+
 const App = {
   currentPage: 'home',
   libraries: [],
   collections: [],
   navStack: [],       // 导航历史栈
+  viewGeneration: 0,
+  session: null,
+
+  isCurrent(generation) {
+    return generation === this.viewGeneration && !this._pageController?.signal.aborted;
+  },
+
+  async resetContext() {
+    this._changingContext = true;
+    this._sessionSequence = (this._sessionSequence || 0) + 1;
+    this._startupController?.abort();
+    this._sessionController?.abort();
+    this._pageController?.abort();
+    this.viewGeneration++;
+    this._playbackSeq = (this._playbackSeq || 0) + 1;
+    await Player.close();
+    API.invalidateContext();
+    this.libraries = [];
+    this.collections = [];
+    this.navStack = [];
+    this._beforeSearch = null;
+    document.getElementById('searchInput').value = '';
+  },
+
+  async handleSessionExpired() {
+    if (this._authPending) return;
+    this._authPending = true;
+    this._resumeRoute = { page: this.currentPage, params: this.currentParams || {} };
+    const username = this.session?.username || '';
+    await this.resetContext();
+    this.renderLogin({ username, message: '登录已失效，请重新输入密码。' });
+  },
 
   async init() {
-    await API.init();
-
-    // 检查登录状态
+    this.bindEvents();
+    API.onUnauthorized = () => this.handleSessionExpired();
+    this._authPending = true;
+    this._startupController?.abort();
+    const controller = this._startupController = new AbortController();
+    const sequence = this._startupSequence = (this._startupSequence || 0) + 1;
+    const current = () => sequence === this._startupSequence && !controller.signal.aborted;
+    const api = API.scope(controller.signal);
     try {
-      const session = await API.getSession();
-      console.log('Session:', session);
-      // 已登录
+      await API.init();
+      if (!current()) return;
+      if (!API.baseUrl) {
+        this.renderConnectionState('needsServer', '请先选择一台 MovieClaw 服务器。');
+        return;
+      }
+      const health = await api.request('/health', { timeoutMs: 8000 });
+      if (!current()) return;
+      const server = health?.data || health;
+      if (server?.status !== 'ok') {
+        this.renderConnectionState('incompatible', '这个地址没有返回健康的 MovieClaw 服务，请核对服务器地址。');
+        return;
+      }
+      const bootstrap = await api.getBootstrapStatus();
+      if (!current()) return;
+      if (!(bootstrap?.data || bootstrap)?.initialized) {
+        this.renderLogin({ setup: true });
+        return;
+      }
+      const session = await api.getSession();
+      if (current()) await this.enterSession(session);
     } catch (e) {
-      console.log('Not logged in:', e);
-      this.renderLogin();
+      if (!current() || e.name === 'AbortError') return;
+      if (e.status === 401) this.renderLogin();
+      else if (e.status === 404 || e.status === 405) this.renderConnectionState('incompatible', '服务器缺少本版本必需的接口，请先升级服务器后重试。');
+      else this.renderConnectionState('unreachable', e.message);
+    }
+  },
+
+  async enterSession(response) {
+    const epoch = API.contextEpoch;
+    const sequence = this._sessionSequence = (this._sessionSequence || 0) + 1;
+    this._sessionController?.abort();
+    const controller = this._sessionController = new AbortController();
+    const current = () => sequence === this._sessionSequence && epoch === API.contextEpoch && !controller.signal.aborted;
+    this.session = response?.data || response;
+    this._authPending = true;
+    try {
+      await this.loadSidebarData(API.scope(controller.signal));
+    } catch (error) {
+      if (!current() || error.name === 'AbortError') return;
+      this._authPending = false;
+      if (error.status === 401) await this.handleSessionExpired();
+      else if (error.status === 404 || error.status === 405) this.renderConnectionState('incompatible', '服务器缺少媒体库或合集接口，请升级服务器后重试。');
+      else this.renderConnectionState('unreachable', error.message);
       return;
     }
+    if (!current()) return;
+    this._authPending = false;
+    this._changingContext = false;
+    document.getElementById('sidebar').style.display = '';
+    const route = this._resumeRoute || { page: 'home', params: {} };
+    this._resumeRoute = null;
+    await this.navigate(route.page, route.params, false);
+  },
 
-    this.bindEvents();
-    await this.loadSidebarData();
-    this.navigate('home');
+  renderConnectionState(phase, message) {
+    this._authPending = true;
+    this._pageController?.abort();
+    this._wallObserver?.disconnect();
+    this.viewGeneration++;
+    document.getElementById('sidebar').style.display = 'none';
+    const content = document.getElementById('content');
+    const title = phase === 'incompatible' ? '需要兼容的 MovieClaw 服务器' : phase === 'needsServer' ? '连接服务器' : '连不上服务器';
+    content.innerHTML = `<div class="login-page"><div class="login-card">
+      <div class="login-logo">MovieClaw</div><h2>${title}</h2>
+      <p class="login-subtitle">${escapeHtml(message)}</p>
+      <p class="login-subtitle">${escapeHtml(API.baseUrl)}</p>
+      <button class="login-btn" id="retryConnection">重试</button>
+      <button class="btn-secondary" id="changeServer">更换服务器</button>
+    </div></div>`;
+    document.getElementById('retryConnection').addEventListener('click', () => this.init());
+    document.getElementById('changeServer').addEventListener('click', () => this.changeServer());
+  },
+
+  async changeServer() {
+    await this.resetContext();
+    await window.__TAURI__.core.invoke('clear_server_url');
+    window.location.href = '../connect.html';
   },
 
   // ===== 登录 =====
-  renderLogin() {
+  renderLogin({ setup = false, addAccount = false, username = '', message = '' } = {}) {
+    this._pageController?.abort();
+    this._wallObserver?.disconnect();
+    this.viewGeneration++;
+    const generation = this.viewGeneration;
     const content = document.getElementById('content');
     const sidebar = document.getElementById('sidebar');
     if (sidebar) sidebar.style.display = 'none';
@@ -93,19 +244,23 @@ const App = {
       <div class="login-page">
         <div class="login-card">
           <div class="login-logo">MovieClaw</div>
-          <div class="login-subtitle">登录到服务器</div>
+          <div class="login-subtitle">${setup ? '初始化这台服务器' : addAccount ? '添加账号' : '登录到服务器'}</div>
+          <div class="login-subtitle">${escapeHtml(API.baseUrl)}</div>
           <form id="loginForm">
             <div class="login-field">
               <label for="loginUser">用户名</label>
-              <input type="text" id="loginUser" placeholder="输入用户名" autocomplete="username" required>
+              <input type="text" id="loginUser" placeholder="输入用户名" autocomplete="username" value="${escapeHtml(username)}" ${setup ? 'minlength="3" maxlength="32"' : ''} required>
             </div>
             <div class="login-field">
               <label for="loginPass">密码</label>
-              <input type="password" id="loginPass" placeholder="输入密码" autocomplete="current-password" required>
+              <input type="password" id="loginPass" placeholder="输入密码" autocomplete="${setup ? 'new-password' : 'current-password'}" ${setup ? 'minlength="8" maxlength="128"' : ''} required>
             </div>
-            <button type="submit" class="login-btn" id="loginBtn">登录</button>
-            <div class="login-error" id="loginError"></div>
+            ${setup ? '<div class="login-field"><label for="loginConfirm">确认密码</label><input type="password" id="loginConfirm" autocomplete="new-password" required></div>' : ''}
+            <button type="submit" class="login-btn" id="loginBtn">${setup ? '创建管理员' : '登录'}</button>
+            <div class="login-error" id="loginError">${escapeHtml(message)}</div>
           </form>
+          <button class="btn-secondary" id="loginChangeServer">更换服务器</button>
+          ${addAccount ? '<button class="btn-secondary" id="cancelAddAccount">取消</button>' : ''}
         </div>
       </div>
     `;
@@ -121,21 +276,30 @@ const App = {
       try {
         const user = document.getElementById('loginUser').value.trim();
         const pass = document.getElementById('loginPass').value;
-        await API.login(user, pass);
-        // 登录成功，重新加载
-        sidebar.style.display = '';
-        this.bindEvents();
-        await this.loadSidebarData();
-        this.navigate('home');
+        if (setup && pass !== document.getElementById('loginConfirm').value) throw new Error('两次输入的密码不一致');
+        const result = setup ? await API.createAdmin(user, pass) : await API.login(user, pass);
+        if (generation !== this.viewGeneration) return;
+        await this.resetContext();
+        await this.enterSession(result);
       } catch (ex) {
+        if (generation !== this.viewGeneration) return;
         err.textContent = ex.message || '登录失败';
         btn.disabled = false;
-        btn.textContent = '登录';
+        btn.textContent = setup ? '创建管理员' : '登录';
       }
+    });
+    document.getElementById('loginChangeServer').addEventListener('click', () => this.changeServer());
+    document.getElementById('cancelAddAccount')?.addEventListener('click', () => {
+      sidebar.style.display = '';
+      this.navigate('settings', {}, false);
     });
   },
 
   bindEvents() {
+    if (this._eventsBound) return;
+    this._eventsBound = true;
+    window.__MOVIECLAW_CHANGE_SERVER__ = () => this.changeServer();
+    window.addEventListener('movieclaw:playback-stopped', e => this.refreshStoppedItem(e.detail || {}));
     // 侧栏导航
     document.querySelectorAll('.nav-item[data-page]').forEach(item => {
       item.addEventListener('click', (e) => {
@@ -148,12 +312,18 @@ const App = {
     // 搜索
     const searchInput = document.getElementById('searchInput');
     let searchTimer;
-    searchInput.addEventListener('input', () => {
+    searchInput?.addEventListener('input', () => {
       clearTimeout(searchTimer);
       searchTimer = setTimeout(() => {
         const q = searchInput.value.trim();
-        if (q) this.navigate('search', { query: q });
-        else if (this.currentPage === 'search') this.navigate('home');
+        if (this._authPending || !this.session) return;
+        if (q) {
+          if (this.currentPage !== 'search') this._beforeSearch = { page: this.currentPage, params: this.currentParams || {} };
+          this.navigate('search', { query: q });
+        } else if (this.currentPage === 'search') {
+          const route = this._beforeSearch || { page: 'home', params: {} };
+          this.navigate(route.page, route.params, false);
+        }
       }, 300);
     });
 
@@ -179,6 +349,7 @@ const App = {
     document.addEventListener('keydown', (e) => {
       // Esc: 返回上一页
       if (e.key === 'Escape') {
+        if (!document.getElementById('playerView').hidden) return;
         if (this.currentPage === 'detail' || this.currentPage === 'search') {
           e.preventDefault();
           this.goBack();
@@ -187,37 +358,41 @@ const App = {
       // Ctrl+F: 聚焦搜索框
       if (e.key === 'f' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
-        searchInput.focus();
-        searchInput.select();
+        if (!this.session || this._authPending) return;
+        searchInput?.focus();
+        searchInput?.select();
       }
     });
   },
 
-  async loadSidebarData() {
+  async loadSidebarData(api = API) {
+    const epoch = API.contextEpoch;
     try {
       const [libs, colls] = await Promise.all([
-        API.listLibraries().catch(e => { console.error('Load libraries failed:', e); return []; }),
-        API.listCollections().catch(e => { console.error('Load collections failed:', e); return []; }),
+        api.listLibraries(),
+        api.listCollections(),
       ]);
       // API 可能返回 { data: [...] } 包装
-      this.libraries = libs?.data || libs || [];
+      if (epoch !== API.contextEpoch) return;
+      this.libraries = (libs?.data || libs || []).filter(lib => lib.viewer_access !== false && lib.kind !== 'photo');
       this.collections = colls?.data || colls || [];
       console.log('Libraries:', this.libraries.length, 'Collections:', this.collections.length);
       this.renderSidebar();
     } catch (e) {
-      console.error('Failed to load sidebar:', e);
+      if (e.name === 'AbortError') return;
+      throw e;
     }
   },
 
   renderSidebar() {
     const libNav = document.getElementById('libraryNav');
     libNav.innerHTML = this.libraries.map(lib => `
-      <a class="nav-item" data-library-id="${lib.id}" href="#">
+      <a class="nav-item" data-library-id="${Number(lib.id)}" href="#">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
           ${lib.kind === 'tv' ? '<rect x="2" y="7" width="20" height="15" rx="2"/><polyline points="17 2 12 7 7 2"/>' : '<rect x="2" y="2" width="20" height="20" rx="2"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/>'}
         </svg>
-        <span>${lib.name}</span>
-        ${lib.itemCount ? `<span class="badge">${lib.itemCount}</span>` : ''}
+        <span>${escapeHtml(lib.name)}</span>
+        ${lib.stats?.item_count != null ? `<span class="badge">${Number(lib.stats.item_count)}</span>` : ''}
       </a>
     `).join('');
 
@@ -232,11 +407,11 @@ const App = {
     const colNav = document.getElementById('collectionNav');
     // 只显示用户/内置合集，过滤掉自动生成的"系列"合集
     // CollectionView.kind: "user" | "builtin" | "series"
-    const userCollections = this.collections.filter(col => col.kind !== 'series');
+    const userCollections = this.collections.filter(col => col.kind !== 'series' && !col.hidden);
     colNav.innerHTML = userCollections.slice(0, 10).map(col => `
-      <a class="nav-item" data-collection-id="${col.id}" href="#">
+      <a class="nav-item" data-collection-id="${Number(col.id)}" href="#">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
-        <span>${col.name}</span>
+        <span>${escapeHtml(col.name)}</span>
       </a>
     `).join('');
 
@@ -261,6 +436,13 @@ const App = {
   },
 
   async navigate(page, params = {}, pushHistory = true) {
+    if (this._authPending) return;
+    this._pageController?.abort();
+    this._wallObserver?.disconnect();
+    this._wallContext = null;
+    this._pageController = new AbortController();
+    this.pageAPI = API.scope(this._pageController.signal);
+    const generation = ++this.viewGeneration;
     // 记录历史（用于返回）
     if (pushHistory && this.currentPage !== page) {
       this.navStack.push({ page: this.currentPage, params: this.currentParams || {} });
@@ -272,28 +454,28 @@ const App = {
 
     switch (page) {
       case 'home':
-        await this.renderHome(content);
+        await this.renderHome(content, generation);
         break;
       case 'library':
-        await this.renderLibrary(content, params.libraryId);
+        await this.renderLibrary(content, params.libraryId, generation);
         break;
       case 'collection':
-        await this.renderCollection(content, params.collectionId);
+        await this.renderCollection(content, params.collectionId, generation);
         break;
       case 'favorites':
-        await this.renderFavorites(content);
+        await this.renderFavorites(content, generation);
         break;
       case 'search':
-        await this.renderSearch(content, params.query);
+        await this.renderSearch(content, params.query, generation);
         break;
       case 'settings':
         this.renderSettings(content);
         break;
       case 'detail':
-        await this.renderDetail(content, params);
+        await this.renderDetail(content, params, generation);
         break;
       case 'person':
-        await this.renderPerson(content, params);
+        await this.renderPerson(content, params, generation);
         break;
     }
   },
@@ -308,7 +490,8 @@ const App = {
   },
 
   // ===== 首页（对齐 macOS 结构） =====
-  async renderHome(container) {
+  async renderHome(container, generation = this.viewGeneration) {
+    const api = this.pageAPI || API;
     container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
     try {
       if (!this.libraries.length) {
@@ -317,16 +500,17 @@ const App = {
       }
 
       // 并行加载：继续观看 + 收藏 + 各媒体库最近添加
-      const upNextPromise = API.getUpNext().catch(() => null);
-      const favPromise = API.getFavorites().catch(() => null);
+      const upNextPromise = api.getUpNext();
+      const favPromise = api.getFavorites();
 
       const shelfPromises = this.libraries.map(lib =>
-        API.listLibraryItems(lib.id, { limit: 20, sort: 'added_at', order: 'desc' })
+        api.listLibraryItems(lib.id, { limit: 20, sort: 'added_at', order: 'desc' })
           .then(items => ({ lib, items: this.filterMediaItems(this.unwrapItems(items)) }))
           .catch(() => ({ lib, items: [] }))
       );
 
       const [upNextResp, favResp, ...libShelves] = await Promise.all([upNextPromise, favPromise, ...shelfPromises]);
+      if (!this.isCurrent(generation)) return;
       const unwrap = (r) => this.filterMediaItems(this.unwrapItems(r));
 
       // 继续观看 — UpNextItemView: { data: { items: [...] } }
@@ -373,8 +557,8 @@ const App = {
           </div>
           <div class="genre-tiles">
             ${allGenres.map((g, i) => `
-              <div class="genre-tile" data-genre="${g}" style="background:${['#e74c3c','#e67e22','#f1c40f','#2ecc71','#1abc9c','#3498db','#9b59b6','#e84393','#fd79a8','#00b894','#0984e3','#6c5ce7'][i % 12]}">
-                <span>${g}</span>
+              <div class="genre-tile" data-genre="${escapeHtml(g)}" style="background:${['#e74c3c','#e67e22','#f1c40f','#2ecc71','#1abc9c','#3498db','#9b59b6','#e84393','#fd79a8','#00b894','#0984e3','#6c5ce7'][i % 12]}">
+                <span>${escapeHtml(g)}</span>
               </div>
             `).join('')}
           </div>
@@ -382,16 +566,16 @@ const App = {
       ` : '';
 
       const heroHtml = heroItem ? `
-        <div class="hero-banner" id="heroBanner" data-hero-id="${heroItem.media_item_id || ''}" data-hero-lib="${heroItem.library_id ?? defaultLibId ?? ''}">
+        <div class="hero-banner" id="heroBanner" data-hero-id="${Number(heroItem.media_item_id) || ''}" data-hero-lib="${Number(heroItem.library_id ?? defaultLibId) || ''}">
           <div class="hero-bg" id="heroBg">
-            <img src="" alt="" id="heroImg" style="opacity:0;transition:opacity 0.5s" data-raw="${heroItem.backdrop_url || heroItem.poster_url || ''}" onload="this.style.opacity='1'" onerror="imgFallback(this, this.dataset.raw)">
+            <img src="" alt="" id="heroImg" style="opacity:0;transition:opacity 0.5s" data-raw="${escapeHtml(heroItem.backdrop_url || heroItem.poster_url || '')}" onload="this.style.opacity='1'" onerror="imgFallback(this, this.dataset.raw)">
           </div>
           <div class="hero-info">
-            <h1 class="hero-title" id="heroTitle">${heroItem.title || ''}</h1>
+            <h1 class="hero-title" id="heroTitle">${escapeHtml(heroItem.title)}</h1>
             <div class="hero-meta" id="heroMeta">
-              ${heroItem.year ? `<span>${heroItem.year}</span>` : ''}
+              ${heroItem.year ? `<span>${escapeHtml(heroItem.year)}</span>` : ''}
               ${heroItem.rating ? `<span>★ ${Number(heroItem.rating).toFixed(1)}</span>` : ''}
-              ${heroItem.seasons?.length ? `<span>${heroItem.seasons.length} 季</span>` : (heroItem.episode_count ? `<span>${heroItem.episode_count} 集</span>` : '')}
+              ${heroItem.seasons?.length ? `<span>${heroItem.seasons.length} 季</span>` : (heroItem.episode_count ? `<span>${Number(heroItem.episode_count)} 集</span>` : '')}
             </div>
             <div class="hero-actions">
               <button class="btn-play" id="heroPlayBtn">
@@ -406,8 +590,8 @@ const App = {
 
       container.innerHTML = heroHtml + shelfData.map(shelf => `
         <div class="shelf-section">
-          <div class="shelf-header" data-shelf-title="${shelf.title}">
-            <h2 class="shelf-title">${shelf.title}</h2>
+          <div class="shelf-header" data-shelf-title="${escapeHtml(shelf.title)}">
+            <h2 class="shelf-title">${escapeHtml(shelf.title)}</h2>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-secondary)"><polyline points="9 18 15 12 9 6"/></svg>
           </div>
           <div class="shelf-wrapper">
@@ -431,7 +615,8 @@ const App = {
         const heroImg = document.getElementById('heroImg');
         const rawUrl = heroItem.backdrop_url || heroItem.poster_url || '';
         if (heroImg && rawUrl) {
-          API.proxyImage(rawUrl).then(dataUri => {
+          api.proxyImage(rawUrl).then(dataUri => {
+            if (!this.isCurrent(generation)) return;
             if (dataUri) {
               heroImg.src = dataUri;
               heroImg.style.opacity = '1';
@@ -482,7 +667,8 @@ const App = {
                 heroImg.style.opacity = '0';
                 const switchUrl = item.backdrop_url || item.poster_url || '';
                 setTimeout(() => {
-                  API.proxyImage(switchUrl).then(dataUri => {
+                  api.proxyImage(switchUrl).then(dataUri => {
+                    if (!this.isCurrent(generation) || document.getElementById('heroBanner')?.dataset.heroId !== String(item.media_item_id)) return;
                     if (dataUri) {
                       heroImg.src = dataUri;
                     } else {
@@ -495,9 +681,9 @@ const App = {
               if (heroTitle) heroTitle.textContent = item.title || '';
               if (heroMeta) {
                 heroMeta.innerHTML = `
-                  ${item.year ? `<span>${item.year}</span>` : ''}
+                  ${item.year ? `<span>${escapeHtml(item.year)}</span>` : ''}
                   ${item.rating ? `<span>★ ${Number(item.rating).toFixed(1)}</span>` : ''}
-                  ${item.seasons?.length ? `<span>${item.seasons.length} 季</span>` : (item.episode_count ? `<span>${item.episode_count} 集</span>` : '')}
+                  ${item.seasons?.length ? `<span>${item.seasons.length} 季</span>` : (item.episode_count ? `<span>${Number(item.episode_count)} 集</span>` : '')}
                 `;
               }
               if (heroBanner) {
@@ -533,8 +719,7 @@ const App = {
         });
       }
     } catch (e) {
-      console.error('Render home error:', e);
-      container.innerHTML = `<div class="page-loading"><div style="color:var(--text-secondary)">加载失败: ${e.message || e}</div></div>`;
+      this.renderPageError(container, e, generation);
     }
   },
 
@@ -567,131 +752,203 @@ const App = {
     });
   },
 
-  // ===== 媒体库 =====
-  async renderLibrary(container, libraryId) {
-    container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
-    try {
-      const lib = this.libraries.find(l => l.id === libraryId || l.id == libraryId);
-      // 分页加载全部条目（服务端排序）
-      const items = await this.loadAllLibraryItems(libraryId);
-      this.renderPosterWall(container, items, {
-        title: lib?.name || '媒体库',
-        subtitle: `${items.length} 个项目`,
-        libraryId,
-        showToolbar: true,
-      });
-    } catch (e) {
-      console.error('Render library error:', e);
-      container.innerHTML = `<div class="page-loading"><div style="color:var(--text-secondary)">加载失败: ${e.message || e}</div></div>`;
-    }
+  // ===== 媒体库 / 合集 / 收藏 / 搜索：共享按需分页 =====
+  async renderLibrary(container, libraryId, generation = this.viewGeneration) {
+    const api = this.pageAPI || API;
+    const lib = this.libraries.find(l => Number(l.id) === Number(libraryId));
+    const prefs = this.wallPreferences('library-' + libraryId);
+    await this.renderPagedWall(container, {
+      title: lib?.name || '媒体库', libraryId, generation, prefs,
+      preferenceId: 'library-' + libraryId, unwatched: true,
+      fetchPage: async page => this.offsetPage(await api.listLibraryItems(libraryId, {
+        offset: page.offset, limit: page.limit, sort: prefs.sort, order: prefs.order,
+        ...(prefs.unwatched ? { w: 'unwatched' } : {}),
+      }), page.limit),
+    });
   },
 
-  // 分页加载全部媒体条目（支持服务端排序参数）
-  async loadAllLibraryItems(libraryId, params = {}) {
-    const allItems = [];
-    let page = 1;
-    const pageSize = 100;
-    while (true) {
-      const resp = await API.listLibraryItems(libraryId, { limit: pageSize, offset: (page - 1) * pageSize, ...params });
-      const items = this.filterMediaItems(this.unwrapItems(resp));
-      if (!items.length) break;
-      allItems.push(...items);
-      if (items.length < pageSize) break;
-      if (page > 50) break;
-      page++;
-    }
-    return allItems;
+  async renderCollection(container, collectionId, generation = this.viewGeneration) {
+    const api = this.pageAPI || API;
+    const collection = this.collections.find(c => Number(c.id) === Number(collectionId));
+    const prefs = this.wallPreferences('collection-' + collectionId, 'default');
+    await this.renderPagedWall(container, {
+      title: collection?.name || '合集', generation, prefs, preferenceId: 'collection-' + collectionId,
+      fetchPage: async page => this.offsetPage(await api.listCollectionItems(collectionId, {
+        offset: page.offset, limit: page.limit,
+        ...(prefs.sort !== 'default' ? { sort: prefs.sort, order: prefs.order } : {}),
+      }), page.limit),
+    });
   },
 
-  // ===== 合集 =====
-  async renderCollection(container, collectionId) {
-    container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
-    try {
-      const resp = await API.listCollectionItems(collectionId);
-      const items = this.filterMediaItems(this.unwrapItems(resp));
-      this.renderPosterWall(container, items, {
-        title: '合集',
-        subtitle: `${items.length} 个项目`,
-      });
-    } catch (e) {
-      console.error('Render collection error:', e);
-      container.innerHTML = `<div class="page-loading"><div style="color:var(--text-secondary)">加载失败: ${e.message || e}</div></div>`;
-    }
+  async renderFavorites(container, generation = this.viewGeneration) {
+    const api = this.pageAPI || API;
+    const prefs = this.wallPreferences('favorites', 'favorited_at');
+    await this.renderPagedWall(container, {
+      title: '我的收藏', generation, prefs, preferenceId: 'favorites',
+      fetchPage: async page => this.offsetPage(await api.getFavorites({
+        offset: page.offset, limit: page.limit, sort: prefs.sort, order: prefs.order,
+      }), page.limit),
+    });
   },
 
-  // ===== 收藏 =====
-  async renderFavorites(container) {
-    container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
-    try {
-      // GET /playback/favorites → { data: { items: [FavoriteItemView], total } }
-      // FavoriteItemView = LibraryItemView + library_id + favorite_season_number + favorite_episode_number
-      const resp = await API.getFavorites();
-      const data = resp?.data || resp || {};
-      let items = this.filterMediaItems(data.items || this.unwrapItems(resp));
+  async renderSearch(container, query, generation = this.viewGeneration) {
+    const api = this.pageAPI || API;
+    await this.renderPagedWall(container, {
+      title: `“${query}” 的搜索结果`, generation,
+      fetchPage: async page => {
+        const response = await api.search(query, { limit: page.limit, ...(page.cursor ? { cursor: page.cursor } : {}) });
+        const data = response?.data || response || {};
+        return {
+          items: this.filterMediaItems((data.items || []).map(hit => ({
+            ...hit.item, library_id: hit.item?.library_id ?? hit.library_ids?.[0], match_label: hit.match?.label,
+          }))),
+          cursor: data.next_cursor, hasMore: !!data.next_cursor,
+        };
+      },
+    });
+  },
 
-      if (!items.length) {
-        container.innerHTML = `
-          <div class="page-header">
-            <h1 class="page-title">我的收藏</h1>
-            <span class="page-subtitle">0 个项目</span>
-          </div>
-          <div class="empty-state">
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" style="opacity:0.3"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-            <p>暂无收藏</p>
-            <span>点击影片详情页的收藏按钮来添加</span>
-          </div>
-        `;
-        return;
+  offsetPage(response, limit) {
+    const raw = this.unwrapItems(response);
+    const total = (response?.data || response)?.total;
+    return { items: this.filterMediaItems(raw), rawCount: raw.length, hasMore: raw.length === limit, total };
+  },
+
+  wallPreferences(id, defaultSort = 'added_at') {
+    const key = 'mc_wall.' + API.baseUrl + '#' + (this.session?.username || '') + '.' + id;
+    let stored = {};
+    try { stored = JSON.parse(localStorage.getItem(key) || '{}'); } catch (_) {}
+    const allowed = ['added_at', 'release_date', 'rating', 'title'];
+    if (id.startsWith('collection-')) allowed.push('default');
+    if (id === 'favorites') allowed.push('favorited_at');
+    return { key, sort: allowed.includes(stored.sort) ? stored.sort : defaultSort,
+      order: stored.order === 'asc' ? 'asc' : 'desc', unwatched: stored.unwatched === true };
+  },
+
+  async renderPagedWall(container, { title, libraryId, generation, prefs, preferenceId, unwatched = false, fetchPage }) {
+    const sorts = [['added_at', '最近添加'], ['release_date', '最近上映'], ['rating', '评分'], ['title', '片名']];
+    if (preferenceId?.startsWith('collection')) sorts.unshift(['default', '合集顺序']);
+    if (preferenceId === 'favorites') sorts.unshift(['favorited_at', '最近收藏']);
+    container.innerHTML = `<div class="page-header"><h1 class="page-title">${escapeHtml(title)}</h1><span class="page-subtitle" id="wallCount"></span></div>
+      ${prefs ? `<div class="wall-toolbar"><select id="wallSort" class="settings-select" aria-label="排序">${sorts.map(([value, label]) => `<option value="${value}" ${prefs.sort === value ? 'selected' : ''}>${label}</option>`).join('')}</select>
+        <select id="wallOrder" class="settings-select" aria-label="排序方向"><option value="desc" ${prefs.order === 'desc' ? 'selected' : ''}>降序</option><option value="asc" ${prefs.order === 'asc' ? 'selected' : ''}>升序</option></select>
+        ${unwatched ? `<label><input type="checkbox" id="wallUnwatched" ${prefs.unwatched ? 'checked' : ''}> 只看没看过的</label>` : ''}</div>` : ''}
+      <div class="poster-wall"><div class="poster-grid" id="posterGrid"></div><div id="wallStatus" class="empty-state"></div><div id="wallSentinel" style="height:1px"></div></div>`;
+    const grid = container.querySelector('#posterGrid');
+    const status = container.querySelector('#wallStatus');
+    const count = container.querySelector('#wallCount');
+    const pager = new DesktopPager(fetchPage, () => this.isCurrent(generation));
+    this._wallPager = pager;
+    const wall = this._wallContext = { pager, grid, count, container, libraryId, generation, prefs, refreshing: false };
+    const load = async () => {
+      if (wall.refreshing || pager.loading || !pager.hasMore || !this.isCurrent(generation)) return;
+      status.textContent = '加载中…';
+      try {
+        const added = await pager.loadMore();
+        if (!this.isCurrent(generation)) return;
+        grid.insertAdjacentHTML('beforeend', added.map(item => this.posterCard(item, libraryId)).join(''));
+        this.bindPosterCards(grid);
+        count.textContent = pager.total != null ? `${pager.total} 个项目` : `${pager.items.length}${pager.hasMore ? '+' : ''} 个项目`;
+        status.textContent = pager.items.length ? (pager.hasMore ? '' : '已加载全部') : '这里还没有内容';
+        if (!pager.hasMore) this._wallObserver?.disconnect();
+        else if (this._wallObserver && container.querySelector('#wallSentinel').getBoundingClientRect().top <= container.getBoundingClientRect().bottom + 400) {
+          queueMicrotask(load);
+        }
+      } catch (error) {
+        if (!this.isCurrent(generation) || error.name === 'AbortError' || error.status === 401) return;
+        status.textContent = error.message;
+        const retry = document.createElement('button');
+        retry.className = 'btn-secondary'; retry.textContent = '重试';
+        retry.addEventListener('click', () => { status.textContent = ''; load(); });
+        status.appendChild(retry);
       }
-      this.renderPosterWall(container, items, {
-        title: '我的收藏',
-        subtitle: `${data.total ?? items.length} 个项目`,
-      });
-    } catch (e) {
-      container.innerHTML = `<div class="page-loading"><div style="color:var(--text-secondary)">加载失败: ${e.message || e}</div></div>`;
+    };
+    wall.load = load;
+    if (prefs) {
+      const changed = () => {
+        prefs.sort = container.querySelector('#wallSort').value;
+        prefs.order = container.querySelector('#wallOrder').value;
+        prefs.unwatched = container.querySelector('#wallUnwatched')?.checked || false;
+        localStorage.setItem(prefs.key, JSON.stringify({ sort: prefs.sort, order: prefs.order, unwatched: prefs.unwatched }));
+        this.navigate(this.currentPage, this.currentParams, false);
+      };
+      container.querySelectorAll('#wallSort,#wallOrder,#wallUnwatched').forEach(input => input.addEventListener('change', changed));
+    }
+    await load();
+    if (!this.isCurrent(generation) || !pager.hasMore) return;
+    if (typeof IntersectionObserver !== 'undefined') {
+      this._wallObserver = new IntersectionObserver(entries => {
+        if (entries.some(entry => entry.isIntersecting)) load();
+      }, { root: container, rootMargin: '400px' });
+      this._wallObserver.observe(container.querySelector('#wallSentinel'));
     }
   },
 
-  // ===== 搜索 =====
-  async renderSearch(container, query) {
-    container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
-    try {
-      const results = await API.search(query);
-      const items = this.filterMediaItems(this.unwrapItems(results));
-      if (!items.length) {
-        container.innerHTML = `
-          <div class="page-header">
-            <h1 class="page-title">搜索结果</h1>
-            <span class="page-subtitle">"${query}"</span>
-          </div>
-          <div class="empty-state">
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" style="opacity:0.3"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-            <p>没有找到与 "${query}" 匹配的内容</p>
-            <span>试试其他关键词</span>
-          </div>
-        `;
-        return;
-      }
-      this.renderPosterWall(container, items, {
-        title: `"${query}" 的搜索结果`,
-        subtitle: `${items.length} 个结果`,
-        showToolbar: true,
-      });
-    } catch (e) {
-      container.innerHTML = '<div class="page-loading"><div style="color:var(--text-secondary)">搜索失败: ' + (e.message || e) + '</div></div>';
+  async refreshStoppedItem({ mediaItemId, libraryId, seasonNumber, episodeNumber }) {
+    if (this._authPending || this._changingContext) return;
+    if (this.currentPage === 'home' || (this.currentPage === 'detail'
+        && Number(this.currentParams?.itemId) === Number(mediaItemId)
+        && Number(this.currentParams?.libraryId) === Number(libraryId))) {
+      await this.navigate(this.currentPage, this.currentParams || {}, false);
+      return;
     }
+    const wall = this._wallContext;
+    if (!wall || wall.refreshing || !this.isCurrent(wall.generation)) return;
+    const item = wall.pager.items.find(value => Number(value.media_item_id) === Number(mediaItemId)
+      && Number(value.library_id ?? wall.libraryId) === Number(libraryId));
+    if (!item) return;
+    wall.refreshing = true;
+    try {
+      // Keep the existing pages and scroll position; pause the next batch while a watched filter changes.
+      await wall.pager.inFlight?.catch(() => {});
+      const api = this.pageAPI;
+      const [marksResponse, resumeResponse] = await Promise.all([
+        api.getMarks(mediaItemId), api.getResume(mediaItemId, seasonNumber, episodeNumber),
+      ]);
+      if (wall !== this._wallContext || !this.isCurrent(wall.generation)) return;
+      const marks = marksResponse?.data || marksResponse;
+      const resume = resumeResponse?.data || resumeResponse;
+      const card = wall.grid.querySelector(`[data-item-id="${Number(mediaItemId)}"][data-library-id="${Number(libraryId)}"]`);
+      if (wall.prefs?.unwatched && marks?.played) {
+        wall.pager.items = wall.pager.items.filter(value => value !== item);
+        wall.pager.offset = Math.max(0, wall.pager.offset - 1);
+        if (wall.pager.total != null) wall.pager.total = Math.max(0, wall.pager.total - 1);
+        card?.remove();
+        wall.count.textContent = wall.pager.total != null ? `${wall.pager.total} 个项目` : `${wall.pager.items.length}${wall.pager.hasMore ? '+' : ''} 个项目`;
+      } else {
+        item.is_favorite = marks?.is_favorite ?? item.is_favorite;
+        item.progress_percent = !resume?.played && resume?.duration_ms > 0
+          ? Math.max(0, Math.min(99, Math.round(resume.position_ms / resume.duration_ms * 100))) : null;
+        if (card) card.outerHTML = this.posterCard(item, wall.libraryId);
+        this.bindPosterCards(wall.grid);
+      }
+    } catch (error) {
+      if (error.name !== 'AbortError' && error.status !== 401) console.warn('Playback state refresh failed:', error.message);
+    } finally {
+      wall.refreshing = false;
+      if (wall === this._wallContext && this.isCurrent(wall.generation)
+          && wall.container.querySelector('#wallSentinel').getBoundingClientRect().top <= wall.container.getBoundingClientRect().bottom + 400) wall.load();
+    }
+  },
+
+  renderPageError(container, error, generation) {
+    if (!this.isCurrent(generation) || error.name === 'AbortError' || error.status === 401) return;
+    container.innerHTML = `<div class="empty-state"><p>${escapeHtml(error.message || '加载失败')}</p><button class="btn-secondary" id="retryPage">重试</button></div>`;
+    container.querySelector('#retryPage').addEventListener('click', () => this.navigate(this.currentPage, this.currentParams, false));
   },
 
   // ===== 人物页 =====
-  async renderPerson(container, params) {
+  async renderPerson(container, params, generation = this.viewGeneration) {
+    const api = this.pageAPI || API;
     container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
     try {
-      const resp = await API.getPerson(params.personId);
+      const resp = await api.getPerson(params.personId);
+      if (!this.isCurrent(generation)) return;
       const person = resp?.data || resp;
 
       // 加载作品
-      const creditsResp = await API.getPersonCredits(params.personId).catch(() => null);
-      const credits = this.unwrapItems(creditsResp);
+      const credits = person.credits || [];
+      const sections = [['参演', credits.filter(c => c.department === 'cast')], ['执导', credits.filter(c => c.department === 'director')]].filter(([, items]) => items.length);
 
       container.innerHTML = `
         <div class="person-hero">
@@ -700,31 +957,29 @@ const App = {
           </button>
           <div class="person-header">
             ${person.avatar_url || person.profile_url ? `
-              <img class="person-avatar" src="${resolveUrl(person.avatar_url || person.profile_url)}" alt="" data-raw="${person.avatar_url || person.profile_url}" style="opacity:0;transition:opacity 0.3s" onload="this.style.opacity='1'" onerror="imgFallback(this, this.dataset.raw)">
+              <img class="person-avatar" src="${escapeHtml(resolveUrl(person.avatar_url || person.profile_url))}" alt="" data-raw="${escapeHtml(person.avatar_url || person.profile_url)}" style="opacity:0;transition:opacity 0.3s" onload="this.style.opacity='1'" onerror="imgFallback(this, this.dataset.raw)">
             ` : '<div class="person-avatar person-avatar-placeholder"></div>'}
             <div class="person-info">
-              <h1 class="person-name">${person.name || ''}</h1>
+              <h1 class="person-name">${escapeHtml(person.name)}</h1>
               <div class="person-meta">
-                ${person.department ? `<span>${person.department}</span>` : ''}
-                ${person.birthday ? `<span>生于 ${person.birthday}</span>` : ''}
-                ${credits.length ? `<span>${credits.length} 部作品</span>` : ''}
+                ${person.original_name && person.original_name !== person.name ? `<span>${escapeHtml(person.original_name)}</span>` : ''}
+                ${credits.length ? `<span>库内 ${new Set(credits.map(c => c.media_item_id)).size} 部作品</span>` : ''}
               </div>
-              ${person.biography ? `<p class="person-bio">${person.biography}</p>` : ''}
             </div>
           </div>
         </div>
-        ${credits.length ? `
-          <div class="person-works">
-            <h2 class="shelf-title" style="margin-bottom:16px">作品</h2>
-            <div class="poster-grid" id="posterGrid">
-              ${credits.map(item => this.posterCard(item, item.library_id)).join('')}
-            </div>
-          </div>
-        ` : '<div class="empty-state"><p>暂无作品信息</p></div>'}
+        ${sections.map(([title, items]) => `<div class="person-works"><h2 class="shelf-title" style="margin-bottom:16px">${title}</h2><div class="poster-grid">
+          ${items.map(item => this.posterCard({ ...item, source_missing: item.library_id == null,
+            match_label: item.library_id == null ? '片源已移除' : item.department === 'director' ? (item.kind === 'tv' ? '主创' : '导演') : item.character ? '饰 ' + item.character : '',
+          }, item.library_id)).join('')}</div></div>`).join('') || '<div class="empty-state"><p>库内没有这位影人的作品</p></div>'}
       `;
       this.bindPosterCards(container);
     } catch (e) {
-      container.innerHTML = '<div class="page-loading"><div style="color:var(--text-secondary)">加载人物失败: ' + (e.message || e) + '</div></div>';
+      if (!this.isCurrent(generation) || e.name === 'AbortError') return;
+      if (e.status === 404) {
+        container.innerHTML = '<div class="empty-state"><p>库内没有这位影人的作品</p><p>作品可能已被移除，或尚未建立影人档案。</p><button class="btn-secondary" id="personBack">返回</button></div>';
+        container.querySelector('#personBack').addEventListener('click', () => this.goBack());
+      } else this.renderPageError(container, e, generation);
     }
   },
 
@@ -734,12 +989,14 @@ const App = {
   // 第 3 集 · 12:34」的主按钮与「从头播放」，右下角浮「导演 / 主演」；
   // 下面 = 分集横排 → 系列 → 演职员 → 合集 → 信息。头图讲的那一集与下面浏览的
   // 那一季是两套状态：换季只换分集横排。
-  async renderDetail(container, params) {
+  async renderDetail(container, params, generation = this.viewGeneration) {
+    const api = this.pageAPI || API;
     // 详情页一出现就预连（对齐 macOS PlaybackPreconnect.warm）：进了详情紧接着多半就是点播放
-    API.preconnectPlayback();
+    api.preconnectPlayback();
     container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
     try {
-      const resp = await API.getItemDetail(params.libraryId, params.itemId);
+      const resp = await api.getItemDetail(params.libraryId, params.itemId);
+      if (!this.isCurrent(generation)) return;
       const info = resp?.data || resp;
       const meta = info.local_meta || {};
       const isMovie = info.kind !== 'tv';
@@ -767,7 +1024,7 @@ const App = {
       container.innerHTML = `
         <div class="detail-hero">
           <div class="detail-hero-bg">
-            <img src="${resolveUrl(backdropRaw)}" alt="" style="opacity:0;transition:opacity 0.4s" data-raw="${backdropRaw}" onload="this.style.opacity='1'" onerror="imgFallback(this, this.dataset.raw)">
+            <img src="${escapeHtml(resolveUrl(backdropRaw))}" alt="" style="opacity:0;transition:opacity 0.4s" data-raw="${escapeHtml(backdropRaw)}" onload="this.style.opacity='1'" onerror="imgFallback(this, this.dataset.raw)">
           </div>
           <button class="detail-back-btn" id="btnBack" title="返回 (Esc)">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
@@ -778,7 +1035,7 @@ const App = {
           </div>
         </div>
         <div class="detail-body">
-          <div class="detail-body-bg"><img src="${resolveUrl(backdropRaw)}" alt="" data-raw="${backdropRaw}" onerror="imgFallback(this, this.dataset.raw)"></div>
+          <div class="detail-body-bg"><img src="${escapeHtml(resolveUrl(backdropRaw))}" alt="" data-raw="${escapeHtml(backdropRaw)}" onerror="imgFallback(this, this.dataset.raw)"></div>
           <div class="detail-lower">
             <div id="detailSeasonArea"></div>
             <div id="detailSeriesArea"></div>
@@ -787,7 +1044,7 @@ const App = {
               <div class="detail-section">
                 <h2 class="shelf-title">所属合集</h2>
                 <div class="collection-chips">
-                  ${info.collections.map(c => `<a class="collection-chip" data-collection-id="${c.id}" href="#">${c.name}</a>`).join('')}
+                  ${info.collections.map(c => `<a class="collection-chip" data-collection-id="${Number(c.id)}" href="#">${escapeHtml(c.name)}</a>`).join('')}
                 </div>
               </div>
             ` : ''}
@@ -798,6 +1055,7 @@ const App = {
 
       // ---- 头图（Logo / 画质标签 / 第几集 / 简介 / 按钮）----
       const renderStage = () => {
+        if (!this.isCurrent(generation)) return;
         const ep = st.episode;
         const overview = (isMovie ? plot : (ep?.overview || plot) || '').trim();
         const position = st.watched?.position_ms || 0;
@@ -823,25 +1081,25 @@ const App = {
 
         document.getElementById('detailStage').innerHTML = `
           ${logoRaw
-            ? `<img class="detail-logo" src="${resolveUrl(logoRaw)}" alt="${info.title}" data-raw="${logoRaw}"
+            ? `<img class="detail-logo" src="${escapeHtml(resolveUrl(logoRaw))}" alt="${escapeHtml(info.title)}" data-raw="${escapeHtml(logoRaw)}"
                  onerror="if (!this.dataset.retried) document.getElementById('detailTitleFallback').style.display=''; imgFallback(this, this.dataset.raw)"
                  onload="document.getElementById('detailTitleFallback').style.display='none'">
-               <h1 class="detail-title" id="detailTitleFallback" style="display:none">${info.title}</h1>`
-            : `<h1 class="detail-title">${info.title}</h1>`}
+               <h1 class="detail-title" id="detailTitleFallback" style="display:none">${escapeHtml(info.title)}</h1>`
+            : `<h1 class="detail-title">${escapeHtml(info.title)}</h1>`}
           ${metaLine || badges.length ? `
             <div class="detail-meta">
-              ${metaLine ? `<span class="detail-meta-text">${metaLine}</span>` : ''}
-              ${badges.map(b => `<span class="quality-badge${b.filled ? '' : ' outlined'}">${b.text}</span>`).join('')}
+              ${metaLine ? `<span class="detail-meta-text">${escapeHtml(metaLine)}</span>` : ''}
+              ${badges.map(b => `<span class="quality-badge${b.filled ? '' : ' outlined'}">${escapeHtml(b.text)}</span>`).join('')}
             </div>
           ` : ''}
-          ${!isMovie && ep ? `<div class="detail-episode-line">${this.episodeLine(st.season, ep)}</div>` : ''}
-          ${overview ? `<p class="detail-hero-overview">${overview}</p>` : ''}
+          ${!isMovie && ep ? `<div class="detail-episode-line">${escapeHtml(this.episodeLine(st.season, ep))}</div>` : ''}
+          ${overview ? `<p class="detail-hero-overview">${escapeHtml(overview)}</p>` : ''}
           ${hint ? `<div class="detail-hint">${hint}</div>` : ''}
           <div class="detail-actions">
             ${playable ? `
               <button class="btn-play" id="btnPlay">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                <span>${label}</span>
+                <span>${escapeHtml(label)}</span>
               </button>
               ${resumable ? `
                 <button class="btn-secondary" id="btnRestart" title="从头播放">
@@ -872,14 +1130,19 @@ const App = {
 
       // ---- 续播点 / 收藏 / 已看 ----
       const loadUnitResume = async () => {
+        const request = st.resumeRequest = (st.resumeRequest || 0) + 1;
         try {
-          const resp2 = await API.getResume(
+          const resp2 = await api.getResume(
             mediaId,
             isMovie ? null : st.season,
             isMovie ? null : st.episode?.episode_number,
           );
+          if (!this.isCurrent(generation) || request !== st.resumeRequest) return;
           st.watched = resp2?.data || resp2 || null;
-        } catch (_) { st.watched = null; }
+        } catch (error) {
+          if (!this.isCurrent(generation) || request !== st.resumeRequest || error.name === 'AbortError') return;
+          st.watched = null;
+        }
         renderStage();
       };
 
@@ -890,7 +1153,8 @@ const App = {
         st.favorite = next;
         renderStage();
         try {
-          const resp2 = await API.setMarks(mediaId, { favorite: next });
+          const resp2 = await api.setMarks(mediaId, { favorite: next });
+          if (!this.isCurrent(generation)) return;
           st.favorite = (resp2?.data || resp2)?.is_favorite ?? next;
         } catch (e) {
           console.error('Favorite toggle failed:', e);
@@ -904,11 +1168,12 @@ const App = {
         if (st.marking || !canPlay()) return;
         st.marking = true;
         try {
-          await API.setMarks(mediaId, {
+          await api.setMarks(mediaId, {
             played: !(st.watched?.played || false),
             seasonNumber: isMovie ? null : st.season,
             episodeNumber: isMovie ? null : st.episode?.episode_number,
           });
+          if (!this.isCurrent(generation)) return;
           await loadUnitResume();
           if (!isMovie && st.season != null) await loadBrowse(st.season);
         } catch (e) { console.error('Mark watched failed:', e); }
@@ -917,6 +1182,7 @@ const App = {
 
       // ---- 起播 ----
       const playUnit = (startMs, season, ep) => {
+        if (!this.isCurrent(generation)) return;
         if (isMovie) {
           // library_id 必传：startPlayback 自动选集用它查详情判断 kind；
           // files/kind 也带上：能力申报分级要用 files 判片源吃不吃得下，
@@ -927,8 +1193,7 @@ const App = {
         const useSeason = season ?? st.season;
         const useEp = ep || st.episode;
         if (!useEp || !(ep ? useEp.owned : canPlay())) return;
-        // 桌面端没有「播放结束」回抛：点哪一集头图就跟着讲哪一集，
-        // 关掉播放器回来状态始终一致（Mac 是播完后才改讲）
+        // Headline follows the explicit choice; stop reporting refreshes this item on return.
         if (ep && (ep !== st.episode || useSeason !== st.season)) {
           st.season = useSeason;
           st.episode = useEp;
@@ -951,6 +1216,7 @@ const App = {
 
       // ---- 分集横排（标题 + 「共 N 集 · 已看 · 缺」）----
       const renderEpisodeShelf = () => {
+        if (!this.isCurrent(generation)) return;
         const area = document.getElementById('detailSeasonArea');
         if (!area) return;
         const eps = st.browseEpisodes;
@@ -967,7 +1233,7 @@ const App = {
         area.innerHTML = `
           ${(info.seasons || []).length > 1 ? `
             <div class="season-selector">
-              ${(info.seasons || []).map(s => `<button class="season-pill ${s === st.browseSeason ? 'active' : ''}" data-season="${s}">${s === 0 ? '特别篇' : `第 ${s} 季`}</button>`).join('')}
+              ${(info.seasons || []).map(s => `<button class="season-pill ${s === st.browseSeason ? 'active' : ''}" data-season="${Number(s)}">${s === 0 ? '特别篇' : `第 ${Number(s)} 季`}</button>`).join('')}
             </div>
           ` : ''}
           ${this.shelfHtml(st.browseSeason === 0 ? '特别篇' : `第 ${st.browseSeason} 季`, summary, 'episode-row', cards)}
@@ -1007,15 +1273,19 @@ const App = {
       };
 
       const loadBrowse = async (seasonNumber) => {
+        const request = st.browseRequest = (st.browseRequest || 0) + 1;
         st.browseSeason = seasonNumber;
         st.browseEpisodes = [];
         st.episodesLoading = true;
         renderEpisodeShelf();
         try {
-          const resp2 = await API.getItemEpisodes(params.libraryId, mediaId, seasonNumber);
+          const resp2 = await api.getItemEpisodes(params.libraryId, mediaId, seasonNumber);
+          if (!this.isCurrent(generation) || request !== st.browseRequest) return;
           const data = resp2?.data || resp2 || {};
           st.browseEpisodes = (data.episodes || data || []).slice();
+          st.browseAnchor = data.resume_episode;
         } catch (e) {
+          if (!this.isCurrent(generation) || request !== st.browseRequest || e.name === 'AbortError') return;
           console.error('Load episodes failed:', e);
         }
         st.episodesLoading = false;
@@ -1025,7 +1295,8 @@ const App = {
       // ---- 初始化 ----
       // 收藏是整片级（Mac 头图那颗心也是）；已看/续播跟着头图那一集走
       try {
-        const marksResp = await API.getMarks(mediaId);
+        const marksResp = await api.getMarks(mediaId);
+        if (!this.isCurrent(generation)) return;
         st.favorite = !!(marksResp?.data || marksResp)?.is_favorite;
       } catch (_) {}
 
@@ -1035,8 +1306,9 @@ const App = {
         // 「接下来继续」里那一集优先；否则第一个有片源的季（综艺常只收了最新一季）
         let preferred = null;
         try {
-          const upNextResp = await API.getUpNext();
-          const upNext = (upNextResp?.data || upNextResp || []).find(
+          const upNextResp = await api.getUpNext();
+          if (!this.isCurrent(generation)) return;
+          const upNext = this.unwrapItems(upNextResp).find(
             x => x.media_item_id === mediaId && x.kind === 'tv',
           );
           if (upNext) preferred = { season: upNext.season_number, episode: upNext.episode_number };
@@ -1051,8 +1323,10 @@ const App = {
         if (start != null) {
           st.season = start;
           await loadBrowse(start);
+          if (!this.isCurrent(generation)) return;
           const eps = st.browseEpisodes;
           st.episode = (preferred?.season === start ? eps.find(e => e.episode_number === preferred.episode && e.owned) : null)
+            || eps.find(e => e.episode_number === st.browseAnchor && e.owned)
             || this.resumeEpisode(eps)
             || eps[0]
             || null;
@@ -1066,7 +1340,8 @@ const App = {
       // ---- 电影的作品系列 ----
       if (isMovie && info.series_collection_id) {
         try {
-          const resp2 = await API.getCollectionSeries(info.series_collection_id);
+          const resp2 = await api.getCollectionSeries(info.series_collection_id);
+          if (!this.isCurrent(generation)) return;
           const series = resp2?.data || resp2;
           if (series?.available && (series.parts || []).length > 1) {
             const area = document.getElementById('detailSeriesArea');
@@ -1125,8 +1400,7 @@ const App = {
       });
 
     } catch (e) {
-      console.error('Render detail error:', e);
-      container.innerHTML = '<div class="page-loading"><div style="color:var(--text-secondary)">加载失败: ' + (e.message || e) + '</div></div>';
+      this.renderPageError(container, e, generation);
     }
   },
 
@@ -1202,7 +1476,7 @@ const App = {
     const directors = cast.filter(p => p.role === '导演');
     const actors = cast.filter(p => p.role !== '导演');
     const line = (label, names) => (names.length
-      ? `<div class="credit-line"><span class="credit-label">${label}</span><span class="credit-names">${names.join('、')}</span></div>`
+      ? `<div class="credit-line"><span class="credit-label">${escapeHtml(label)}</span><span class="credit-names">${escapeHtml(names.join('、'))}</span></div>`
       : '');
     const html = line('导演', directors.slice(0, 1).map(p => p.name)) + line('主演', actors.slice(0, 3).map(p => p.name));
     return html ? `<div class="detail-credits">${html}</div>` : '';
@@ -1213,8 +1487,8 @@ const App = {
     return `
       <div class="detail-section">
         <div class="shelf-header">
-          <h2 class="shelf-title">${title}</h2>
-          ${detail ? `<span class="shelf-detail">${detail}</span>` : ''}
+          <h2 class="shelf-title">${escapeHtml(title)}</h2>
+          ${detail ? `<span class="shelf-detail">${escapeHtml(detail)}</span>` : ''}
         </div>
         <div class="shelf-wrapper">
           <button class="shelf-arrow shelf-arrow-left" data-dir="-1" aria-label="向左">
@@ -1237,9 +1511,9 @@ const App = {
     const isStage = !!st.episode && ep.owned && st.browseSeason === st.season
       && ep.episode_number === st.episode.episode_number;
     return `
-      <div class="episode-card ${ep.owned ? '' : 'missing'} ${isStage ? 'stage' : ''}" data-episode-number="${ep.episode_number}">
+      <div class="episode-card ${ep.owned ? '' : 'missing'} ${isStage ? 'stage' : ''}" data-episode-number="${Number(ep.episode_number)}">
         <div class="episode-art">
-          ${ep.still_url ? `<img src="${resolveUrl(ep.still_url)}" alt="" data-raw="${ep.still_url}" onerror="imgFallback(this, this.dataset.raw)">` : ''}
+          ${ep.still_url ? `<img src="${escapeHtml(resolveUrl(ep.still_url))}" alt="" data-raw="${escapeHtml(ep.still_url)}" onerror="imgFallback(this, this.dataset.raw)">` : ''}
           ${ep.played ? `
             <div class="episode-watched">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="5 13 10 18 19 6"/></svg>
@@ -1248,7 +1522,7 @@ const App = {
           ` : ''}
           ${ep.owned ? `
             <div class="episode-hover">
-              <button class="episode-play-btn" data-episode-number="${ep.episode_number}" title="播放">
+              <button class="episode-play-btn" data-episode-number="${Number(ep.episode_number)}" title="播放">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
               </button>
             </div>
@@ -1256,15 +1530,15 @@ const App = {
           ${bandText || inProgress ? `
             <div class="episode-band">
               ${bandText ? `<div class="episode-band-text">${bandText}</div>` : ''}
-              ${inProgress && ep.progress_percent ? `<div class="episode-progress"><div class="episode-progress-fill" style="width:${ep.progress_percent}%"></div></div>` : ''}
+              ${inProgress && ep.progress_percent ? `<div class="episode-progress"><div class="episode-progress-fill" style="width:${Math.max(0, Math.min(100, Number(ep.progress_percent) || 0))}%"></div></div>` : ''}
             </div>
           ` : ''}
         </div>
         <div class="episode-info">
-          <div class="episode-ep">第 ${ep.episode_number} 集</div>
-          <div class="episode-title">${ep.name || '第 ' + ep.episode_number + ' 集'}</div>
-          <div class="episode-overview">${ep.overview || ''}</div>
-          <div class="episode-subtitle">${ep.owned ? (ep.air_date ? String(ep.air_date).slice(0, 10) : '') : '缺集'}</div>
+          <div class="episode-ep">第 ${Number(ep.episode_number)} 集</div>
+          <div class="episode-title">${escapeHtml(ep.name || '第 ' + ep.episode_number + ' 集')}</div>
+          <div class="episode-overview">${escapeHtml(ep.overview)}</div>
+          <div class="episode-subtitle">${escapeHtml(ep.owned ? (ep.air_date ? String(ep.air_date).slice(0, 10) : '') : '缺集')}</div>
         </div>
       </div>
     `;
@@ -1273,12 +1547,12 @@ const App = {
   // 演职员一格（同 Mac MacPersonCard）：圆头像 + 姓名 + 身份；有 TMDB 影人 id 的点进人物页
   personCardHtml(p) {
     return `
-      <div class="person-card" ${p.personId ? `data-person-id="${p.personId}"` : ''}>
+      <div class="person-card" ${p.personId ? `data-person-id="${Number(p.personId)}"` : ''}>
         ${p.avatar
-          ? `<img class="person-card-avatar" src="${resolveUrl(p.avatar)}" alt="" data-raw="${p.avatar}" onerror="imgFallback(this, this.dataset.raw)">`
+          ? `<img class="person-card-avatar" src="${escapeHtml(resolveUrl(p.avatar))}" alt="" data-raw="${escapeHtml(p.avatar)}" onerror="imgFallback(this, this.dataset.raw)">`
           : '<div class="person-card-avatar person-card-avatar-placeholder"></div>'}
-        <div class="person-card-name">${p.name}</div>
-        <div class="person-card-role">${p.role || ''}</div>
+        <div class="person-card-name">${escapeHtml(p.name)}</div>
+        <div class="person-card-role">${escapeHtml(p.role)}</div>
       </div>
     `;
   },
@@ -1288,13 +1562,13 @@ const App = {
     const current = part.media_item_id === currentId;
     const missing = part.media_item_id == null;
     return `
-      <div class="series-card ${missing ? 'missing' : ''}" ${part.media_item_id != null ? `data-item-id="${part.media_item_id}"` : ''} data-library-id="${libraryId}">
+      <div class="series-card ${missing ? 'missing' : ''}" ${part.media_item_id != null ? `data-item-id="${Number(part.media_item_id)}"` : ''} data-library-id="${Number(libraryId)}">
         <div class="series-art">
-          ${part.poster_url ? `<img src="${resolveUrl(part.poster_url)}" alt="" data-raw="${part.poster_url}" onerror="imgFallback(this, this.dataset.raw)">` : ''}
+          ${part.poster_url ? `<img src="${escapeHtml(resolveUrl(part.poster_url))}" alt="" data-raw="${escapeHtml(part.poster_url)}" onerror="imgFallback(this, this.dataset.raw)">` : ''}
           ${current ? '<div class="series-badge">本片</div>' : missing ? '<div class="series-badge">未入库</div>' : ''}
         </div>
-        <div class="series-title">${part.title}</div>
-        <div class="series-year">${part.release_date ? String(part.release_date).slice(0, 4) : ''}</div>
+        <div class="series-title">${escapeHtml(part.title)}</div>
+        <div class="series-year">${escapeHtml(part.release_date ? String(part.release_date).slice(0, 4) : '')}</div>
       </div>
     `;
   },
@@ -1324,170 +1598,17 @@ const App = {
         <h2 class="shelf-title">信息</h2>
         <div class="detail-info-cols">
           <div class="detail-info-grid">
-            ${facts.map(([k, v]) => `<div class="info-row"><span class="info-label">${k}</span><span class="info-value">${v}</span></div>`).join('')}
+            ${facts.map(([k, v]) => `<div class="info-row"><span class="info-label">${escapeHtml(k)}</span><span class="info-value">${escapeHtml(v)}</span></div>`).join('')}
           </div>
           ${versions.length ? `
             <div class="detail-versions">
               <div class="info-label">版本</div>
-              ${versions.map(v => `<div class="version-line">${v}</div>`).join('')}
+              ${versions.map(v => `<div class="version-line">${escapeHtml(v)}</div>`).join('')}
             </div>
           ` : ''}
         </div>
       </div>
     `;
-  },
-
-  // ===== 海报墙渲染 =====
-  renderPosterWall(container, items, { title, subtitle, libraryId, showToolbar }) {
-    // 收集所有类型用于筛选
-    // LibraryItemView 没有 genres 字段 — 只有 UpNextItemView / detail 有
-    // 所以这里可能为空
-    const allGenres = [...new Set(items.flatMap(i => i.genres || []))].sort();
-
-    // 虚拟滚动：大列表分批渲染
-    const VIRTUAL_THRESHOLD = 200;
-    const BATCH_SIZE = 60;
-
-    const toolbarHtml = showToolbar ? `
-      <div class="wall-toolbar">
-        <div class="wall-toolbar-left">
-          <button class="wall-sort-btn active" data-sort="default">默认</button>
-          <button class="wall-sort-btn" data-sort="added_at">最近添加</button>
-          <button class="wall-sort-btn" data-sort="release_date">最新上映</button>
-          <button class="wall-sort-btn" data-sort="rating">评分</button>
-          <button class="wall-sort-btn" data-sort="title">标题</button>
-          <button class="wall-sort-btn" data-sort="year">年份</button>
-          ${allGenres.length ? `
-            <div class="wall-genre-dropdown">
-              <button class="wall-genre-btn" id="wallGenreBtn">
-                <span id="wallGenreLabel">类型筛选</span>
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-              </button>
-              <div class="wall-genre-menu" id="wallGenreMenu" hidden>
-                <div class="wall-genre-item active" data-genre="">全部</div>
-                ${allGenres.map(g => `<div class="wall-genre-item" data-genre="${g}">${g}</div>`).join('')}
-              </div>
-            </div>
-          ` : ''}
-        </div>
-        <div class="wall-toolbar-right">
-          <button class="wall-view-btn active" data-view="grid" title="网格">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-          </button>
-        </div>
-      </div>
-    ` : '';
-    // 分批渲染：大列表时只渲染前一批，滚动加载更多
-    const renderBatch = (allItems, container2) => {
-      const grid = container2.querySelector('#posterGrid');
-      if (!grid) return;
-      if (allItems.length <= VIRTUAL_THRESHOLD) {
-        grid.innerHTML = allItems.map(item => this.posterCard(item, libraryId)).join('');
-        this.bindPosterCards(container2);
-      } else {
-        // 虚拟滚动：只渲染当前批次
-        grid.innerHTML = allItems.slice(0, BATCH_SIZE).map(item => this.posterCard(item, libraryId)).join('');
-        this.bindPosterCards(container2);
-        // 监听滚动加载更多（监听 content 容器的滚动）
-        const scrollTarget = document.getElementById('content');
-        if (scrollTarget) {
-          // 移除旧的虚拟滚动监听
-          if (scrollTarget._virtualHandler) {
-            scrollTarget.removeEventListener('scroll', scrollTarget._virtualHandler);
-          }
-          let rendered = BATCH_SIZE;
-          const handler = () => {
-            if (scrollTarget.scrollTop + scrollTarget.clientHeight >= scrollTarget.scrollHeight - 200) {
-              if (rendered < allItems.length) {
-                const nextBatch = allItems.slice(rendered, rendered + BATCH_SIZE);
-                grid.insertAdjacentHTML('beforeend', nextBatch.map(item => this.posterCard(item, libraryId)).join(''));
-                rendered += BATCH_SIZE;
-                this.bindPosterCards(container2);
-              }
-            }
-          };
-          scrollTarget._virtualHandler = handler;
-          scrollTarget.addEventListener('scroll', handler);
-        }
-      }
-    };
-
-    container.innerHTML = `
-      <div class="page-header">
-        <h1 class="page-title">${title}</h1>
-        <span class="page-subtitle">${subtitle}</span>
-      </div>
-      ${toolbarHtml}
-      <div class="poster-wall">
-        <div class="poster-grid" id="posterGrid">
-          ${items.slice(0, VIRTUAL_THRESHOLD).map(item => this.posterCard(item, libraryId)).join('')}
-        </div>
-      </div>
-    `;
-    this.bindPosterCards(container);
-    if (showToolbar) this.bindWallToolbar(container, items, libraryId);
-  },
-
-  // 海报墙排序 + 筛选工具栏（客户端即时 + 服务端排序）
-  bindWallToolbar(container, items, libraryId) {
-    let currentGenre = '';
-    let currentSort = 'default';
-
-    const refreshGrid = () => {
-      let filtered = items;
-      if (currentGenre) {
-        filtered = items.filter(i => {
-          const meta = i.local_meta || i;
-          return (meta.genres || []).includes(currentGenre);
-        });
-      }
-      const sorted = [...filtered];
-      if (currentSort === 'title') sorted.sort((a, b) => (a.title || '').localeCompare(b.title || '', 'zh'));
-      else if (currentSort === 'year') sorted.sort((a, b) => (b.year || 0) - (a.year || 0));
-      else if (currentSort === 'rating') sorted.sort((a, b) => (b.rating || 0) - (a.rating || 0));
-      else if (currentSort === 'added_at') sorted.sort((a, b) => new Date(b.added_at || 0) - new Date(a.added_at || 0));
-      else if (currentSort === 'release_date') sorted.sort((a, b) => new Date(b.release_date || b.year || 0) - new Date(a.release_date || a.year || 0));
-      const grid = container.querySelector('#posterGrid');
-      if (grid) {
-        grid.innerHTML = sorted.map(item => this.posterCard(item, libraryId)).join('');
-        this.bindPosterCards(container);
-      }
-    };
-
-    // 排序
-    container.querySelectorAll('.wall-sort-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        container.querySelectorAll('.wall-sort-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        currentSort = btn.dataset.sort;
-        refreshGrid();
-      });
-    });
-
-    // 类型筛选
-    const genreBtn = container.querySelector('#wallGenreBtn');
-    const genreMenu = container.querySelector('#wallGenreMenu');
-    if (genreBtn && genreMenu) {
-      genreBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        genreMenu.hidden = !genreMenu.hidden;
-      });
-      genreMenu.querySelectorAll('.wall-genre-item').forEach(item => {
-        item.addEventListener('click', () => {
-          genreMenu.querySelectorAll('.wall-genre-item').forEach(i => i.classList.remove('active'));
-          item.classList.add('active');
-          currentGenre = item.dataset.genre;
-          const label = container.querySelector('#wallGenreLabel');
-          if (label) label.textContent = currentGenre || '类型筛选';
-          genreMenu.hidden = true;
-          refreshGrid();
-        });
-      });
-      // 点击外部关闭
-      document.addEventListener('click', (e) => {
-        if (!e.target.closest('.wall-genre-dropdown')) genreMenu.hidden = true;
-      });
-    }
   },
 
   posterCard(item, defaultLibId) {
@@ -1503,9 +1624,9 @@ const App = {
     const rating = item.rating;
     const isFav = item.is_favorite;
     return `
-      <div class="poster-card" data-item-id="${itemId}" data-library-id="${libId}">
+      <div class="poster-card" role="button" tabindex="${item.source_missing ? '-1' : '0'}" aria-disabled="${item.source_missing ? 'true' : 'false'}" style="${item.source_missing ? 'opacity:0.45' : ''}" data-item-id="${escapeHtml(itemId)}" data-library-id="${escapeHtml(libId)}">
         <div class="poster-art">
-          ${rawPoster ? `<img src="${posterUrl}" alt="" loading="lazy" style="opacity:0;transition:opacity 0.3s" data-raw="${rawPoster}" onload="this.style.opacity='1'" onerror="imgFallback(this, this.dataset.raw)">` : ''}
+          ${rawPoster ? `<img src="${escapeHtml(posterUrl)}" alt="" loading="lazy" style="opacity:0;transition:opacity 0.3s" data-raw="${escapeHtml(rawPoster)}" onload="this.style.opacity='1'" onerror="imgFallback(this, this.dataset.raw)">` : ''}
           <div class="focus-glow"></div>
           ${isFav ? '<div class="poster-fav"><svg width="14" height="14" viewBox="0 0 24 24" fill="#ff375f"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg></div>' : ''}
           ${progress > 0 && progress < 1 ? `
@@ -1515,12 +1636,13 @@ const App = {
           ` : ''}
         </div>
         <div class="poster-info">
-          <div class="poster-title">${title}</div>
+          <div class="poster-title">${escapeHtml(title)}</div>
           <div class="poster-subtitle">${[
             year,
             rating != null ? Number(rating).toFixed(1) : '',
+            item.match_label || '',
             item.kind === 'tv' && item.seasons?.length ? item.seasons.length + ' 季' : (item.episode_count > 0 ? item.episode_count + ' 集' : '')
-          ].filter(Boolean).join(' · ')}</div>
+          ].filter(Boolean).map(escapeHtml).join(' · ')}</div>
         </div>
       </div>
     `;
@@ -1528,12 +1650,19 @@ const App = {
 
   bindPosterCards(container) {
     container.querySelectorAll('.poster-card').forEach(card => {
-      card.addEventListener('click', () => {
+      if (card.dataset.bound) return;
+      card.dataset.bound = '1';
+      const open = () => {
+        if (card.getAttribute('aria-disabled') === 'true') return;
         const itemId = card.dataset.itemId;
         const libId = card.dataset.libraryId;
-        if (itemId) {
-          this.navigate('detail', { libraryId: libId || this.libraries[0]?.id, itemId });
+        if (itemId && libId) {
+          this.navigate('detail', { libraryId: libId, itemId });
         }
+      };
+      card.addEventListener('click', open);
+      card.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
       });
       // macOS focus 效果：鼠标追踪光晕 + 微倾斜
       card.addEventListener('mousemove', (e) => {
@@ -1556,6 +1685,7 @@ const App = {
 
   // ===== 设置 =====
   renderSettings(container) {
+    const generation = this.viewGeneration;
     container.innerHTML = `
       <div class="page-header">
         <h1 class="page-title">设置</h1>
@@ -1599,7 +1729,7 @@ const App = {
           <h3>服务器</h3>
           <div class="settings-row">
             <span>当前服务器</span>
-            <span style="color:var(--text-secondary)">${API.baseUrl || '未配置'}</span>
+            <span style="color:var(--text-secondary)">${escapeHtml(API.baseUrl || '未配置')}</span>
           </div>
           <div class="settings-actions">
             <button class="btn-secondary" id="btnSwitchServer">更改服务器</button>
@@ -1628,12 +1758,19 @@ const App = {
         <div class="settings-card">
           <h3>关于</h3>
           <p>MovieClaw Desktop</p>
-          <p style="color:var(--text-secondary);margin-top:4px;" id="settingsVersion">版本 0.2.111</p>
+          <p style="color:var(--text-secondary);margin-top:4px;" id="settingsVersion">正在读取版本…</p>
+          <button class="btn-secondary" id="btnCheckUpdates">检查更新</button>
         </div>
       </div>
     `;
+    window.__TAURI__.core.invoke('get_app_version').then(version => {
+      if (this.isCurrent(generation)) document.getElementById('settingsVersion').textContent = '版本 ' + version;
+    }).catch(() => {
+      if (this.isCurrent(generation)) document.getElementById('settingsVersion').textContent = '版本信息暂不可用';
+    });
 
     // 事件绑定
+    document.getElementById('btnCheckUpdates')?.addEventListener('click', () => window.DesktopUpdates?.check());
     document.getElementById('setAutoNext')?.addEventListener('change', (e) => {
       localStorage.setItem('mc_autoNext', e.target.checked ? '1' : '0');
     });
@@ -1646,118 +1783,115 @@ const App = {
     document.getElementById('setAudioLang')?.addEventListener('change', (e) => {
       localStorage.setItem('mc_audioLang', e.target.value);
     });
-    document.getElementById('btnSwitchServer')?.addEventListener('click', async () => {
-      if (window.__TAURI__) {
-        await window.__TAURI__.core.invoke('clear_server_url');
-        window.location.href = 'http://tauri.localhost/connect.html';
-      }
-    });
+    document.getElementById('btnSwitchServer')?.addEventListener('click', () => this.changeServer());
     document.getElementById('btnLogout')?.addEventListener('click', async () => {
-      try { await API.request('/auth/logout', { method: 'POST' }); } catch (_) {}
-      try { await window.__TAURI__?.core.invoke('clear_server_url'); } catch (_) {}
-      window.location.reload();
+      if (!window.confirm('退出当前账号？其他已保存账号会保留。')) return;
+      await Player.close();
+      try {
+        const response = await API.request('/auth/logout', { method: 'POST' });
+        await this.resetContext();
+        this.session = null;
+        if (response?.data) await this.enterSession(response);
+        else this.renderLogin();
+      } catch (error) { this.renderPageError(container, error, generation); }
     });
 
     // 多账号列表
     this.loadAccounts();
 
     // 添加账号
-    document.getElementById('btnAddAccount')?.addEventListener('click', () => {
-      window.location.href = 'http://tauri.localhost/connect.html';
+    document.getElementById('btnAddAccount')?.addEventListener('click', async () => {
+      await Player.close();
+      this.renderLogin({ addAccount: true });
     });
 
-    // QR 配对
-    document.getElementById('btnQRLogin')?.addEventListener('click', async () => {
-      const qrArea = document.getElementById('qrArea');
-      const qrData = document.getElementById('qrCodeData');
-      if (!qrArea || !qrData) return;
-
-      if (qrArea.style.display === 'none') {
-        qrArea.style.display = 'block';
-        try {
-          const resp = await API.getDeviceCode();
-          const data = resp?.data || resp;
-          qrData.textContent = data?.code || data?.device_code || '------';
-          // 轮询状态
-          const pollTimer = setInterval(async () => {
-            try {
-              const status = await API.checkDeviceStatus(data?.code || data?.device_code);
-              const s = status?.data || status;
-              if (s?.status === 'approved' || s?.authorized) {
-                clearInterval(pollTimer);
-                qrArea.innerHTML = '<div style="text-align:center;padding:16px;color:#66bb6a">配对成功！</div>';
-                setTimeout(() => window.location.reload(), 1500);
-              }
-            } catch (_) {}
-          }, 3000);
-          // 30秒后自动关闭
-          setTimeout(() => {
-            clearInterval(pollTimer);
-            if (qrArea.style.display !== 'none') {
-              qrArea.style.display = 'none';
-            }
-          }, 60000);
-        } catch (e) {
-          qrData.textContent = '获取配对码失败';
-        }
-      } else {
-        qrArea.style.display = 'none';
-      }
+    // The full device-token welcome flow is not part of this release; do not call nonexistent QR endpoints.
+    document.getElementById('btnQRLogin')?.addEventListener('click', () => {
+      const area = document.getElementById('qrArea');
+      area.style.display = 'block';
+      area.textContent = '此版本请使用账号密码登录，扫码登录暂不可用。';
     });
   },
 
   async loadAccounts() {
+    const generation = this.viewGeneration;
+    const api = this.pageAPI || API;
     const list = document.getElementById('accountList');
     if (!list) return;
     try {
-      const resp = await API.listAccounts().catch(() => null);
-      const accounts = this.unwrapItems(resp);
-      if (!accounts.length) {
-        list.innerHTML = '<div style="color:var(--text-secondary);padding:8px 0">仅当前账号</div>';
-        return;
-      }
+      const accounts = this.unwrapItems(await api.listAccounts());
+      if (!this.isCurrent(generation)) return;
       list.innerHTML = accounts.map(acc => `
-        <div class="settings-row" data-account-id="${acc.id}">
-          <span>${acc.name || acc.username || '账号'}</span>
-          <div>
-            ${acc.is_current ? '<span style="color:var(--accent);font-size:12px">当前</span>' : `
-              <button class="btn-secondary" style="padding:4px 12px;font-size:12px" onclick="App.switchToAccount('${acc.id}')">切换</button>
-            `}
+        <div class="settings-row" data-username="${escapeHtml(acc.username)}">
+          <span>${escapeHtml(acc.nickname || acc.username)}</span><div>
+            ${acc.active ? '<span style="color:var(--accent);font-size:12px">当前</span>' : '<button class="btn-secondary account-switch" style="padding:4px 12px;font-size:12px">切换</button>'}
+            <button class="btn-secondary account-remove" style="padding:4px 12px;font-size:12px">移除</button>
           </div>
-        </div>
-      `).join('');
-    } catch (_) {
-      list.innerHTML = '<div style="color:var(--text-secondary);padding:8px 0">仅当前账号</div>';
+        </div>`).join('') || '<div style="color:var(--text-secondary)">没有已保存账号</div>';
+      list.querySelectorAll('.account-switch').forEach(button => button.addEventListener('click', () => this.switchToAccount(button.closest('[data-username]').dataset.username)));
+      list.querySelectorAll('.account-remove').forEach(button => button.addEventListener('click', async () => {
+        const username = button.closest('[data-username]').dataset.username;
+        if (!window.confirm(`从这台电脑移除“${username}”的登录状态？`)) return;
+        button.disabled = true;
+        try {
+          await Player.close();
+          const response = await API.removeAccount(username);
+          await this.resetContext();
+          this.session = null;
+          if (response?.data) await this.enterSession(response);
+          else this.renderLogin();
+        } catch (error) {
+          if (error.status === 401) this.handleSessionExpired();
+          else if (this.isCurrent(generation)) {
+            list.textContent = error.message;
+            button.disabled = false;
+          }
+        }
+      }));
+    } catch (error) {
+      if (!this.isCurrent(generation) || error.name === 'AbortError') return;
+      if (error.status === 401) { this.handleSessionExpired(); return; }
+      list.textContent = '无法读取账号：' + error.message;
     }
   },
 
-  async switchToAccount(accountId) {
+  async switchToAccount(username) {
+    const generation = this.viewGeneration;
     try {
-      await API.switchAccount(accountId);
-      window.location.reload();
-    } catch (e) {
-      console.error('Switch account failed:', e);
+      await Player.close();
+      const response = await API.switchAccount(username);
+      await this.resetContext();
+      await this.enterSession(response);
+    } catch (error) {
+      if (error.status === 404 || error.status === 401) {
+        this.renderLogin({ addAccount: true, username, message: '该账号的登录已失效，请重新输入密码。' });
+      } else if (this.isCurrent(generation)) {
+        const list = document.getElementById('accountList');
+        if (list) list.textContent = '切换失败：' + error.message;
+      }
     }
   },
 
   // ===== 播放（内置 HTML5 播放器） =====
   async startPlayback(item, isRetry) {
+    item = { ...item };
+    if (!item.attemptId) item.attemptId = Date.now().toString(36) + Math.random().toString(36).slice(2);
     // 错误对话框的「重试」要重跑这一份（同 macOS retry() 重新 request）
     this._retryItem = item;
     this._retryStartMs = null;
     // 连点/返回竞态：新请求立即作废旧请求（清掉上一部的播放器状态），
     // 后续每个 await 之后用 alive() 检查，旧请求回来不再碰界面
-    Player.close();
-    // 上一集/下一集的兄弟表：新一轮带了就换上；降档/重连那几条回路没带，沿用上一份
-    if (Array.isArray(item.episodes)) Player.episodes = item.episodes;
-    if (!isRetry) {
+    const closing = Player.close({ hide: false });
+    if (!isRetry || item.__resetFailures) {
       // 全新播放：清掉上一轮的降档记录（web-player.md §6.3 的 failed_tiers 回路）
       this._failedTiers = [];
       this._contentFailures = 0;
       this._netRestarts = 0;
     }
+    delete item.__resetFailures;
     const seq = (this._playbackSeq = (this._playbackSeq || 0) + 1);
     const alive = () => this._playbackSeq === seq;
+    let session = null;
 
     const loadingText = document.getElementById('playerLoadingText');
     const loading = document.getElementById('playerLoading');
@@ -1771,6 +1905,9 @@ const App = {
     if (loadingText) loadingText.textContent = '正在获取播放链接...';
 
     try {
+      await closing;
+      if (!alive()) return;
+
       if (!API.baseUrl) throw new Error('未配置服务器地址');
 
       const mediaId = Number(item.media_item_id);
@@ -1786,11 +1923,15 @@ const App = {
             const detailResp = await API.getItemDetail(item.library_id || this.libraries[0]?.id, mediaId);
             detail = detailResp?.data || detailResp;
           }
+          if (!alive()) return;
+          if (detail?.files && !item.files) item.files = detail.files;
+          if (detail?.kind) item.kind = detail.kind;
           if (detail?.kind === 'tv') {
             // 优先用续播信息
             try {
               const resumeResp = await API.getResume(mediaId);
               const resume = resumeResp?.data || resumeResp;
+              if (!alive()) return;
               if (resume?.season_number != null && resume?.episode_number != null) {
                 item.seasonNumber = resume.season_number;
                 item.episodeNumber = resume.episode_number;
@@ -1809,12 +1950,21 @@ const App = {
                   item.seasonNumber = firstSeason;
                   item.episodeNumber = ep.episode_number;
                 }
+                item.episodes = eps;
               } catch (_) {}
             }
           }
         } catch (_) { /* 获取详情失败则按电影处理 */ }
       }
       if (!alive()) return;
+
+      if (item.seasonNumber > 0 && item.episodeNumber > 0 && !Array.isArray(item.episodes)) {
+        try {
+          const response = await API.getItemEpisodes(item.library_id || this.libraries[0]?.id, mediaId, item.seasonNumber);
+          item.episodes = (response?.data || response)?.episodes || [];
+        } catch (_) { item.episodes = []; }
+        if (!alive()) return;
+      }
 
       // ---- 能力申报分级（对齐 macOS PlayerCapability.native()）----
       // mpv 在场且这单片源 HTML5 啃不动 → 报 universal 换 tier-0 原文件直出，交给 mpv；
@@ -1827,6 +1977,7 @@ const App = {
       // negotiationInputs「限了画质时按系统播放器的能力申报，让服务端按上限转码」）
       const qualityCapped = item.__maxHeight > 0;
       const mpvReady = await this.hasEmbeddedPlayer();
+      if (!alive()) return;
       let wantsMpv = false;
       if (mpvReady && !item.__forceHtml5 && !qualityCapped) {
         // 详情页起播已把 files 带在 item 上（省一次详情请求）；别的入口没有就现查
@@ -1835,6 +1986,7 @@ const App = {
           try {
             const d = await API.getItemDetail(item.library_id || this.libraries[0]?.id, mediaId);
             files = (d?.data || d)?.files;
+            if (files) item.files = files;
           } catch (_) { /* 查不到片源元数据就不报 universal，按浏览器真值走 */ }
         }
         const unitFile = this.pickUnitFile(files, item.seasonNumber, item.episodeNumber);
@@ -1848,8 +2000,11 @@ const App = {
         // 什么都不支持 → 所有影片全量转码，起播慢、个别文件决策卡死
         capability: wantsMpv ? getUniversalCapabilitySnapshot() : await getCapabilitySnapshot(),
         client: 'web',
-        attempt_id: Date.now().toString(36) + Math.random().toString(36).slice(2),
+        attempt_id: item.attemptId,
       };
+      if (item.file_id != null) body.file_id = Number(item.file_id);
+      if (item.audio_track != null) body.audio_track = item.audio_track;
+      if (item.subtitle_track != null) body.subtitle_track = item.subtitle_track;
       if (item.seasonNumber != null) body.season_number = Number(item.seasonNumber);
       if (item.episodeNumber != null) body.episode_number = Number(item.episodeNumber);
       // 上几档播失败了：带上让服务端跳过它们换下一档（decide.py 降档回路）
@@ -1870,29 +2025,37 @@ const App = {
       // 而不是永远停在「正在获取播放链接...」
       let sessionTimeout;
       let sessionResp;
+      let timedOut = false;
       try {
+        // 创建会话不硬取消：迟到响应里才有可 DELETE 的会话 id。
+        const request = API.request('/playback/sessions', { method: 'POST', body, timeoutMs: 0 }).then((response) => {
+          if (!alive() || timedOut) this.releasePlaybackSession(response?.data || response);
+          return response;
+        });
         sessionResp = await Promise.race([
-          API.request('/playback/sessions', { method: 'POST', body }),
+          request,
           new Promise((_, reject) => {
-            sessionTimeout = setTimeout(() => reject(new Error('播放服务响应超时，请稍后重试')), 45000);
+            sessionTimeout = setTimeout(() => { timedOut = true; reject(new Error('播放服务响应超时，请稍后重试')); }, 45000);
           }),
         ]);
       } finally {
         clearTimeout(sessionTimeout);
       }
       if (!alive()) return;
-      const session = sessionResp?.data || sessionResp;
+      session = sessionResp?.data || sessionResp;
 
       // 决策三态（同 macOS PlaybackController.handleSession）：
       // consent = 要用户同意开软件转码；rejected = 彻底放不了。两者都换对话框，
       // 不再像别的错误那样 5 秒后自己消失——用户还没表态
       const outcome = session?.decision ? session.decision.outcome : null;
       if (outcome === 'consent') {
+        this.releasePlaybackSession(session);
         if (loading) loading.hidden = true;
         Player.showConsentDialog(session.decision);
         return;
       }
       if (outcome === 'rejected') {
+        this.releasePlaybackSession(session);
         this._showPlaybackError(session.decision.reason || '播放不可用', session.decision.suggestion);
         return;
       }
@@ -1912,10 +2075,11 @@ const App = {
       );
 
       const isSessionTimeline = session.session_id && session.timeline === 'session';
-      const startMs = isSessionTimeline ? null : (session.start_ms > 0 ? session.start_ms : (body.start_ms || null));
+      const startMs = isSessionTimeline ? 0 : (session.start_ms ?? body.start_ms ?? 0);
 
       // 保存必要字段到 session 中供进度上报使用
       if (!session.media_item_id) session.media_item_id = mediaId;
+      session.library_id = item.library_id ?? null;
       if (session.season_number == null) session.season_number = item.seasonNumber ?? null;
       if (session.episode_number == null) session.episode_number = item.episodeNumber ?? null;
 
@@ -1936,19 +2100,30 @@ const App = {
         const nativeSubs = decision.tier === 0
           ? subtitleUrls.filter((s) => !decodeURIComponent(s).includes('track=embedded:'))
           : subtitleUrls;
-        await this.openEmbeddedPlayer(item, streamUrl, nativeSubs, startMs, session);
+        await this.openEmbeddedPlayer(item, streamUrl, nativeSubs, startMs, session, seq);
       } else {
         // 打开内置 HTML5 播放器
         loading.hidden = true;
-        Player.open(item.title || 'MovieClaw', streamUrl, subtitleUrls, startMs, session);
+        Player.open(item.title || 'MovieClaw', streamUrl, subtitleUrls, startMs, session, item);
       }
 
     } catch (e) {
+      if (session?.session_id && Player.sessionId !== session.session_id) this.releasePlaybackSession(session);
       if (!alive()) return; // 已被新的播放请求取代，别覆盖新界面
       console.error('Playback error:', e);
       // 错误对话框（重试/关闭）代替「5 秒后自己消失」的加载文案：用户还没表态
       this._showPlaybackError((e && e.message) || String(e));
     }
+  },
+
+  releasePlaybackSession(session) {
+    if (session?.session_id) return API.sessionStop(session.session_id).catch(() => {});
+    return Promise.resolve();
+  },
+
+  restartPlaybackAt(positionMs, overrides = {}) {
+    if (!Player.context) return;
+    return this.startPlayback({ ...Player.context, startMs: positionMs, ...overrides }, true);
   },
 
   // 首帧前播放失败（解不了 / 无数据）→ failed_tiers 降档回路（web-player.md §6.3）：
@@ -1990,14 +2165,7 @@ const App = {
     // 降档是「换一档接着看」，不是「从头再来」：把当前位置带上（startPlayback 会先
     // Player.close()，位置必须在这之前读）
     const resumeMs = Math.floor(Player.engPos() * 1000);
-    this.startPlayback({
-      media_item_id: sd.media_item_id,
-      title: Player.currentTitle,
-      library_id: sd.library_id,
-      seasonNumber: sd.season_number,
-      episodeNumber: sd.episode_number,
-      startMs: resumeMs > 0 ? resumeMs : null,
-    }, true);
+    this.restartPlaybackAt(resumeMs, Player.isMpv() ? { __forceHtml5: true } : {});
   },
 
   // 缓冲见底且连续 N 秒一个字节都没收到（StallWatch 的 .dead）→ 同档原地重开。
@@ -2006,6 +2174,8 @@ const App = {
     const view = document.getElementById('playerView');
     if (view && view.hidden) return;
     const sd = Player.sessionData;
+    if (!sd || sd.__networkRestarting) return;
+    sd.__networkRestarting = true;
     this._netRestarts = (this._netRestarts || 0) + 1;
     const loadingText = document.getElementById('playerLoadingText');
     if (this._netRestarts > 2) {
@@ -2017,14 +2187,7 @@ const App = {
     }
     if (loadingText) loadingText.textContent = '连接中断，正在重连...';
     const resumeMs = Math.floor(Player.engPos() * 1000);
-    this.startPlayback({
-      media_item_id: sd && sd.media_item_id,
-      title: Player.currentTitle,
-      library_id: sd && sd.library_id,
-      seasonNumber: sd && sd.season_number,
-      episodeNumber: sd && sd.episode_number,
-      startMs: resumeMs > 0 ? resumeMs : null,
-    }, true);
+    this.restartPlaybackAt(resumeMs);
   },
 
   // 真播起来过就清网络重开预算（同 macOS reachedPlaying()）
@@ -2037,7 +2200,7 @@ const App = {
   _showPlaybackError(reason, suggestion) {
     // 位置要在 close() 之前读：close 会把 <video> 的 src 摘掉
     const resumeMs = Math.floor(Player.engPos() * 1000);
-    this._retryStartMs = resumeMs > 0 ? resumeMs : null;
+    this._retryStartMs = Player.context ? resumeMs : null;
     Player.close();
     const view = document.getElementById('playerView');
     const loading = document.getElementById('playerLoading');
@@ -2057,7 +2220,8 @@ const App = {
     const item = this._retryItem;
     if (!item) { Player.close(); return; }
     const next = Object.assign({}, item);
-    if (this._retryStartMs) next.startMs = this._retryStartMs;
+    if (this._retryStartMs != null) next.startMs = this._retryStartMs;
+    delete next.attemptId;
     this.startPlayback(next);
   },
 
@@ -2081,6 +2245,7 @@ const App = {
     const next = Player.nextEpisode();
     if (!next) return;
     this.showAutoNextCard({
+      context: Player.context,
       media_item_id: Player.sessionData?.media_item_id ?? Player.mediaItemId,
       title: next.name || `第 ${next.episode_number} 集`,
       season_number: Player.seasonNumber,
@@ -2138,7 +2303,8 @@ const App = {
   },
 
   // 打开嵌入式 mpv 播放器
-  async openEmbeddedPlayer(item, streamUrl, subtitleUrls, startMs, session) {
+  async openEmbeddedPlayer(item, streamUrl, subtitleUrls, startMs, session, seq) {
+    const alive = () => this._playbackSeq === seq;
     try {
       // 获取视频区域位置
       const playerView = document.getElementById('playerView');
@@ -2150,14 +2316,10 @@ const App = {
       const video = document.getElementById('playerVideo');
       if (video) video.style.display = 'none'; // 隐藏 HTML5 video
 
-      // 获取主窗口 HWND
-      const mainWindow = window.__TAURI__.window.getCurrentWindow();
-      const rawHwnd = await window.__TAURI__.core.invoke('plugin:window|internal_current_window')
-        .catch(() => null);
-
       // Tauri 2 获取 HWND
       const hwnd = await window.__TAURI__.core.invoke('get_main_window_hwnd')
         .catch(() => 0);
+      if (!alive()) { await this.releasePlaybackSession(session); return; }
 
       // 计算视频区域在窗口中的位置
       const rect = videoWrap.getBoundingClientRect();
@@ -2173,41 +2335,33 @@ const App = {
         y: Math.round(rect.top * scale),
         width: Math.round(rect.width * scale),
         height: Math.round(rect.height * scale),
+        instanceId: seq,
       });
+      if (!alive()) {
+        await window.__TAURI__.core.invoke('stop_embedded_player', { instanceId: seq }).catch(() => {});
+        await this.releasePlaybackSession(session);
+        return;
+      }
 
-      // 会话切到 mpv：画质重协商是 HTML5 那条链，selectQuality 据此不接
+      // 两个引擎采用同一播放上下文，画质、重连与进度都从这里继续。
       window.__MOVIECLAW_MPV_ACTIVE = true;
 
-      // mpv 这条链以前不落 sessionData：诊断面板读不到档位/码率，看门狗更是
-      // 连「现在是哪一档」都不知道（onPlaybackContentFailed 会直接当成没会话报错）
-      Player.sessionData = session;
-      Player.sessionId = session.session_id || session.id || null;
-      Player.mediaItemId = session.media_item_id || item.media_item_id || null;
-      Player.currentTitle = item.title || 'MovieClaw';
+      Player.adoptSession(item.title || 'MovieClaw', session, item, 'mpv');
+      Player.mpvInstanceId = seq;
       // 选中态是 HTML5 那条链跟的，mpv 自己挑默认轨；留着上一次的值会把勾打错行
       Player.selectedSubtitle = undefined;
       // 上下集按钮只在剧集里亮；mpv 这条链不走 Player.open，季集号与兄弟表同步要在这做
-      Player.seasonNumber = session.season_number ?? item.seasonNumber ?? null;
-      Player.episodeNumber = session.episode_number ?? item.episodeNumber ?? null;
-      Player.syncEpisodeNav();
 
       // mpv 没有 media element 也没有事件：进度/时长/暂停态靠轮询喂给 UI
-      Player.startMpvPoll();
+      Player.startMpvPoll(startMs);
       Player.syncEmbeddedPlayerRect();
 
       // 显示控制栏（复用现有 UI）
       Player.showControls();
       Player.autoHideControls();
 
-      // 关闭按钮 → 停止嵌入式播放器
-      document.getElementById('playerBack')?.addEventListener('click', async () => {
-        window.__MOVIECLAW_MPV_ACTIVE = false;
-        await window.__TAURI__.core.invoke('stop_embedded_player').catch(() => {});
-        playerView.hidden = true;
-        if (video) video.style.display = '';
-      }, { once: true });
-
     } catch (e) {
+      if (!alive()) { await this.releasePlaybackSession(session); return; }
       console.error('Embedded player failed:', e);
       window.__MOVIECLAW_MPV_ACTIVE = false;
       // 恢复被隐藏的 video 元素
@@ -2217,17 +2371,29 @@ const App = {
       // 不能就地拿这个 URL 交给 <video>。标 __forceHtml5 重谈一次，
       // 这回如实报浏览器能力，服务端给能播的换壳/转码流
       if (item.__universalClaim) {
+        await this.releasePlaybackSession(session);
         item.__universalClaim = false;
         item.__forceHtml5 = true;
-        return this.startPlayback(item);
+        return this.startPlayback(item, true);
       }
-      Player.open(item.title || 'MovieClaw', streamUrl, subtitleUrls, startMs, session);
+      Player.open(item.title || 'MovieClaw', streamUrl, subtitleUrls, startMs, session, item);
     }
   },
 
   showAutoNextCard(next) {
-    let card = document.getElementById('autoNextCard');
-    if (card) card.remove();
+    this.cancelAutoNext();
+    const generation = Player.generation;
+    const playNext = () => {
+      if (generation !== Player.generation || !Player.activeEngine) return;
+      const context = next.context || Player.context || {};
+      this.cancelAutoNext();
+      const item = { ...context, media_item_id: next.media_item_id, title: next.title,
+        seasonNumber: next.season_number, episodeNumber: next.episode_number, startMs: null };
+      delete item.attemptId;
+      delete item.file_id;
+      this.startPlayback(item);
+    };
+    let card;
 
     card = document.createElement('div');
     card.id = 'autoNextCard';
@@ -2247,19 +2413,15 @@ const App = {
     document.getElementById('playerView')?.appendChild(card);
 
     let countdown = 8;
-    const timer = setInterval(() => {
+    const timer = this._autoNextTimer = setInterval(() => {
+      if (generation !== Player.generation || !Player.activeEngine) { this.cancelAutoNext(); return; }
       countdown--;
       const el = document.getElementById('autoNextCountdown');
       if (el) el.textContent = countdown;
       if (countdown <= 0) {
         clearInterval(timer);
         card.remove();
-        this.startPlayback({
-          media_item_id: next.media_item_id,
-          title: next.title,
-          seasonNumber: next.season_number,
-          episodeNumber: next.episode_number,
-        });
+        playNext();
       }
     }, 1000);
 
@@ -2270,13 +2432,14 @@ const App = {
     document.getElementById('btnPlayNext')?.addEventListener('click', () => {
       clearInterval(timer);
       card.remove();
-      this.startPlayback({
-        media_item_id: next.media_item_id,
-        title: next.title,
-        seasonNumber: next.season_number,
-        episodeNumber: next.episode_number,
-      });
+      playNext();
     });
+  },
+
+  cancelAutoNext() {
+    if (this._autoNextTimer) clearInterval(this._autoNextTimer);
+    this._autoNextTimer = null;
+    document.getElementById('autoNextCard')?.remove();
   },
 };
 

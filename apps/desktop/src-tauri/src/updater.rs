@@ -29,6 +29,20 @@ fn parse_version(v: &str) -> (u64, u64, u64) {
     (major, minor, patch)
 }
 
+fn windows_download_url(release: &serde_json::Value) -> Option<&str> {
+    let assets = release.get("assets")?.as_array()?;
+    for suffix in ["-Setup-x64.exe", "-portable-x64.zip"] {
+        if let Some(url) = assets.iter().find_map(|asset| {
+            let name = asset.get("name")?.as_str()?;
+            let url = asset.get("browser_download_url")?.as_str()?;
+            (name.ends_with(suffix) && url.starts_with("https://")).then_some(url)
+        }) {
+            return Some(url);
+        }
+    }
+    None
+}
+
 /// 检查 GitHub Releases 是否有新版本
 #[tauri::command]
 pub fn check_for_updates() -> Result<UpdateInfo, String> {
@@ -45,9 +59,7 @@ pub fn check_for_updates() -> Result<UpdateInfo, String> {
         .call()
         .map_err(|e| format!("请求 GitHub API 失败: {e}"))?;
 
-    let releases: serde_json::Value = resp
-        .into_json()
-        .map_err(|e| format!("解析响应失败: {e}"))?;
+    let releases: serde_json::Value = resp.into_json().map_err(|e| format!("解析响应失败: {e}"))?;
 
     let current_ver = parse_version(CURRENT_VERSION);
 
@@ -58,20 +70,24 @@ pub fn check_for_updates() -> Result<UpdateInfo, String> {
 
     if let Some(arr) = releases.as_array() {
         for release in arr {
-            let tag = release.get("tag_name").and_then(|t| t.as_str()).unwrap_or("");
-            // 只关注桌面版 release（tag 含 "desktop" 或有 Setup asset）
-            let has_setup = release
-                .get("assets")
-                .and_then(|a| a.as_array())
-                .map(|assets| {
-                    assets.iter().any(|a| {
-                        let name = a.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                        name.contains("Setup") && name.ends_with(".exe")
-                    })
-                })
-                .unwrap_or(false);
-
-            if !has_setup && !tag.contains("desktop") {
+            if release
+                .get("draft")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+                || release
+                    .get("prerelease")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            let tag = release
+                .get("tag_name")
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            // 旧版 v* 与新版 desktop-v* 均须有可用的 Windows x64 桌面包。
+            // 跳过尚未上传资源的 release，避免提示无法安装的更新。
+            if windows_download_url(release).is_none() {
                 continue;
             }
 
@@ -91,36 +107,9 @@ pub fn check_for_updates() -> Result<UpdateInfo, String> {
             .unwrap_or("")
             .to_string();
 
-        // 找 Windows 安装包下载链接（优先 Setup exe）
-        let mut url = String::new();
-        if let Some(assets) = release.get("assets").and_then(|a| a.as_array()) {
-            // 先找 Setup exe
-            for asset in assets {
-                let name = asset.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                if name.contains("Setup") && name.ends_with(".exe") {
-                    url = asset
-                        .get("browser_download_url")
-                        .and_then(|u| u.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    break;
-                }
-            }
-            // 没有 Setup 就找任意 exe 或 zip
-            if url.is_empty() {
-                for asset in assets {
-                    let name = asset.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                    if name.ends_with(".exe") || name.ends_with(".zip") {
-                        url = asset
-                            .get("browser_download_url")
-                            .and_then(|u| u.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        break;
-                    }
-                }
-            }
-        }
+        let url = windows_download_url(release)
+            .unwrap_or_default()
+            .to_string();
 
         let notes = release
             .get("body")
@@ -133,11 +122,7 @@ pub fn check_for_updates() -> Result<UpdateInfo, String> {
         (String::new(), String::new(), String::new())
     };
 
-    let release_notes = if release_notes.len() > 500 {
-        release_notes[..500].to_string()
-    } else {
-        release_notes
-    };
+    let release_notes = truncate_notes(&release_notes);
 
     Ok(UpdateInfo {
         has_update,
@@ -167,4 +152,41 @@ pub fn open_release_page() -> Result<bool, String> {
     let url = format!("https://github.com/{GITHUB_REPO}/releases");
     open::that(&url).map_err(|e| format!("打开浏览器失败: {e}"))?;
     Ok(true)
+}
+
+fn truncate_notes(notes: &str) -> String {
+    notes.chars().take(500).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn version_prefixes_and_unicode_notes_are_safe() {
+        assert_eq!(parse_version("desktop-v0.2.111"), (0, 2, 111));
+        assert_eq!(parse_version("v0.2.111"), (0, 2, 111));
+        assert_eq!(truncate_notes(&"更".repeat(700)).chars().count(), 500);
+        assert_eq!(truncate_notes("short"), "short");
+    }
+
+    #[test]
+    fn update_assets_require_usable_windows_x64_packages() {
+        let release = serde_json::json!({"assets": [
+            {"name": "server-linux.zip", "browser_download_url": "https://example.test/linux"},
+            {"name": "MovieClaw-Desktop-0.2.112-portable-x64.zip", "browser_download_url": "https://example.test/portable"},
+            {"name": "MovieClaw-Desktop-0.2.112-Setup-x64.exe", "browser_download_url": "https://example.test/setup"}
+        ]});
+        assert_eq!(
+            windows_download_url(&release),
+            Some("https://example.test/setup")
+        );
+        assert_eq!(
+            windows_download_url(&serde_json::json!({"assets": []})),
+            None
+        );
+        let wrong_arch = serde_json::json!({"assets": [
+            {"name": "MovieClaw-Desktop-0.2.112-Setup-arm64.exe", "browser_download_url": "https://example.test/arm"}
+        ]});
+        assert_eq!(windows_download_url(&wrong_arch), None);
+    }
 }

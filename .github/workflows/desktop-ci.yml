@@ -1,123 +1,75 @@
 name: Desktop CI
 
 on:
+  workflow_call:
+  workflow_dispatch:
   push:
-    branches: [main]
-    paths:
-      - 'apps/desktop/**'
-      - '.github/workflows/desktop-ci.yml'
+    branches: [main, feat/windows-native, 'codex/**']
+    paths: ['apps/desktop/**', '.github/workflows/desktop-ci.yml', '.github/workflows/desktop-release.yml']
   pull_request:
-    paths:
-      - 'apps/desktop/**'
+    paths: ['apps/desktop/**', '.github/workflows/desktop-ci.yml', '.github/workflows/desktop-release.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: Build & Test
-    runs-on: windows-latest
-
+  verify:
+    name: Windows x64 tests and packages
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: apps/desktop
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust (GNU target)
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          targets: x86_64-pc-windows-gnu
-
-      - name: Setup MinGW
-        run: |
-          $gcc = Get-Command gcc -ErrorAction SilentlyContinue
-          if (-not $gcc) {
-            choco install mingw -y --no-progress
-            echo "C:\ProgramData\mingw64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-          }
-          gcc --version
-
-      - name: Cache cargo
-        uses: actions/cache@v4
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            apps/desktop/src-tauri/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Build debug
-        working-directory: apps/desktop/src-tauri
-        run: cargo build
-        env:
-          CC_x86_64_pc_windows_gnu: gcc
-          CXX_x86_64_pc_windows_gnu: g++
-
-      - name: Build release
-        working-directory: apps/desktop/src-tauri
-        run: cargo build --release
-        env:
-          CC_x86_64_pc_windows_gnu: gcc
-          CXX_x86_64_pc_windows_gnu: g++
-
-      - name: Upload release exe
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+      - name: Install locked JavaScript tools
+        run: npm ci
+      - name: JavaScript contracts
+        run: npm run test:unit
+      - name: Install browser for E2E
+        run: npx playwright install chromium
+      - name: Browser E2E (DOM and HTTP contracts)
+        run: npm run test:e2e
+      - name: Rust tests (real local HTTP, redirects, Range and cancellation)
+        run: ./scripts/build.ps1 -Tests
+      - name: Build packages and native smoke
+        run: ./scripts/package.ps1 -InstallSmoke
+      - name: Upload verified distributables
         uses: actions/upload-artifact@v4
         with:
-          name: movieclaw-desktop-exe
-          path: apps/desktop/src-tauri/target/release/movieclaw-desktop.exe
+          name: desktop-packages-${{ github.sha }}
+          path: |
+            apps/desktop/dist/MovieClaw-Desktop-*-Setup-x64.exe
+            apps/desktop/dist/MovieClaw-Desktop-*-portable-x64.zip
+            apps/desktop/dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-diagnostics-${{ github.sha }}
+          path: |
+            apps/desktop/test-results
+            apps/desktop/playwright-report
+          if-no-files-found: ignore
           retention-days: 7
-
-  package:
-    name: Package
-    runs-on: windows-latest
-    needs: build
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download exe
-        uses: actions/download-artifact@v4
-        with:
-          name: movieclaw-desktop-exe
-          path: apps/desktop/src-tauri/target/release
-
-      - name: Assemble portable
-        run: |
-          New-Item -ItemType Directory -Force -Path apps/desktop/dist/portable
-          Copy-Item apps/desktop/src-tauri/target/release/movieclaw-desktop.exe apps/desktop/dist/portable/
-          Copy-Item apps/desktop/ui/connect.html apps/desktop/dist/portable/
-          Copy-Item apps/desktop/ui/inject.js apps/desktop/dist/portable/
-          # WebView2Loader.dll from webview2-com-sys crate
-          $dll = Get-ChildItem -Path apps/desktop/src-tauri/target -Recurse -Filter WebView2Loader.dll | Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1
-          if ($dll) { Copy-Item $dll.FullName apps/desktop/dist/portable/ }
-          New-Item -ItemType Directory -Force -Path apps/desktop/dist/portable/mpv
-          echo "PLACEHOLDER" > apps/desktop/dist/portable/mpv/PLACEHOLDER.txt
-          @"
-          MovieClaw Desktop (Portable)
-          1. Run movieclaw-desktop.exe
-          2. Enter your MovieClaw server URL
-          3. Browse and play
-          Requires: Windows 10/11 x64, WebView2 Runtime, mpv
-          "@ | Set-Content apps/desktop/dist/portable/README.txt
-
-      - name: Create portable zip
-        run: |
-          Compress-Archive -Path 'apps/desktop/dist/portable/*' -DestinationPath 'apps/desktop/dist/MovieClaw-Desktop-portable-x64.zip' -Force
-
-      - name: Install NSIS
-        run: choco install nsis -y --no-progress
-
-      - name: Build NSIS installer
-        run: |
-          & "C:\Program Files (x86)\NSIS\makensis.exe" apps/desktop/scripts/movieclaw-setup.nsi
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: desktop-packages
-          path: |
-            apps/desktop/dist/MovieClaw-Desktop-*.exe
-            apps/desktop/dist/MovieClaw-Desktop-*.zip
-          retention-days: 30

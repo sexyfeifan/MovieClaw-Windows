@@ -6,9 +6,50 @@ mod lan_discovery;
 mod player_embedded;
 mod updater;
 
-use tauri::Manager;
-use tauri::WebviewUrl;
-use tauri::WebviewWindowBuilder;
+use std::sync::atomic::{AtomicU8, Ordering};
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
+// 0 = running, 1 = JS is flushing playback, 2 = native cleanup complete.
+static SHUTDOWN: AtomicU8 = AtomicU8::new(0);
+
+fn finish_shutdown(app: tauri::AppHandle) {
+    if SHUTDOWN.swap(2, Ordering::SeqCst) == 2 {
+        return;
+    }
+    api_proxy::cancel_all_requests();
+    let cleanup_app = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let _ = player_embedded::stop_embedded_player(None);
+        cleanup_app.exit(0);
+    });
+}
+
+fn request_shutdown(app: &tauri::AppHandle) {
+    if SHUTDOWN
+        .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.eval(r#"Promise.resolve().then(() => window.__MOVIECLAW_SHUTDOWN__?.()).catch(() => {}).finally(() => window.__TAURI__.core.invoke("complete_shutdown"))"#);
+    }
+    let fallback_app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        finish_shutdown(fallback_app);
+    });
+}
+
+#[tauri::command]
+fn complete_shutdown(app: tauri::AppHandle) {
+    finish_shutdown(app);
+}
+
+#[tauri::command]
+fn get_app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
 
 /// 获取主窗口 HWND
 #[tauri::command]
@@ -50,18 +91,12 @@ fn main() {
                 WebviewUrl::App("desktop/index.html".into())
             };
 
-            let inject = format!(
-                "window.__MOVIECLAW_SERVER__ = {};",
-                serde_json::to_string(&start_url).unwrap()
-            );
-
             WebviewWindowBuilder::new(app, "main", url)
                 .title("MovieClaw")
                 .inner_size(1280.0, 800.0)
                 .min_inner_size(960.0, 600.0)
                 .center()
                 .decorations(false)
-                .initialization_script(&inject)
                 .build()?;
 
             // 系统托盘图标
@@ -87,10 +122,9 @@ fn main() {
                             }
                         }
                         "reconnect" => {
-                            let _ = connect::clear_server_url();
                             if let Some(w) = app.get_webview_window("main") {
                                 let _ = w.show();
-                                let _ = w.eval("window.location.href = 'http://tauri.localhost/connect.html'");
+                                let _ = w.eval(r#"Promise.resolve().then(() => window.__MOVIECLAW_CHANGE_SERVER__ ? window.__MOVIECLAW_CHANGE_SERVER__() : window.__TAURI__.core.invoke("clear_server_url").then(() => { window.location.href = "/connect.html"; }))"#);
                                 let _ = w.set_focus();
                             }
                         }
@@ -109,8 +143,6 @@ fn main() {
                                                 "download_url": info.download_url,
                                                 "release_notes": info.release_notes
                                             }));
-                                            // 在浏览器打开 release 页
-                                            let _ = updater::open_release_page();
                                         } else {
                                             use tauri::Emitter;
                                             let _ = app_handle.emit("update_check_result", serde_json::json!({
@@ -130,7 +162,7 @@ fn main() {
                             });
                         }
                         "quit" => {
-                            app.exit(0);
+                            request_shutdown(app);
                         }
                         _ => {}
                     })
@@ -168,7 +200,17 @@ fn main() {
 
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if SHUTDOWN.load(Ordering::SeqCst) != 2 {
+                    api.prevent_close();
+                    request_shutdown(window.app_handle());
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
+            complete_shutdown,
+            get_app_version,
             connect::save_server_url,
             connect::load_server_url,
             connect::clear_server_url,
@@ -178,15 +220,25 @@ fn main() {
             updater::open_download_page,
             updater::open_release_page,
             api_proxy::proxy_api,
+            api_proxy::cancel_proxy_request,
             get_main_window_hwnd,
             lan_discovery::discover_servers,
             player_embedded::has_embedded_player,
+            player_embedded::get_embedded_player_status,
             player_embedded::launch_embedded_player,
             player_embedded::resize_embedded_player,
             player_embedded::set_embedded_player_visible,
             player_embedded::stop_embedded_player,
             player_embedded::send_mpv_command_embedded,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running MovieClaw Desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building MovieClaw Desktop")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                if SHUTDOWN.load(Ordering::SeqCst) != 2 {
+                    api.prevent_exit();
+                    request_shutdown(app);
+                }
+            }
+        });
 }

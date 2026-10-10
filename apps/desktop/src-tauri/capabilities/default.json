@@ -1,7 +1,9 @@
 {
   "identifier": "default",
   "description": "Default capability for MovieClaw Desktop",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-minimize",
@@ -15,11 +17,6 @@
     "core:window:allow-hide",
     "core:window:allow-set-focus",
     "core:window:allow-start-dragging",
-    "shell:allow-execute",
-    "shell:allow-kill",
-    "shell:allow-open",
-    "shell:allow-spawn",
-    "shell:allow-stdin-write",
     "allow-save-server-url",
     "allow-load-server-url",
     "allow-clear-server-url",
@@ -36,6 +33,10 @@
     "allow-stop-embedded-player",
     "allow-send-mpv-command-embedded",
     "allow-get-main-window-hwnd",
-    "allow-discover-servers"
+    "allow-discover-servers",
+    "allow-cancel-proxy-request",
+    "allow-complete-shutdown",
+    "allow-get-app-version",
+    "allow-get-embedded-player-status"
   ]
 }

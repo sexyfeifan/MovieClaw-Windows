@@ -105,3 +105,23 @@ permissions = [
     "allow-get-main-window-hwnd",
     "allow-discover-servers"
 ]
+
+[[permission]]
+identifier = "allow-cancel-proxy-request"
+description = "Allows cancel_proxy_request"
+commands.allow = ["cancel_proxy_request"]
+
+[[permission]]
+identifier = "allow-complete-shutdown"
+description = "Allows complete_shutdown"
+commands.allow = ["complete_shutdown"]
+
+[[permission]]
+identifier = "allow-get-app-version"
+description = "Allows get_app_version"
+commands.allow = ["get_app_version"]
+
+[[permission]]
+identifier = "allow-get-embedded-player-status"
+description = "Allows get_embedded_player_status"
+commands.allow = ["get_embedded_player_status"]

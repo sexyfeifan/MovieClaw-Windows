@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
+use url::Url;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ConnectResult {
@@ -8,38 +8,65 @@ pub struct ConnectResult {
     pub message: String,
 }
 
+pub(crate) fn config_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("MOVIECLAW_DATA_DIR") {
+        let dir = PathBuf::from(path);
+        let _ = fs::create_dir_all(&dir);
+        return dir;
+    }
+    #[cfg(test)]
+    let base = std::env::temp_dir().join(format!("movieclaw-rust-tests-{}", std::process::id()));
+    #[cfg(all(windows, not(test)))]
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    #[cfg(all(not(windows), not(test)))]
+    let base = std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join(".config"))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let dir = base.join("movieclaw-desktop");
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
 fn config_path() -> PathBuf {
-    let dir = dirs_next_config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("movieclaw-desktop");
-    fs::create_dir_all(&dir).ok();
-    dir.join("server.json")
+    config_dir().join("server.json")
 }
 
-#[cfg(windows)]
-fn dirs_next_config_dir() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(PathBuf::from)
+pub(crate) fn validate_http_url(value: &str) -> Result<Url, String> {
+    let url = Url::parse(value).map_err(|_| "无效的服务器地址")?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("地址必须是 HTTP(S)，且不能包含用户名、密码或片段".into());
+    }
+    Ok(url)
 }
 
-#[cfg(not(windows))]
-fn dirs_next_config_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))
+fn normalize_server_url(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("URL 不能为空".into());
+    }
+    let candidate = if trimmed.contains("://") {
+        trimmed.to_owned()
+    } else {
+        format!("http://{trimmed}")
+    };
+    let url = validate_http_url(&candidate)?;
+    if url.query().is_some() {
+        return Err("服务器地址不能包含查询参数".into());
+    }
+    Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 
 #[tauri::command]
 pub fn save_server_url(url: String) -> Result<ConnectResult, String> {
-    let trimmed = url.trim().trim_end_matches('/').to_string();
-    if trimmed.is_empty() {
-        return Ok(ConnectResult {
-            ok: false,
-            message: "URL 不能为空".into(),
-        });
-    }
-    let normalized = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        trimmed
-    } else {
-        format!("http://{trimmed}")
-    };
+    let normalized = normalize_server_url(&url)?;
+    crate::api_proxy::cancel_all_requests();
     fs::write(config_path(), &normalized).map_err(|e| format!("写入配置失败: {e}"))?;
     Ok(ConnectResult {
         ok: true,
@@ -47,7 +74,6 @@ pub fn save_server_url(url: String) -> Result<ConnectResult, String> {
     })
 }
 
-/// 供前端获取当前配置的服务器地址
 #[tauri::command]
 pub fn get_server_url() -> Result<String, String> {
     load_server_url()
@@ -55,16 +81,19 @@ pub fn get_server_url() -> Result<String, String> {
 
 #[tauri::command]
 pub fn load_server_url() -> Result<String, String> {
-    fs::read_to_string(config_path())
-        .map(|s| s.trim_start_matches('\u{FEFF}').trim().to_string())
-        .or_else(|_| Ok(String::new()))
+    match fs::read_to_string(config_path()) {
+        Ok(s) => normalize_server_url(s.trim_start_matches('\u{FEFF}')),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("读取服务器配置失败: {e}")),
+    }
 }
 
 #[tauri::command]
 pub fn clear_server_url() -> Result<ConnectResult, String> {
+    crate::api_proxy::cancel_all_requests();
     let path = config_path();
     if path.exists() {
-        fs::remove_file(&path).map_err(|e| format!("删除配置失败: {e}"))?;
+        fs::remove_file(path).map_err(|e| format!("删除配置失败: {e}"))?;
     }
     Ok(ConnectResult {
         ok: true,
@@ -73,27 +102,53 @@ pub fn clear_server_url() -> Result<ConnectResult, String> {
 }
 
 #[tauri::command]
-pub fn probe_server(url: String) -> Result<ConnectResult, String> {
-    let trimmed = url.trim().trim_end_matches('/').to_string();
-    let health = format!("{trimmed}/api/v1/health");
-    let agent = ureq::AgentBuilder::new()
+pub async fn probe_server(url: String) -> Result<ConnectResult, String> {
+    let normalized = normalize_server_url(&url)?;
+    let response = reqwest::Client::new()
+        .get(format!("{normalized}/api/v1/health"))
         .timeout(std::time::Duration::from_secs(5))
-        .build();
-    match agent.get(&health).call() {
-        Ok(resp) => {
-            let status = resp.status();
-            Ok(ConnectResult {
-                ok: true,
-                message: format!("连接成功 ({status})"),
-            })
-        }
-        Err(ureq::Error::Status(code, _)) => Ok(ConnectResult {
+        .send()
+        .await;
+    let result = match response {
+        Ok(resp) if resp.status().is_success() => ConnectResult {
+            ok: true,
+            message: "连接成功".into(),
+        },
+        Ok(resp) => ConnectResult {
             ok: false,
-            message: format!("服务返回 {code}"),
-        }),
-        Err(e) => Ok(ConnectResult {
+            message: format!("服务返回 {}", resp.status()),
+        },
+        Err(e) => ConnectResult {
             ok: false,
             message: format!("无法连接: {e}"),
-        }),
+        },
+    };
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn validates_and_normalizes_server_addresses() {
+        assert_eq!(
+            normalize_server_url(" 127.0.0.1:3000/ ").unwrap(),
+            "http://127.0.0.1:3000"
+        );
+        assert_eq!(
+            normalize_server_url("https://EXAMPLE.com/movieclaw/").unwrap(),
+            "https://example.com/movieclaw"
+        );
+        for bad in [
+            "",
+            "file:///tmp/x",
+            "javascript:alert(1)",
+            "https://u:p@server",
+            "https://server/#fragment",
+            "https://server/?token=x",
+            "http://",
+        ] {
+            assert!(normalize_server_url(bad).is_err(), "accepted {bad}");
+        }
     }
 }
