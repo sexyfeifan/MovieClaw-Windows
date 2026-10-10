@@ -655,31 +655,87 @@ img:not([loading]) {
   display: none !important;
 }
 
-/* 底部控制栏 */
+/* 底部控制条：居中玻璃双行面板（同 macOS MacPlayerMetrics：宽 ≤720、高 100、距底 24、圆角 22）
+   外层 player-controls 只负责整块的显隐与位移，玻璃材质在 .player-transport 上 */
 .player-controls {
   position: absolute;
-  bottom: 0;
+  bottom: 24px;
   left: 0;
   right: 0;
-  padding: 0 18px 16px;
-  background: linear-gradient(to top, rgba(0,0,0,0.75) 0%, transparent 100%);
+  display: flex;
+  justify-content: center;
+  padding: 0 48px;
+  pointer-events: none;
   z-index: 20;
   opacity: 1;
   transition: opacity 0.3s;
 }
 
+.player-transport {
+  width: 100%;
+  max-width: 720px;
+  height: 100px;
+  padding: 4px 18px 10px;
+  border-radius: 22px;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  pointer-events: auto;
+  /* 液态玻璃：暗画面上略亮、边缘有高光与折射（同 Infuse）；无 backdrop-filter 时退化成半透明深色 */
+  background: rgba(28, 28, 30, 0.52);
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 12px 32px rgba(0, 0, 0, 0.42);
+}
+
+/* 上行：两侧等宽，播放键永远在正中 */
+.player-transport-top {
+  display: flex;
+  align-items: center;
+  height: 54px;
+}
+
+.player-transport-side {
+  flex: 1 1 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.player-transport-side-right {
+  justify-content: flex-end;
+}
+
+.player-transport-center {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+}
+
+/* 下行：已播 — 进度条 — 剩余 */
+.player-transport-bottom {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 30px;
+}
+
 .player-seek {
   position: relative;
-  height: 4px;
-  background: rgba(255,255,255,0.2);
-  border-radius: 2px;
+  flex: 1;
+  height: 5px;
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: 3px;
   cursor: pointer;
-  margin-bottom: 12px;
-  transition: height 0.15s;
+  transition: height 0.12s;
 }
 
 .player-seek:hover {
-  height: 6px;
+  height: 7px;
 }
 
 .player-seek-buffer {
@@ -687,8 +743,8 @@ img:not([loading]) {
   left: 0;
   top: 0;
   height: 100%;
-  background: rgba(255,255,255,0.25);
-  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.32);
+  border-radius: 3px;
   pointer-events: none;
 }
 
@@ -697,26 +753,28 @@ img:not([loading]) {
   left: 0;
   top: 0;
   height: 100%;
-  background: var(--accent, #cdd6e6);
-  border-radius: 2px;
+  background: #fff;
+  border-radius: 3px;
   pointer-events: none;
 }
 
+/* 胶囊滑块常驻（同 Infuse），悬停 / 拖动时略放大 */
 .player-seek-thumb {
   position: absolute;
   top: 50%;
-  transform: translate(-50%, -50%) scale(0);
-  width: 12px;
-  height: 12px;
+  transform: translate(-50%, -50%);
+  width: 13px;
+  height: 13px;
   border-radius: 50%;
   background: #fff;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
   pointer-events: none;
-  transition: transform 0.12s;
+  transition: width 0.12s, height 0.12s;
 }
 
 .player-seek:hover .player-seek-thumb {
-  transform: translate(-50%, -50%) scale(1);
+  width: 15px;
+  height: 15px;
 }
 
 /* 章节标记 */
@@ -728,19 +786,6 @@ img:not([loading]) {
   background: rgba(255,255,255,0.35);
   pointer-events: none;
   z-index: 2;
-}
-
-.player-controls-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.player-controls-left,
-.player-controls-right {
-  display: flex;
-  align-items: center;
-  gap: 6px;
 }
 
 .player-ctrl-btn {
@@ -762,12 +807,35 @@ img:not([loading]) {
   color: #fff;
 }
 
+.player-ctrl-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.player-ctrl-btn:disabled:hover {
+  background: transparent;
+  color: rgba(255,255,255,0.85);
+}
+
+/* 播放键最大（同 macOS diameter 48） */
+.player-play-btn {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.player-play-btn:hover {
+  background: rgba(255, 255, 255, 0.26);
+}
+
 .player-volume-group {
   display: flex;
   align-items: center;
   gap: 4px;
 }
 
+/* 音量滑条常驻（同 macOS MacVolumeControl），只在悬停时加粗 */
 .player-volume-slider {
   width: 72px;
   height: 3px;
@@ -776,14 +844,11 @@ img:not([loading]) {
   background: rgba(255,255,255,0.25);
   border-radius: 2px;
   outline: none;
-  opacity: 0;
-  transition: opacity 0.2s, width 0.2s;
-  width: 0;
+  transition: height 0.15s;
 }
 
 .player-volume-group:hover .player-volume-slider {
-  opacity: 1;
-  width: 72px;
+  height: 5px;
 }
 
 .player-volume-slider::-webkit-slider-thumb {
@@ -796,10 +861,28 @@ img:not([loading]) {
 }
 
 .player-time {
-  font-size: 12px;
-  color: rgba(255,255,255,0.7);
-  margin-left: 6px;
+  min-width: 46px;
+  font-size: 13px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+#playerTime {
+  text-align: left;
+}
+
+/* 右侧是「剩余 / 总长」的切换钮（同 QuickTime） */
+.player-remaining {
+  text-align: right;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+}
+
+.player-remaining:hover {
+  color: #fff;
 }
 
 .player-speed-label {
@@ -811,11 +894,14 @@ img:not([loading]) {
 /* 设置面板 */
 .player-settings-panel {
   position: absolute;
-  bottom: 70px;
+  /* 必须落在玻璃控制条上方：.player-transport 高 100、距底 24，占 24..124。
+     旧值 70px 会让面板下缘嵌进控制条 54px（盖住「全屏」），而且两层 backdrop-filter
+     在重叠区叠在硬解视频上，WebView2 合成会把那块糊成实心白。 */
+  bottom: 136px;
   right: 18px;
   z-index: 30;
   width: 300px;
-  max-height: 380px;
+  max-height: min(380px, calc(100vh - 160px));
   background: rgba(20, 20, 24, 0.95);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
@@ -928,10 +1014,53 @@ img:not([loading]) {
   opacity: 1;
 }
 
+/* 轨道分组标题（同 macOS MacPanelHeader） */
+.player-settings-group {
+  padding: 10px 16px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+/* 轨道行：主标题一行、小字一行上下排（同 macOS MacPanelRow）。
+   面板只有 300px 宽，横排会被「中文 · WebVTT · 内封」这类说明挤掉主标题 */
+.player-settings-item.stacked {
+  align-items: flex-start;
+}
+
+.player-settings-item.stacked .item-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.player-settings-item.stacked .item-label {
+  flex: none;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.player-settings-item.stacked .item-info {
+  white-space: normal;
+}
+
+/* 「暂时放不了」的轨：看得见原因，但不给选（同 macOS disabled 行 0.4 透明度） */
+.player-settings-item.disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.player-settings-item.disabled:hover {
+  background: transparent;
+}
+
 /* 倍速面板 */
 .player-speed-panel {
   position: absolute;
-  bottom: 70px;
+  bottom: 136px;
   right: 72px;
   z-index: 30;
   background: rgba(20, 20, 24, 0.95);
@@ -2396,6 +2525,165 @@ img:not([loading]) {
 }
 .auto-next-actions .btn-play:hover {
   opacity: 0.85;
+}
+
+/* ===== 画质建议卡（macOS QualitySuggestion：顶部、不打断播放、20s 自动收起） ===== */
+.quality-offer-card {
+  position: absolute;
+  top: 72px;
+  right: 24px;
+  max-width: 420px;
+  background: rgba(20, 20, 24, 0.95);
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--glass-border-strong);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  z-index: 200;
+  animation: slideUp 0.25s ease-out;
+}
+.quality-offer-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.quality-offer-body {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-bottom: 16px;
+}
+.quality-offer-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.quality-offer-actions .btn-secondary,
+.quality-offer-actions .btn-play {
+  padding: 8px 16px;
+  font-size: 13px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  border: 1px solid var(--glass-border);
+  transition: all 0.15s;
+}
+.quality-offer-actions .btn-secondary {
+  background: var(--glass-bg);
+  color: var(--text);
+}
+.quality-offer-actions .btn-secondary:hover {
+  background: var(--glass-bg-hover);
+}
+.quality-offer-actions .btn-play {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+}
+.quality-offer-actions .btn-play:hover {
+  opacity: 0.85;
+}
+
+/* ===== 播放器对话框（同 macOS MacPlayerDialog / MacConsentDialog）===== */
+.player-dialog-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 300;
+}
+.player-dialog {
+  width: 420px;
+  max-width: calc(100% - 48px);
+  padding: 28px;
+  background: rgba(20, 20, 24, 0.92);
+  backdrop-filter: blur(28px) saturate(180%);
+  border: 1px solid var(--glass-border-strong);
+  border-radius: 24px;
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  animation: slideUp 0.25s ease-out;
+}
+.player-dialog.consent {
+  width: 460px;
+  gap: 12px;
+}
+.player-dialog-icon {
+  width: 34px;
+  height: 34px;
+  align-self: center;
+  color: var(--warning, #e8b04b);
+}
+.player-dialog-title {
+  font-size: 15px;
+  font-weight: 600;
+  text-align: center;
+  line-height: 1.5;
+}
+/* 同意框是说明文不是告警：左对齐、没有图标 */
+.player-dialog.consent .player-dialog-title {
+  text-align: left;
+}
+.player-dialog-message {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+  text-align: center;
+  line-height: 1.6;
+}
+.player-dialog-field-label {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  margin-bottom: 3px;
+}
+.player-dialog-field-value {
+  font-size: 12px;
+  line-height: 1.6;
+}
+.player-dialog-hint {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+  line-height: 1.6;
+}
+.player-dialog-error {
+  font-size: 12px;
+  color: var(--danger, #ff7a70);
+  line-height: 1.6;
+}
+.player-dialog-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+.player-dialog-actions .btn-secondary,
+.player-dialog-actions .btn-play {
+  padding: 8px 16px;
+  font-size: 13px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  border: 1px solid var(--glass-border);
+  transition: all 0.15s;
+}
+.player-dialog-actions .btn-secondary {
+  background: var(--glass-bg);
+  color: var(--text);
+}
+.player-dialog-actions .btn-secondary:hover {
+  background: var(--glass-bg-hover);
+}
+.player-dialog-actions .btn-play {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+}
+.player-dialog-actions .btn-play:hover {
+  opacity: 0.85;
+}
+.player-dialog-actions .btn-play:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* ===== Trickplay 预览 ===== */

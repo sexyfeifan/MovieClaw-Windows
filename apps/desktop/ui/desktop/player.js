@@ -225,17 +225,183 @@ function getUniversalCapabilitySnapshot() {
 }
 window.getUniversalCapabilitySnapshot = getUniversalCapabilitySnapshot;
 
+// ===== 播放看门狗（阈值逐一照搬 Shared/Player/PlaybackWatchdogs.swift + PlaybackRouting.swift）=====
+// 三块纯逻辑：喂 1 Hz 样本、吐判定，动作由 App 执行。卡顿归因分三态，其中「线路慢」
+// 明确不算失败——带宽不够的唯一出口是画质建议卡（换不换由用户定，2026-09-28 拍板）。
+//
+// 与 macOS 的一处刻意差异：Apple 的原文件直出故意不判掉帧（NativeEngine.swift
+// 「掉帧不是换播放器的理由」），根因是那条路拿不到总帧数做分母。Windows 的 mpv 有
+// frame-drop-count，分母用 time-pos × container-fps 估，因此档 0 直出也判——4K 解
+// 不动就该降档，这正是 failed_tiers 回路要干的事。转码档（3/4）仍不判：再掉帧说明
+// 连转码产物都放不动，继续降档只会更糟。
+
+// 掉帧：10 秒窗（11 个 1 Hz 累计样本的首尾差）内掉帧率 ≥10%，且窗口 ≥100 帧才判
+function createFrameDropTracker() {
+  const WINDOW = 10, MIN_FRAMES = 100, RATIO = 0.1;
+  let history = [];
+  return {
+    threshold: RATIO,
+    // 喂一个累计样本；返回 null = 没到判定条件，否则是窗口掉帧率
+    sample(dropped, total) {
+      const last = history[history.length - 1];
+      // 累计计数变小 = 引擎换了流，旧窗口作废（调用方漏 reset 的兜底）
+      if (last && (total < last.total || dropped < last.dropped)) history = [];
+      history.push({ dropped, total });
+      if (history.length > WINDOW + 1) history.shift();
+      if (history.length !== WINDOW + 1) return null;
+      const first = history[0];
+      const totalDelta = total - first.total;
+      if (totalDelta < MIN_FRAMES) return null;
+      return (dropped - first.dropped) / totalDelta;
+    },
+    reset() { history = []; },
+  };
+}
+
+// 卡顿归因：解码卡 / 线路慢（不算失败）/ 连接断；缓冲够却不动先推 2 把再判死
+function createStallWatch() {
+  const DECODE_STALL_S = 8, DECODE_MIN_BUFFER = 3.0, SERVER_DEAD_S = 45, DIRECT_DEAD_S = 15;
+  const NUDGE_AT = 3, MAX_NUDGES = 2, NUDGE_STEP = 0.1;
+  let lastTime = null, stalledFor = 0, silentFor = 0, nudges = 0, sinceNudge = 99, everAdvanced = false;
+  return {
+    DIRECT_DEAD_S, SERVER_DEAD_S, NUDGE_STEP,
+    reset() {
+      lastTime = null; stalledFor = 0; silentFor = 0; nudges = 0; sinceNudge = 99; everAdvanced = false;
+    },
+    // receiving: 这一秒有没有从源收到字节；deadLimit: 缓冲见底后连续多少秒没字节算断线
+    sample(time, bufferedAhead, paused, ended, seeking, receiving, deadLimit) {
+      const advanced = lastTime != null && time > lastTime;
+      // 「真正播起来过」只认小步前进：起播定位、用户拖动是一次大跳，不算
+      if (advanced && !seeking && lastTime != null && time - lastTime < 5) everAdvanced = true;
+      lastTime = time;
+      sinceNudge += 1;
+      if (paused || ended || seeking || advanced) {
+        stalledFor = 0; silentFor = 0;
+        // 只有远离上次推动的真实前进才算恢复——推动自己造成的播放头变化不作数
+        if (advanced && sinceNudge > 3) nudges = 0;
+        return 'ok';
+      }
+      stalledFor += 1;
+      if (bufferedAhead >= DECODE_MIN_BUFFER) {
+        silentFor = 0;
+        if (stalledFor >= DECODE_STALL_S) { stalledFor = 0; nudges = 0; return 'decodeStalled'; }
+        // 有数据却不动：先推一把（起播预滚阶段不推，否则会把预滚冲掉重来）
+        if (everAdvanced && stalledFor >= NUDGE_AT && nudges < MAX_NUDGES) {
+          nudges += 1; sinceNudge = 0; stalledFor = 0; return 'nudge';
+        }
+        return 'ok';
+      }
+      // 缓冲见底：字节还在进来就是线路慢，不算失败
+      silentFor = receiving ? 0 : silentFor + 1;
+      if (silentFor >= deadLimit) { stalledFor = 0; silentFor = 0; nudges = 0; return 'dead'; }
+      return 'ok';
+    },
+    reason(verdict, deadLimit) {
+      if (verdict === 'decodeStalled') return `播放停滞超过 ${DECODE_STALL_S} 秒，这一档的码流播放器吃不下`;
+      return deadLimit < SERVER_DEAD_S
+        ? `连续 ${deadLimit} 秒没有收到数据——连接可能中断了`
+        : `连续 ${deadLimit} 秒没有收到服务端的数据——转码可能中断了`;
+    },
+  };
+}
+
+// 画质建议：只在等待期测速（缓冲满引擎会停下载，平时读数不可信）
+function createQualitySuggestion() {
+  const GRACE = 10, WINDOW = 300, MIN_STALLS = 2, LONG_WAIT = 8, LINK_MARGIN = 0.9;
+  // 推荐档位阶梯（同 macOS QualityOption）：1080p 约 6、720p 约 3、480p 约 1.5 Mbps
+  const LADDER = [[1080, 6e6], [720, 3e6], [480, 1.5e6]];
+  let clock = 0, graceUntil = GRACE, stalls = [], stalling = false;
+  let waitSeconds = 0, waitSpeeds = [], offered = false;
+  function recommendedHeight(bps, currentHeight) {
+    const lower = LADDER.filter(([h]) => currentHeight == null || h < currentHeight);
+    const fit = lower.find(([, b]) => b <= bps * 0.8);
+    return fit ? fit[0] : (lower.length ? lower[lower.length - 1][0] : null);
+  }
+  return {
+    get offered() { return offered; },
+    get waitSeconds() { return waitSeconds; },
+    // 起播、跳转、从暂停恢复：接下来 10 秒的缓冲不算「卡」
+    restartGrace() {
+      graceUntil = clock + GRACE; stalling = false;
+      waitSeconds = 0; waitSpeeds = [];
+    },
+    // 每秒一次，只在用户想看时调用。stalled: 正在等（含起播）；seeking: 这段等待是跳转造成的
+    tick(stalled, seeking, loadingBps) {
+      clock += 1;
+      stalls = stalls.filter(s => s.start + s.seconds >= clock - WINDOW);
+      const speed = loadingBps > 0 ? loadingBps : null;
+      if (stalled) {
+        waitSeconds += 1;
+        if (speed != null) waitSpeeds.push(speed);
+      } else {
+        waitSeconds = 0; waitSpeeds = [];
+      }
+      if (!stalled || seeking || clock <= graceUntil) { stalling = false; return; }
+      if (!stalling) { stalls.push({ start: clock, seconds: 0, speeds: [] }); stalling = true; }
+      const cur = stalls[stalls.length - 1];
+      cur.seconds += 1;
+      if (speed != null) cur.speeds.push(speed);
+    },
+    // 该不该提议；给出一次后本单元不再给
+    offer(streamBitrate, currentHeight) {
+      if (offered || !(streamBitrate > 0)) return null;
+      let measured;
+      if (waitSeconds >= LONG_WAIT) {
+        // 一次长等取这段里最快的一秒：冷起播分头取流，逐秒读数时有时无，最快那秒
+        // 最接近线路能力，它都跟不上码率才算线路问题
+        if (!waitSpeeds.length) return null;
+        measured = Math.max(...waitSpeeds);
+      } else if (stalls.length >= MIN_STALLS) {
+        const speeds = stalls.reduce((a, s) => a.concat(s.speeds), []).sort((a, b) => a - b);
+        if (!speeds.length) return null;
+        measured = speeds[speeds.length >> 1];
+      } else return null;
+      if (measured >= streamBitrate * LINK_MARGIN) return null;
+      const height = recommendedHeight(measured, currentHeight);
+      if (height == null) return null;
+      offered = true;
+      return { measuredBps: measured, requiredBps: streamBitrate, maxHeight: height };
+    },
+    reset() { offered = false; },
+  };
+}
+
+function formatBandwidth(bps) {
+  if (!(bps > 0) || !isFinite(bps)) return null;
+  const mb = bps / 8 / (1024 * 1024);
+  if (mb >= 1) return mb.toFixed(1) + ' MB/s';
+  const kb = bps / 8 / 1024;
+  return kb < 1 ? '0 KB/s' : Math.round(kb) + ' KB/s';
+}
+
+// source.resolution 形如 "3840x1632" / "1080p" → 画面高度
+function heightOfResolution(r) {
+  if (!r) return null;
+  const wh = String(r).match(/(\d{3,5})\s*[x×*]\s*(\d{3,5})/i);
+  if (wh) return Number(wh[2]);
+  const p = String(r).match(/(\d{3,5})\s*[pP]/);
+  return p ? Number(p[1]) : null;
+}
+
 const Player = {
   video: null,
   hls: null,
   currentTitle: '',
   hideTimer: null,
   isSeeking: false,
+  // 拖动跟随（同 macOS scrubFollow）：上次跟随时刻 + 排到一半的跟随任务 + 手指在进度条上的位置
+  _lastScrubFollowAt: 0,
+  _scrubFollowTask: null,
+  _scrubPct: null,
   // 进度上报 & 会话保活
   sessionId: null,
   mediaItemId: null,
   seasonNumber: null,
   episodeNumber: null,
+  // 上一集 / 下一集：同季剧集表（详情页 loadBrowse 那一份，只含已入库集）
+  episodes: [],
+  // 右侧时间显剩余还是总长（点它切换，同 QuickTime）
+  showsTotal: false,
   progressTimer: null,
   pingTimer: null,
   lastProgressReport: 0,
@@ -255,23 +421,36 @@ const Player = {
     this.video.addEventListener('click', () => this.togglePlay());
     this.video.addEventListener('dblclick', () => this.toggleFullscreen());
 
-    // 进度条
+    // 进度条：按下/拖动走 scrubFollow 让画面跟手，松手精确跳到落点
+    // （同 macOS MacScrubber 的 DragGesture：onChanged → scrubFollow，onEnded → seek）
     const seek = document.getElementById('playerSeek');
     if (seek) {
-      seek.addEventListener('mousedown', (e) => {
-        this.isSeeking = true;
+      const pctAt = (clientX) => {
         const rect = seek.getBoundingClientRect();
-        const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-        if (this.engDuration()) this.engSeekTo(pct * this.engDuration());
+        return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      };
+      seek.addEventListener('mousedown', (e) => {
+        if (!this.engDuration()) return;
+        this.isSeeking = true;
+        this._scrubPct = pctAt(e.clientX);
+        this.renderScrub();
+        this.scrubFollow(this._scrubPct * this.engDuration());
         const onMove = (e2) => {
-          const rect2 = seek.getBoundingClientRect();
-          const pct2 = Math.max(0, Math.min(1, (e2.clientX - rect2.left) / rect2.width));
-          if (this.engDuration()) this.engSeekTo(pct2 * this.engDuration());
+          if (!this.engDuration()) return;
+          this._scrubPct = pctAt(e2.clientX);
+          this.renderScrub();
+          this.scrubFollow(this._scrubPct * this.engDuration());
         };
-        const onUp = () => {
+        const onUp = (e3) => {
           this.isSeeking = false;
           document.removeEventListener('mousemove', onMove);
           document.removeEventListener('mouseup', onUp);
+          // 排到一半的跟随别再落地，松手那一次就到点了
+          if (this._scrubFollowTask) { clearTimeout(this._scrubFollowTask); this._scrubFollowTask = null; }
+          const pct = pctAt(e3.clientX);
+          this._scrubPct = null;
+          // 松手这一次才算真 seek（跟随不计入 seek 次数）：精确落地 + 作废掉帧/卡顿窗口
+          if (this.engDuration()) this.engSeekTo(pct * this.engDuration());
         };
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
@@ -311,18 +490,14 @@ const Player = {
     document.getElementById('btnRew')?.addEventListener('click', () => this.engSeekBy(-10));
     document.getElementById('btnFwd')?.addEventListener('click', () => this.engSeekBy(10));
 
-    // 下一集
-    document.getElementById('btnNextEp')?.addEventListener('click', () => {
-      if (this.sessionData?.next_episode && typeof App !== 'undefined') {
-        const next = this.sessionData.next_episode;
-        this.close();
-        App.startPlayback({
-          media_item_id: next.media_item_id || next.id,
-          title: next.title,
-          seasonNumber: next.season_number,
-          episodeNumber: next.episode_number,
-        });
-      }
+    // 上一集 / 下一集
+    document.getElementById('btnPrevEp')?.addEventListener('click', () => this.playEpisode(this.prevEpisode()));
+    document.getElementById('btnNextEp')?.addEventListener('click', () => this.playEpisode(this.nextEpisode()));
+
+    // 右侧时间：剩余 ↔ 总长（同 QuickTime / macOS mac-player-remaining）
+    document.getElementById('playerRemaining')?.addEventListener('click', () => {
+      this.showsTotal = !this.showsTotal;
+      this.updateProgress();
     });
 
     // 音量
@@ -348,6 +523,9 @@ const Player = {
     });
     this.video.addEventListener('loadedmetadata', () => {
       this.renderChapters(this.sessionData?.chapters);
+      // 片长在这里才定下来，下行两端要立刻跟上；只等 timeupdate 的话，起播慢时
+      // 右侧会一直挂着占位（mpv 那条链靠轮询的首个 tick 补上，HTML5 得在这补）
+      this.updateProgress();
     });
     this.video.addEventListener('progress', () => this.updateBuffer());
     this.video.addEventListener('play', () => {
@@ -356,6 +534,7 @@ const Player = {
       this.autoHideControls();
     });
     this.video.addEventListener('pause', () => {
+      this._buffering = false;
       this.showIcon('play');
       this.showCenterBtn();
       this.showControls();
@@ -367,11 +546,13 @@ const Player = {
       this.reportPlaybackEnd();
     });
     this.video.addEventListener('waiting', () => {
+      this._buffering = true;
       const loading = document.getElementById('playerLoading');
       if (loading) loading.hidden = false;
     });
     this.video.addEventListener('playing', () => {
       this._everPlayed = true;
+      this._buffering = false;
       const loading = document.getElementById('playerLoading');
       if (loading) loading.hidden = true;
     });
@@ -394,21 +575,47 @@ const Player = {
       this.autoHideControls();
     });
 
-    // 键盘快捷键
+    // 键盘快捷键（对齐 macOS MacPlayerScreen.handleKey：⌘ 在 Windows 取 Ctrl）
     document.addEventListener('keydown', (e) => {
       if (document.getElementById('playerView')?.hidden) return;
+      // 长按连发：跳转/音量要跟手，换集/开关只认第一次按下（同 macOS phase .down 而非 .repeat）
+      const once = !e.repeat;
+      const mod = e.ctrlKey || e.metaKey;
       switch (e.key) {
-        case ' ': case 'k': e.preventDefault(); this.togglePlay(); break;
-        case 'ArrowLeft': e.preventDefault(); this.engSeekBy(-5); break;
-        case 'ArrowRight': e.preventDefault(); this.engSeekBy(5); break;
+        case ' ': case 'k': e.preventDefault(); if (once) this.togglePlay(); break;
+        case 'ArrowLeft':
+          e.preventDefault();
+          if (mod) { if (once) this.playEpisode(this.prevEpisode()); }
+          else this.engSeekBy(-10);
+          break;
+        case 'ArrowRight':
+          e.preventDefault();
+          if (mod) { if (once) this.playEpisode(this.nextEpisode()); }
+          else this.engSeekBy(10);
+          break;
         case 'ArrowUp': e.preventDefault(); this.engSetVolume(this.engVolume() + 0.1); break;
         case 'ArrowDown': e.preventDefault(); this.engSetVolume(this.engVolume() - 0.1); break;
-        case 'm': this.toggleMute(); break;
-        case 'f': this.toggleFullscreen(); break;
+        case 'm': if (once) this.toggleMute(); break;
+        case 'f': if (once) this.toggleFullscreen(); break;
+        case '.': if (mod && once) { e.preventDefault(); this.close(); } break;
+        case 'Enter':
+          // 对话框的主按钮（同 SwiftUI .defaultAction）。焦点在框内按钮上时交给按钮自己触发
+          if (!once || !this._dialog) break;
+          if (e.target && e.target.closest && e.target.closest('#playerDialog button')) break;
+          e.preventDefault();
+          if (this._dialog.primary) this._dialog.primary();
+          break;
         case 'Escape':
-          if (document.fullscreenElement) break;
-          // 诊断面板开着时 Esc 先关面板，再关播放器
-          if (!document.getElementById('playerInfoPanel')?.hidden) { this.hideInfoPanel(); break; }
+          if (!once) break;
+          // 对话框在时 Esc 认次按钮（同 SwiftUI .cancelAction），不落到下面的 Esc 阶梯上
+          if (this._dialog) {
+            e.preventDefault();
+            if (this._dialog.secondary) this._dialog.secondary();
+            break;
+          }
+          // Esc 阶梯（同 macOS escape()）：收起面板 → 退出全屏 → 关闭播放器
+          if (this.closeAnyPanel()) { e.preventDefault(); break; }
+          if (document.fullscreenElement) { e.preventDefault(); this.toggleFullscreen(); break; }
           this.close();
           break;
       }
@@ -479,6 +686,9 @@ const Player = {
     if (panel.hidden) {
       panel.hidden = false;
       this.hideSpeedPanel();
+      // 音轨只在两条以上才有这一栏（没得选的菜单是纯噪音，同 macOS MacTracksPanel）
+      const audioTab = document.querySelector('.player-settings-tab[data-tab="audio"]');
+      if (audioTab) audioTab.hidden = this.audioTracks().length === 0;
       this.renderSettingsTab('subtitles');
       // 更新激活的标签页
       document.querySelectorAll('.player-settings-tab').forEach(t => t.classList.remove('active'));
@@ -506,6 +716,19 @@ const Player = {
   hideSpeedPanel() {
     const panel = document.getElementById('playerSpeedPanel');
     if (panel) panel.hidden = true;
+  },
+
+  // Esc 阶梯的第一级：有面板开着就收掉一个，返回是否处理过
+  closeAnyPanel() {
+    for (const [id, hide] of [
+      ['playerInfoPanel', () => this.hideInfoPanel()],
+      ['playerSettingsPanel', () => this.hideSettings()],
+      ['playerSpeedPanel', () => this.hideSpeedPanel()],
+    ]) {
+      const panel = document.getElementById(id);
+      if (panel && !panel.hidden) { hide(); return true; }
+    }
+    return false;
   },
 
   // ===== 实时速度徽标 + 播放诊断面板（右键打开）=====
@@ -721,37 +944,181 @@ const Player = {
     if (reasonEl) reasonEl.textContent = d.reason || '';
   },
 
+  // ===== 轨道清单与分组（同 macOS PlayerTracks.swift / MacPlayerPanels.swift）=====
+
+  // 语言代码 → 中文名（同 Web lib/language-labels.ts）；und/空没有名字，由调用方兜底
+  _langLabel(code) {
+    if (!code || code === 'und') return null;
+    const names = {
+      chs: '简体中文', cht: '繁体中文', chi: '中文', zho: '中文', cmn: '中文',
+      yue: '粤语', eng: '英语', jpn: '日语', kor: '韩语', fre: '法语', fra: '法语',
+      ger: '德语', deu: '德语', spa: '西班牙语', rus: '俄语', ita: '意大利语',
+      por: '葡萄牙语', tha: '泰语', hin: '印地语',
+    };
+    return names[String(code).toLowerCase()] || code;
+  },
+
+  // 轨道标签拆成主标题 + 一行小字（标签是「语言 · 编码 · 声道」）。同 macOS MacTrackText.split
+  trackTextSplit(label) {
+    const parts = String(label == null ? '' : label).split(' · ');
+    const rest = parts.slice(1).join(' · ');
+    return { title: parts[0] || label, detail: rest || null };
+  },
+
+  // 语言标记 → 分组（各种写法：zh / chi / zho / chs / cht / zh-Hans / cmn / yue……）
+  subtitleLangKind(language) {
+    const code = String(language == null ? '' : language).toLowerCase();
+    if (!code) return 'other';
+    if (code.startsWith('zh') || ['chi', 'zho', 'chs', 'cht', 'cmn', 'yue', 'chinese'].includes(code)) return 'chinese';
+    if (code.startsWith('en') || code === 'english') return 'english';
+    return 'other';
+  },
+
+  // 字幕按语言分组：中文 → 英语 → 其他语言，空组不出现。纯函数，同 macOS MacSubtitleGroups.build
+  subtitleGroups(options) {
+    const buckets = { chinese: [], english: [], other: [] };
+    for (const o of options) buckets[this.subtitleLangKind(o.language)].push(o);
+    return [
+      { id: 'zh', title: '中文', options: buckets.chinese },
+      { id: 'en', title: '英语', options: buckets.english },
+      { id: 'other', title: '其他语言', options: buckets.other },
+    ].filter((g) => g.options.length > 0);
+  },
+
+  _embeddedIndex(ref) {
+    const n = ref && String(ref).startsWith('embedded:') ? parseInt(String(ref).slice(9), 10) : null;
+    return Number.isInteger(n) ? n : null;
+  },
+
+  _refLabel(ref) {
+    if (ref && String(ref).startsWith('external:')) return String(ref).slice(9);
+    const n = this._embeddedIndex(ref);
+    return n == null ? '未知语言' : '内封轨 ' + (n + 1);
+  },
+
+  subtitleTrackLabel(plan) {
+    const title = String(plan.title == null ? '' : plan.title).trim();
+    const name = title || this._langLabel(plan.language) || this._refLabel(plan.track_ref);
+    return name + ' · ' + ({ vtt: '文本', ass: '特效', pgs: '图形' }[plan.kind] || plan.kind);
+  },
+
+  subtitleDisplayTitle(plan) {
+    const title = String(plan.title == null ? '' : plan.title).trim();
+    if (title) return title;
+    const n = this._embeddedIndex(plan.track_ref);
+    if (n != null) return '内封轨 ' + (n + 1);
+    if (String(plan.track_ref || '').startsWith('external:')) return String(plan.track_ref).slice(9);
+    return this.subtitleTrackLabel(plan);
+  },
+
+  subtitleDetail(plan) {
+    const formats = { vtt: 'WebVTT', ass: 'ASS', pgs: 'PGS 图形', text: '文本' };
+    const parts = [this._langLabel(plan.language) || '未知语言', formats[plan.kind] || plan.kind];
+    const n = this._embeddedIndex(plan.track_ref);
+    const displayTitle = this.subtitleDisplayTitle(plan);
+    if (n != null) parts.push(displayTitle === '内封轨 ' + (n + 1) ? '内封' : '内封轨 ' + (n + 1));
+    else if (String(plan.track_ref || '').startsWith('external:')) parts.push('外挂');
+    if (plan.is_ai) parts.push('AI 翻译');
+    if (plan.is_default) parts.push('默认');
+    if (plan.is_forced) parts.push('强制');
+    return parts.join(' · ');
+  },
+
+  // 决策里的字幕计划配上取流地址（与 subtitle_urls 一一对应，少一个就当那条没有地址）；
+  // 拿不到的轨置灰给原因，不给一个点了没反应的选项。同 macOS SubtitleTracks.plan。
+  // index 是 decision.subtitles 里的原位：selectSubtitle 与 <track> 都按这个下标走
+  buildSubtitleTracks() {
+    const plans = (this.sessionData && this.sessionData.decision && this.sessionData.decision.subtitles) || [];
+    const urls = this.sessionData?.subtitle_urls || [];
+    const options = [], unavailable = [];
+    plans.forEach((p, index) => {
+      const label = this.subtitleTrackLabel(p);
+      if (index >= urls.length) {
+        unavailable.push({ index, ref: p.track_ref, label, reason: '服务端没有给出这条轨的地址' });
+        return;
+      }
+      if (!['vtt', 'ass', 'pgs'].includes(p.kind)) {
+        unavailable.push({ index, ref: p.track_ref, label, reason: '暂不支持的字幕格式：' + p.kind });
+        return;
+      }
+      options.push({
+        index, ref: p.track_ref, kind: p.kind, language: p.language || null,
+        displayTitle: this.subtitleDisplayTitle(p), detail: this.subtitleDetail(p),
+      });
+    });
+    return { options, unavailable };
+  },
+
+  // 可选音轨（同 macOS AudioOption.plan）：只有一条时返回空——没得选的菜单是纯噪音
+  audioTracks() {
+    const tracks = (this.sessionData && this.sessionData.decision && this.sessionData.decision.audio_tracks) || [];
+    if (tracks.length < 2) return [];
+    const unrec = (c) => { const s = String(c == null ? '' : c).toLowerCase(); return !s || s === 'none' || s === 'unknown'; };
+    const anyRecognized = tracks.some((t) => !unrec(t.codec));
+    return tracks.map((t) => ({
+      ref: t.ref,
+      label: this.audioLabel(t),
+      is_default: !!t.is_default,
+      unavailableReason: anyRecognized && unrec(t.codec)
+        ? '音频编码无法识别（常见于菁彩声 Audio Vivid），没有可用的解码器' : null,
+    }));
+  },
+
+  audioLabel(t) {
+    const name = this._langLabel(t.language)
+      || (String(t.ref || '').startsWith('embedded:') ? '音轨 ' + String(t.ref).slice(9) : '未知音轨');
+    const rest = [];
+    if (t.codec) rest.push(String(t.codec).toUpperCase());
+    if (t.channels > 0) rest.push({ 1: '单声道', 2: '立体声', 6: '5.1', 8: '7.1' }[t.channels] || (t.channels + ' 声道'));
+    return rest.length ? [name].concat(rest).join(' · ') : name;
+  },
+
   renderSettingsTab(tabName) {
     const content = document.getElementById('playerSettingsContent');
     if (!content) return;
 
     const session = this.sessionData;
     const decision = session?.decision || {};
+    const check = '<svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>';
 
     if (tabName === 'subtitles') {
-      const subs = decision.subtitles || [];
+      // 关闭 → 中文 → 英语 → 其他语言 → 暂时放不了（同 macOS MacTracksPanel.subtitleRows）
+      const { options, unavailable } = this.buildSubtitleTracks();
       const currentOffset = this.subtitleOffset || 0;
+      const sel = this.selectedSubtitle;
       let html = `
-        <div class="player-settings-item" data-sub-index="-1" onclick="Player.selectSubtitle(-1)">
+        <div class="player-settings-item ${sel === null ? 'active' : ''}" data-sub-index="-1" onclick="Player.selectSubtitle(-1)">
           <span class="item-label">关闭字幕</span>
-          <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
+          ${check}
         </div>
       `;
-      html += subs.map((sub, i) => {
-        const label = sub.title || sub.language || `字幕 ${i + 1}`;
-        const badges = [];
-        if (sub.is_ai) badges.push('AI');
-        if (sub.is_forced) badges.push('强制');
-        if (sub.kind === 'ass') badges.push('ASS');
-        else if (sub.kind === 'pgs') badges.push('PGS');
-        return `
-          <div class="player-settings-item" data-sub-index="${i}" onclick="Player.selectSubtitle(${i})">
-            <span class="item-label">${label}</span>
-            <span class="item-info">${badges.join(' · ')}</span>
-            <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
+      for (const g of this.subtitleGroups(options)) {
+        html += `<div class="player-settings-group">${g.title}</div>`;
+        html += g.options.map((o) => `
+          <div class="player-settings-item stacked ${sel === o.index ? 'active' : ''}" data-sub-index="${o.index}" onclick="Player.selectSubtitle(${o.index})">
+            <div class="item-text">
+              <span class="item-label">${o.displayTitle}</span>
+              <span class="item-info">${o.detail}</span>
+            </div>
+            ${check}
           </div>
-        `;
-      }).join('');
+        `).join('');
+      }
+      if (unavailable.length) {
+        html += '<div class="player-settings-group">暂时放不了</div>';
+        html += unavailable.map((u) => `
+          <div class="player-settings-item stacked disabled" data-sub-index="${u.index}">
+            <div class="item-text">
+              <span class="item-label">${u.label}</span>
+              <span class="item-info">${u.reason}</span>
+            </div>
+            ${check}
+          </div>
+        `).join('');
+      }
+      if (!options.length && !unavailable.length) {
+        html += '<div style="padding:20px;text-align:center;color:rgba(255,255,255,0.4);font-size:13px">无可用字幕</div>';
+      }
       // 字幕延迟调整
       html += `
         <div class="player-settings-item" style="cursor:default">
@@ -763,21 +1130,23 @@ const Player = {
           </div>
         </div>
       `;
-      if (!subs.length) html = '<div style="padding:20px;text-align:center;color:rgba(255,255,255,0.4);font-size:13px">无可用字幕</div>' + html.substring(html.indexOf('<div class="player-settings-item" style="cursor:default">'));
       content.innerHTML = html;
     }
 
     else if (tabName === 'audio') {
-      const tracks = decision.audio_tracks || [];
-      const currentRef = decision.audio?.track_ref;
+      const tracks = this.audioTracks();
+      const currentRef = decision.audio?.track_ref ?? null;
       let html = tracks.map(t => {
-        const label = t.language || `音轨 ${t.ref}`;
-        const info = [t.codec, t.channels ? t.channels + 'ch' : ''].filter(Boolean).join(' · ');
+        const parts = this.trackTextSplit(t.label);
+        const detail = [parts.detail, t.is_default ? '默认' : null, t.unavailableReason].filter(Boolean).join(' · ');
+        const active = t.ref === currentRef || (currentRef == null && t.is_default);
         return `
-          <div class="player-settings-item ${t.ref === currentRef ? 'active' : ''}" onclick="Player.selectAudio('${t.ref}')">
-            <span class="item-label">${label}${t.is_default ? ' (默认)' : ''}</span>
-            <span class="item-info">${info}</span>
-            <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
+          <div class="player-settings-item stacked ${active ? 'active' : ''}${t.unavailableReason ? ' disabled' : ''}"${t.unavailableReason ? '' : ` onclick="Player.selectAudio('${t.ref}')"`}>
+            <div class="item-text">
+              <span class="item-label">${parts.title}</span>
+              ${detail ? `<span class="item-info">${detail}</span>` : ''}
+            </div>
+            ${check}
           </div>
         `;
       }).join('');
@@ -882,12 +1251,15 @@ const Player = {
     }
 
     // 更新选中态
+    this.selectedSubtitle = index < 0 ? null : index;
     document.querySelectorAll('#playerSettingsContent .player-settings-item').forEach(el => {
       el.classList.toggle('active', parseInt(el.dataset.subIndex) === index);
     });
   },
 
   subtitleOffset: 0, // 字幕延迟（秒）
+  // 当前字幕：null=关，数字=decision.subtitles 下标，undefined=还没定（mpv 那条链不跟选中态）
+  selectedSubtitle: undefined,
 
   adjustSubtitleOffset(delta) {
     this.subtitleOffset = Math.max(-30, Math.min(30, this.subtitleOffset + delta));
@@ -925,9 +1297,26 @@ const Player = {
   currentQuality: 0, // 0=原画, 否则 maxHeight
 
   async selectQuality(maxHeight) {
-    // mpv 会话不走这条重协商（下方是 HTML5 的加载链）：mpv IPC 补全前点了不生效
+    // mpv 会话不走下面那条 HTML5 重协商链：带着 max_height 重开起播链，由它按
+    // 「限了画质就别报 universal」重谈会话（decide.py 的 universal 分支不受 max_height
+    // 影响，报了还是原文件直出，上限整个失效）。这一开是新协商，failed_tiers 一并清掉
+    // （对齐 macOS switchQuality）
     if (window.__MOVIECLAW_MPV_ACTIVE) {
       this.hideSettings();
+      // 上限记下来：画质菜单要亮对档，下一张建议卡的 currentHeight 也按它夹
+      this.currentQuality = maxHeight;
+      const sd = this.sessionData;
+      if (sd && typeof App !== 'undefined') {
+        App.startPlayback({
+          media_item_id: sd.media_item_id,
+          title: this.currentTitle,
+          library_id: sd.library_id,
+          seasonNumber: sd.season_number,
+          episodeNumber: sd.episode_number,
+          startMs: Math.floor(this.engPos() * 1000),
+          __maxHeight: maxHeight,
+        });
+      }
       return;
     }
     this.currentQuality = maxHeight;
@@ -1073,6 +1462,59 @@ const Player = {
     });
   },
 
+  // ---- 上一集 / 下一集 ----
+  // 同 macOS PlaybackController.nextEpisode/previousEpisode：只在**本季已入库**的
+  // 集里找，缺集跳过。服务端的 PlaybackSessionView 不带 next_episode 字段（旧代码读
+  // 它，按钮永远不亮），所以这份兄弟表由详情页 loadBrowse 那一份随起播传进来
+  prevEpisode() {
+    if (this.seasonNumber == null || this.episodeNumber == null) return null;
+    return this.episodes
+      .filter((e) => e && e.owned && e.episode_number < this.episodeNumber)
+      .sort((a, b) => b.episode_number - a.episode_number)[0] || null;
+  },
+
+  nextEpisode() {
+    if (this.seasonNumber == null || this.episodeNumber == null) return null;
+    return this.episodes
+      .filter((e) => e && e.owned && e.episode_number > this.episodeNumber)
+      .sort((a, b) => a.episode_number - b.episode_number)[0] || null;
+  },
+
+  // 换集：关掉当前这一集，按同一部剧的下一单元重开。episodes 随身带走——
+  // 降档/重连回路也会重新进 startPlayback，兄弟表不能在那几条路上丢
+  playEpisode(ep) {
+    if (!ep || typeof App === 'undefined') return;
+    const mediaId = this.sessionData?.media_item_id ?? this.mediaItemId;
+    if (!mediaId) return;
+    const seriesTitle = String(this.currentTitle || '').replace(/\s+S\d+E\d+$/i, '');
+    const season = this.seasonNumber;
+    const title = season == null
+      ? ep.name || seriesTitle
+      : `${seriesTitle} S${season}E${ep.episode_number}`;
+    this.episodes = this.episodes.slice();
+    this.close();
+    App.startPlayback({
+      media_item_id: mediaId,
+      title,
+      library_id: this.sessionData?.library_id,
+      seasonNumber: season,
+      episodeNumber: ep.episode_number,
+      episodes: this.episodes,
+    });
+  },
+
+  // 剧集才出上下集按钮；到头的那一侧禁用（不隐藏，免得控制条宽度跳）
+  syncEpisodeNav() {
+    const isEpisode = this.seasonNumber != null && this.episodeNumber != null
+      && !(Number(this.seasonNumber) === 0 && Number(this.episodeNumber) === 0);
+    for (const [id, ep] of [['btnPrevEp', this.prevEpisode()], ['btnNextEp', this.nextEpisode()]]) {
+      const btn = document.getElementById(id);
+      if (!btn) continue;
+      btn.hidden = !isEpisode;
+      btn.disabled = !ep;
+    }
+  },
+
   // 打开播放器并加载流
   open(title, streamUrl, subtitles, startMs, sessionData) {
     const view = document.getElementById('playerView');
@@ -1093,11 +1535,8 @@ const Player = {
     this.episodeNumber = sessionData?.episode_number ?? null;
     this.lastProgressReport = 0;
 
-    // 显示/隐藏"下一集"按钮
-    const nextBtn = document.getElementById('btnNextEp');
-    if (nextBtn) {
-      nextBtn.style.display = sessionData?.next_episode ? '' : 'none';
-    }
+    // 上一集 / 下一集：只在剧集里出现，缺集那一侧禁用（同 macOS MacPlayerTransport）
+    this.syncEpisodeNav();
 
     // 启动进度上报定时器
     this.startProgressReporting();
@@ -1121,6 +1560,7 @@ const Player = {
     this._net = { bytes: 0, points: [], bps: null, frags: [] };
     this.hideInfoPanel();
     this.stopNetMeter(); // 原生直链没有分片钩子，徽标保持隐藏，由 hls 分支的 startNetMeter 点亮
+    this.startWatchdogs();
 
     const isHls = streamUrl.includes('.m3u8') || streamUrl.includes('/hls');
 
@@ -1204,6 +1644,8 @@ const Player = {
         this.video.appendChild(track);
       });
     }
+    // 菜单里的勾要指对：上面把第 0 条设成了 default，起播就算它在放
+    this.selectedSubtitle = (subtitles && subtitles.length) ? 0 : null;
 
     // JASSUB: 初始化 ASS 字幕渲染（如果有 ASS 类型字幕）
     this.initJassub(subtitles, sessionData);
@@ -1231,8 +1673,14 @@ const Player = {
     this.stopProgressReporting();
     this.stopSessionPing();
     clearTimeout(this._stuckTimer);
+    // 拖动跟随排到一半的那次别在关播后落地
+    if (this._scrubFollowTask) { clearTimeout(this._scrubFollowTask); this._scrubFollowTask = null; }
+    this._scrubPct = null;
     this.stopNetMeter();
+    this.stopWatchdogs();
     this.hideInfoPanel();
+    // 错误/同意对话框压在播放器上：关播放器就得一起走，否则黑屏上留个框
+    this.hidePlayerDialog();
     // 通知服务端结束会话，立即释放直通/转码槽位（否则要等 180s 空闲回收，
     // 连播几部就把 4/4 槽位占满 → 后续播放全 503）
     if (this.sessionId) {
@@ -1294,6 +1742,11 @@ const Player = {
 
   // 统一收口夹取：两个引擎都只认 [0, duration]
   engSeekTo(sec) {
+    // 用户 seek 作废掉帧/卡顿窗口（同 macOS seek 时 reset + restartGrace）。
+    // 只在用户入口清：StallWatch 的 nudge 自己也 seek，跟着清掉「最多推 2 把」就失效了
+    this._stallWatch?.reset();
+    this._frameDrops?.reset();
+    this._qualitySuggestion?.restartGrace();
     const dur = this.engDuration();
     const t = Math.max(0, dur ? Math.min(dur, sec) : sec);
     if (this.isMpv()) {
@@ -1306,6 +1759,75 @@ const Player = {
 
   engSeekBy(delta) {
     this.engSeekTo(this.engPos() + delta);
+  },
+
+  // 拖动途中画面跟着手指走的那次跳转：**不**作废掉帧/卡顿窗口（跟随不计入 seek
+  // 次数，松手那次才算，同 macOS scrubFollow），mpv 用关键帧 seek——扫动途中要的是快
+  engFollowTo(sec) {
+    const dur = this.engDuration();
+    const t = Math.max(0, dur ? Math.min(dur, sec) : sec);
+    if (this.isMpv()) {
+      if (this.mpvState) this.mpvState.time = t;
+      this.mpvCmd(['seek', t, 'absolute', 'keyframe']);
+    } else if (this.video) {
+      this.video.currentTime = t;
+    }
+  },
+
+  // 落点是不是在已缓冲里。缓冲未知按 0 算（macOS bufferedEndMs ?? 0）
+  engBufferedEndSec() {
+    if (this.isMpv()) {
+      const t = this.mpvState ? this.mpvState.time : 0;
+      return t + (this.mpvState && this.mpvState.bufferedAhead ? this.mpvState.bufferedAhead : 0);
+    }
+    const v = this.video;
+    if (!v || !v.buffered || !v.buffered.length) return 0;
+    for (let i = 0; i < v.buffered.length; i++) {
+      if (v.buffered.start(i) <= v.currentTime && v.currentTime <= v.buffered.end(i)) return v.buffered.end(i);
+    }
+    return v.buffered.end(v.buffered.length - 1);
+  },
+
+  // 原文件直出（档 0）= 每次 seek 都是一条新的 Range 请求，扫动途中跟只会一路抽
+  // （同 macOS playsOriginalFile，PlaybackController.swift:764）
+  get playsOriginalFile() {
+    return this.sessionData?.decision?.tier === 0;
+  },
+
+  // 拖动跟随的节奏（同 macOS ScrubFollow.plan，PlaybackWatchdogs.swift:134）：
+  // 后沿落地 + 连续扫动 10Hz 兜底。跳转便宜（落点在缓冲里）时途中跟手；
+  // 原文件直出拖出缓冲只在手指停住 settleMs 后跟一次；其余情况松手才跳。
+  scrubFollowPlan(nowMs, lastFollowMs, cheap, reachable, settleOnly) {
+    const settleMs = 60, maxWaitMs = 100;
+    if (!reachable) return { kind: 'skip' };
+    if (!cheap) return settleOnly ? { kind: 'deferred', ms: settleMs } : { kind: 'skip' };
+    const waited = nowMs - lastFollowMs;
+    if (waited >= maxWaitMs) return { kind: 'follow' };
+    return { kind: 'deferred', ms: Math.max(0, Math.min(settleMs, maxWaitMs - waited)) };
+  },
+
+  scrubFollow(targetSec) {
+    if (!this.engDuration()) return;
+    const plan = this.scrubFollowPlan(
+      Date.now(), this._lastScrubFollowAt,
+      // cheap：落点在当前位置前 1 秒~已缓冲尾之间（同 macOS）
+      targetSec >= this.engPos() - 1 && targetSec <= this.engBufferedEndSec(),
+      targetSec >= 0,          // reachable：文件时间轴上 originMs=0
+      this.playsOriginalFile,  // settleOnly
+    );
+    if (this._scrubFollowTask) { clearTimeout(this._scrubFollowTask); this._scrubFollowTask = null; }
+    if (plan.kind === 'skip') return;
+    if (plan.kind === 'follow') {
+      this._lastScrubFollowAt = Date.now();
+      this.engFollowTo(targetSec);
+      return;
+    }
+    // 后沿落地：中途再来一次拖动就把这次取消重排，手指停住 plan.ms 后才跟
+    this._scrubFollowTask = setTimeout(() => {
+      this._scrubFollowTask = null;
+      this._lastScrubFollowAt = Date.now();
+      this.engFollowTo(targetSec);
+    }, plan.ms);
   },
 
   engSetVolume(v) {
@@ -1334,16 +1856,22 @@ const Player = {
   startMpvPoll() {
     this.stopMpvPoll();
     this.mpvState = { time: 0, duration: 0, paused: true, volume: 1, muted: false };
+    this._mpvRectSig = null;
+    // 浮层（加载层/面板）显隐会改变挖洞范围，跟着它们重算
+    this.mpvRectTimer = setInterval(() => this.syncEmbeddedPlayerRect(), 200);
     const tick = async () => {
       if (!this.isMpv() || !this.mpvState) return;
-      const [t, d, p] = await Promise.all([
+      const [t, d, p, c] = await Promise.all([
         this.mpvCmd(['get_property', 'time-pos']),
         this.mpvCmd(['get_property', 'duration']),
         this.mpvCmd(['get_property', 'pause']),
+        // 前向缓存秒数：拖动跟随判「落点在不在缓冲里」用（engBufferedEndSec）
+        this.mpvCmd(['get_property', 'demuxer-cache-duration']),
       ]);
       if (!this.isMpv() || !this.mpvState) return;
       if (t && typeof t.data === 'number') this.mpvState.time = t.data;
       if (d && typeof d.data === 'number') this.mpvState.duration = d.data;
+      this.mpvState.bufferedAhead = (c && typeof c.data === 'number') ? c.data : 0;
       if (p && typeof p.data === 'boolean') {
         this.mpvState.paused = p.data;
         // HTML5 的 play/pause 事件在这里不会来，图标随轮询走
@@ -1353,26 +1881,388 @@ const Player = {
     };
     tick();
     this.mpvPollTimer = setInterval(tick, 500);
+    this.startWatchdogs();
   },
 
   stopMpvPoll() {
     if (this.mpvPollTimer) { clearInterval(this.mpvPollTimer); this.mpvPollTimer = null; }
+    if (this.mpvRectTimer) { clearInterval(this.mpvRectTimer); this.mpvRectTimer = null; }
+    this.stopWatchdogs();
     this.mpvState = null;
   },
 
-  // mpv 画面是主窗口的子窗口，不跟 HTML5 布局走：视频区域一变（缩放窗口/进全屏）得手动挪它
+  // ===== 播放看门狗：1 Hz 采样喂三个 tracker，判定交 App 执行 =====
+  startWatchdogs() {
+    this.stopWatchdogs();
+    this._frameDrops = createFrameDropTracker();
+    this._stallWatch = createStallWatch();
+    this._qualitySuggestion = createQualitySuggestion();
+    this._watchedSeconds = 0;
+    this._lastWatchTime = null;
+    this._lastNetBytes = null;
+    this._watchdogTick = setInterval(() => this._tickWatchdogs(), 1000);
+  },
+
+  stopWatchdogs() {
+    if (this._watchdogTick) { clearInterval(this._watchdogTick); this._watchdogTick = null; }
+    this._frameDrops = this._stallWatch = this._qualitySuggestion = null;
+    this.hideQualityOffer();
+  },
+
+  // 采一帧当前引擎的真实状态。mpv 那边要走 IPC，所以只在 1 Hz 采（UI 轮询 500ms 不掺这个）
+  async _sampleEngine() {
+    if (this.isMpv()) {
+      const props = ['time-pos', 'pause', 'eof-reached', 'seeking', 'paused-for-cache',
+        'demuxer-cache-duration', 'cache-speed', 'frame-drop-count', 'decoder-frame-drop-count', 'container-fps'];
+      const res = await Promise.all(props.map(p => this.mpvCmd(['get_property', p])));
+      if (!this.isMpv() || !this.mpvState) return null;
+      const v = {};
+      res.forEach((r, i) => { v[props[i]] = r && r.data !== undefined ? r.data : null; });
+      const time = typeof v['time-pos'] === 'number' ? v['time-pos'] : this.mpvState.time;
+      // mpv 这条链没有 <video> 的 playing 事件：time-pos 走起来过就等于出过帧
+      // （起播前是 0/null）。不置位的话下面 !this._everPlayed 恒真，「缓冲」会在
+      // 正常播放时一直成立，画质卡的「连续等待 ≥8s」被 8 秒普通播放误触发
+      if (time > 0) this._everPlayed = true;
+      return {
+        time,
+        paused: !!v.pause,
+        ended: !!v['eof-reached'],
+        seeking: !!v.seeking,
+        // mpv 的前向缓存秒数；没有 demuxer 属性时按 0 算（缓冲见底）
+        bufferedAhead: typeof v['demuxer-cache-duration'] === 'number' ? v['demuxer-cache-duration'] : 0,
+        // cache-speed = 正在填的缓存读速；缓存满时为 0，正好符合「只在等待期测速」的口径。
+        // mpv 给的是**字节**/秒，这里统一成比特/秒（formatBandwidth 与码率阈值都按 bps 算）
+        loadingBps: typeof v['cache-speed'] === 'number' ? v['cache-speed'] * 8 : 0,
+        dropped: (Number(v['frame-drop-count']) || 0) + (Number(v['decoder-frame-drop-count']) || 0),
+        fps: typeof v['container-fps'] === 'number' ? v['container-fps'] : 0,
+        // 没数据要攒 / 还没出过帧 = 正在等（对应 macOS phase == .buffering）
+        buffering: !!v['paused-for-cache'] || !this._everPlayed,
+      };
+    }
+    const v = this.video;
+    if (!v) return null;
+    let bufferedAhead = 0;
+    try {
+      for (let i = 0; i < v.buffered.length; i++) {
+        if (v.buffered.start(i) <= v.currentTime && v.currentTime <= v.buffered.end(i)) {
+          bufferedAhead = v.buffered.end(i) - v.currentTime;
+          break;
+        }
+      }
+    } catch (_) {}
+    let dropped = 0, total = 0;
+    try {
+      const q = v.getVideoPlaybackQuality && v.getVideoPlaybackQuality();
+      if (q) { dropped = q.droppedVideoFrames || 0; total = q.totalVideoFrames || 0; }
+    } catch (_) {}
+    // 等待期测速源：ProxyHlsLoader 一次性交付整片，字节只在片尾跳一次，
+    // _net.bps 那个 2 秒窗口量出来「收片瞬间虚高十几倍、其余时间恒为 0」——
+    // 两个都不像线路能力，看门狗拿它判「跟不跟得上」只会把所有样本都否掉。
+    // 改成对累计收片字节做 1 Hz 差分：等待期里每秒都在收，差分就是那一秒的真实
+    // 下行速率（同 macOS 在等待期逐秒读引擎字节计数，取最快那秒）
+    let loadingBps = 0;
+    if (this._net) {
+      const bytes = this._net.bytes || 0;
+      if (this._lastNetBytes != null && bytes >= this._lastNetBytes) {
+        loadingBps = (bytes - this._lastNetBytes) * 8; // 每秒一字节 = 8 bps
+      }
+      this._lastNetBytes = bytes;
+    }
+    return {
+      time: v.currentTime,
+      paused: !!v.paused,
+      ended: !!v.ended,
+      seeking: !!v.seeking,
+      bufferedAhead,
+      loadingBps,
+      dropped, total, fps: 0,
+      buffering: !!this._buffering,
+    };
+  },
+
+  async _tickWatchdogs() {
+    if (!this._frameDrops || !this.sessionData) return;
+    const view = document.getElementById('playerView');
+    if (view && view.hidden) return;
+    const s = await this._sampleEngine();
+    if (!s || !this._frameDrops || !this.sessionData) return;
+    // 真播起来了就清网络重开预算（同 macOS reachedPlaying()）
+    if (!s.buffering && !s.paused && !s.ended && s.time > 0 && typeof App !== 'undefined' && App.onPlaybackRecovered) {
+      App.onPlaybackRecovered();
+    }
+
+    const sd = this.sessionData;
+    const decision = sd.decision || {};
+    const tier = typeof decision.tier === 'number' ? decision.tier : null;
+    // 只在视频直通档判掉帧：转码档（3/4）再掉帧说明连转码产物都放不动，降档只会更糟
+    const isCopy = decision.video ? decision.video.action === 'copy' : tier === 0;
+    const playsOriginalFile = tier === 0;
+
+    if (isCopy && tier != null && tier < 3 && !s.paused && !s.ended && !s.seeking) {
+      if (this.isMpv()) {
+        // mpv 不给已播帧数，用累计观看时长 × 帧率估（同 macOS EngineStats）；
+        // 只认小步前进，起播定位/用户拖动的大跳不算
+        const d = this._lastWatchTime == null ? 0 : s.time - this._lastWatchTime;
+        if (d > 0 && d < 5) this._watchedSeconds += d;
+        this._lastWatchTime = s.time;
+        s.total = Math.floor(this._watchedSeconds * (s.fps || 24));
+      }
+      const ratio = this._frameDrops.sample(s.dropped, s.total);
+      if (ratio != null && ratio >= this._frameDrops.threshold) {
+        this._frameDrops.reset();
+        const pct = Math.round(ratio * 100);
+        if (typeof App !== 'undefined' && App.onPlaybackContentFailed) {
+          App.onPlaybackContentFailed(`直通播放持续掉帧（${pct}%），正在换转码重试`);
+        }
+        return;
+      }
+    }
+
+    const deadLimit = playsOriginalFile ? this._stallWatch.DIRECT_DEAD_S : this._stallWatch.SERVER_DEAD_S;
+    const verdict = this._stallWatch.sample(
+      s.time, s.bufferedAhead, s.paused, s.ended, s.seeking, s.loadingBps > 0, deadLimit,
+    );
+    if (verdict === 'nudge') {
+      // 有数据却不动：推一把踢活解码管线（起播预滚阶段 tracker 不会推）。
+      // 故意不走 engSeekTo —— 那条路会清 StallWatch，把「最多推 2 把」清成无限推
+      const t = s.time + this._stallWatch.NUDGE_STEP;
+      if (this.isMpv()) {
+        if (this.mpvState) this.mpvState.time = t;
+        this.mpvCmd(['seek', t, 'absolute']);
+        this.mpvCmd(['set_property', 'pause', false]);
+      } else if (this.video) {
+        this.video.currentTime = t;
+        this.video.play().catch(() => {});
+      }
+    } else if (verdict === 'decodeStalled') {
+      if (typeof App !== 'undefined' && App.onPlaybackContentFailed) {
+        App.onPlaybackContentFailed(this._stallWatch.reason(verdict, deadLimit));
+      }
+      return;
+    } else if (verdict === 'dead') {
+      if (typeof App !== 'undefined' && App.onPlaybackNetworkDead) {
+        App.onPlaybackNetworkDead(this._stallWatch.reason(verdict, deadLimit));
+      }
+      return;
+    }
+
+    // ---- 画质建议（与掉帧互不触发：那是解码吃不下，这是线路跟不上）----
+    if (!this._qualitySuggestion) return;
+    this._qualitySuggestion.tick(s.buffering || s.seeking, s.seeking, s.loadingBps);
+    if (this._qualityOffer || this._qualitySuggestion.offered) return;
+    const bitrate = (sd.source && sd.source.bit_rate) || 0;
+    const sourceHeight = heightOfResolution(sd.source && sd.source.resolution)
+      ?? (decision.video && decision.video.height) ?? null;
+    const currentHeight = this.currentQuality > 0
+      ? (sourceHeight != null ? Math.min(sourceHeight, this.currentQuality) : this.currentQuality)
+      : sourceHeight;
+    const offer = this._qualitySuggestion.offer(bitrate, currentHeight);
+    if (offer) this.showQualityOffer(offer);
+  },
+
+  // 画质建议卡（macOS QualitySuggestion）：一次性、20 秒没理会自动收起、换不换由用户定
+  showQualityOffer(offer) {
+    this._qualityOffer = offer;
+    const meas = formatBandwidth(offer.measuredBps) || '—';
+    const req = formatBandwidth(offer.requiredBps) || '—';
+    let card = document.getElementById('qualityOfferCard');
+    if (!card) {
+      card = document.createElement('div');
+      card.id = 'qualityOfferCard';
+      card.className = 'quality-offer-card';
+      document.getElementById('playerView')?.appendChild(card);
+    }
+    card.innerHTML = `
+      <div class="quality-offer-title">网速跟不上当前画质</div>
+      <div class="quality-offer-body">实测约 ${meas}，这一版需要约 ${req}。可以暂停攒一会缓冲再看，或改用 ${offer.maxHeight}p（服务端转码，画质会降低）。</div>
+      <div class="quality-offer-actions">
+        <button class="btn-secondary" id="btnKeepQuality">继续当前画质</button>
+        <button class="btn-play" id="btnAcceptQuality">改用 ${offer.maxHeight}p</button>
+      </div>
+    `;
+    document.getElementById('btnAcceptQuality')?.addEventListener('click', () => this.acceptQualityOffer());
+    document.getElementById('btnKeepQuality')?.addEventListener('click', () => this.hideQualityOffer());
+    clearTimeout(this._qualityOfferTimer);
+    this._qualityOfferTimer = setTimeout(() => this.hideQualityOffer(), 20000);
+  },
+
+  acceptQualityOffer() {
+    const offer = this._qualityOffer;
+    if (!offer) return;
+    this.hideQualityOffer();
+    this.selectQuality(offer.maxHeight);
+  },
+
+  hideQualityOffer() {
+    clearTimeout(this._qualityOfferTimer);
+    this._qualityOfferTimer = null;
+    this._qualityOffer = null;
+    document.getElementById('qualityOfferCard')?.remove();
+  },
+
+  // ===== 对话框（同 macOS MacPlayerDialog / MacConsentDialog）=====
+  // 会话决策的两个终态：要用户同意才能软件转码、或彻底放不了。模态压在播放器上，
+  // 键盘 ⏎ 认主按钮、Esc 认次按钮（同 SwiftUI .defaultAction / .cancelAction）
+  hidePlayerDialog() {
+    this._dialog = null;
+    document.getElementById('playerDialog')?.remove();
+  },
+
+  _dialogButton(label, prominent, onClick) {
+    const b = document.createElement('button');
+    b.className = prominent ? 'btn-play' : 'btn-secondary';
+    b.textContent = label;
+    b.addEventListener('click', onClick);
+    return b;
+  },
+
+  // 错误对话框：标题 + 一行建议 +「重试 / 关闭」（macOS MacPlayerDialog 的 .error 用法）
+  showPlayerDialog({ title, message, primary, secondary }) {
+    this.hidePlayerDialog();
+    const card = document.createElement('div');
+    card.className = 'player-dialog';
+    // SF Symbol 的感叹号三角，Windows 用同形状的内联 SVG（界面不用 emoji）
+    card.innerHTML = `
+      <svg class="player-dialog-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M12 2.5 1.2 21.5h21.6L12 2.5zm0 6.2a.9.9 0 0 1 .9.9v5a.9.9 0 1 1-1.8 0v-5a.9.9 0 0 1 .9-.9zm0 9.1a1.15 1.15 0 1 1 0 2.3 1.15 1.15 0 0 1 0-2.3z"/>
+      </svg>
+    `;
+    const t = document.createElement('div');
+    t.className = 'player-dialog-title';
+    t.textContent = title;
+    card.appendChild(t);
+    if (message) {
+      const m = document.createElement('div');
+      m.className = 'player-dialog-message';
+      m.textContent = message;
+      card.appendChild(m);
+    }
+    const actions = document.createElement('div');
+    actions.className = 'player-dialog-actions';
+    // 主次顺序同 macOS：次按钮在左、主按钮在右
+    if (secondary) actions.appendChild(this._dialogButton(secondary[0], false, secondary[1]));
+    actions.appendChild(this._dialogButton(primary[0], true, primary[1]));
+    card.appendChild(actions);
+    this._mountDialog(card, primary[1], secondary ? secondary[1] : null);
+  },
+
+  // 软件转码同意：说清原因与代价，能自开的给「开启并播放」（macOS MacConsentDialog）
+  showConsentDialog(decision) {
+    this.hidePlayerDialog();
+    const card = document.createElement('div');
+    card.className = 'player-dialog consent';
+    const t = document.createElement('div');
+    t.className = 'player-dialog-title';
+    t.textContent = '这部片需要软件转码才能播放';
+    card.appendChild(t);
+
+    const field = (label, text) => {
+      const wrap = document.createElement('div');
+      const l = document.createElement('div');
+      l.className = 'player-dialog-field-label';
+      l.textContent = label;
+      const v = document.createElement('div');
+      v.className = 'player-dialog-field-value';
+      v.textContent = text;
+      wrap.append(l, v);
+      return wrap;
+    };
+    card.appendChild(field('原因', decision.reason || ''));
+    if (decision.cost_hint) card.appendChild(field('代价', decision.cost_hint));
+
+    // 开关存不下去时把原因留在框里（macOS 的 error 状态）
+    const errEl = document.createElement('div');
+    errEl.className = 'player-dialog-error';
+    errEl.hidden = true;
+    card.appendChild(errEl);
+
+    if (decision.can_self_enable !== true) {
+      const hint = document.createElement('div');
+      hint.className = 'player-dialog-hint';
+      hint.textContent = '当前未开启软件转码。请联系管理员开启（管理员播放此类影片时会收到开启询问）。';
+      card.appendChild(hint);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'player-dialog-actions';
+    if (decision.can_self_enable !== true) {
+      // 非超管改不了开关：只有「知道了」，等于退出
+      actions.appendChild(this._dialogButton('知道了', true, () => this.close()));
+      card.appendChild(actions);
+      this._mountDialog(card, () => this.close(), null);
+      return;
+    }
+    let saving = false;
+    const grant = async () => {
+      if (saving) return;
+      saving = true;
+      errEl.hidden = true;
+      primaryBtn.disabled = true;
+      primaryBtn.textContent = '正在开启…';
+      try {
+        await App.grantConsent();
+        // 成功会重新起播，起播链里的 Player.close() 自己把对话框收掉
+      } catch (e) {
+        errEl.textContent = (e && e.message) || String(e);
+        errEl.hidden = false;
+        saving = false;
+        primaryBtn.disabled = false;
+        primaryBtn.textContent = '开启并播放';
+      }
+    };
+    actions.appendChild(this._dialogButton('取消', false, () => this.close()));
+    const primaryBtn = this._dialogButton('开启并播放', true, grant);
+    actions.appendChild(primaryBtn);
+    card.appendChild(actions);
+    this._mountDialog(card, grant, () => this.close());
+  },
+
+  _mountDialog(card, primary, secondary) {
+    const scrim = document.createElement('div');
+    scrim.id = 'playerDialog';
+    scrim.className = 'player-dialog-scrim';
+    scrim.appendChild(card);
+    document.getElementById('playerView')?.appendChild(scrim);
+    // 键盘 ⏘/Esc 要找得到按钮对应的动作
+    this._dialog = { primary, secondary };
+  },
+
+  // mpv 画面是主窗口的子窗口，不跟 HTML5 布局走：视频区域一变（缩放窗口/进全屏）得手动挪它。
+  // 同时网页层要在这块区域上挖洞透出画面——但顶栏/进度条/浮层压在视频上，
+  // 洞必须把它们刨出去，否则 SetWindowRgn 会把控件一起剪没
   syncEmbeddedPlayerRect() {
     if (!this.isMpv() || !window.__TAURI__?.core?.invoke) return;
     const wrap = document.querySelector('.player-video-wrap');
-    if (!wrap) return;
-    const rect = wrap.getBoundingClientRect();
+    const topbar = document.getElementById('playerTopbar');
+    const controls = document.getElementById('playerControls');
+    if (!wrap || !topbar || !controls) return;
+    const wr = wrap.getBoundingClientRect();
+    const tr = topbar.getBoundingClientRect();
+    const cr = controls.getBoundingClientRect();
+    // 控件条自动隐藏走 opacity，矩形一直在，视频带因此是稳的，不会跟着控件进出跳动
+    const top = Math.max(wr.top, tr.bottom);
+    const bottom = Math.min(wr.bottom, cr.top);
     const scale = window.devicePixelRatio || 1;
-    window.__TAURI__.core.invoke('resize_embedded_player', {
-      x: Math.round(rect.left * scale),
-      y: Math.round(rect.top * scale),
-      width: Math.round(rect.width * scale),
-      height: Math.round(rect.height * scale),
-    }).catch(() => {});
+    const box = (r) => [r.left, r.top, r.width, r.height].map((v) => Math.round(v * scale));
+    // 带内可见的浮层（加载层/面板）留在网页层里画，挖洞时刨掉它们。
+    // 中央按钮故意不刨：它是 border-radius:50% 的圆，刨出的矩形会在四角露出
+    // .player-view 的纯黑底，比少一个按钮更难看。播放/暂停由底栏负责
+    const keepRects = ['playerLoading', 'playerInfoPanel', 'playerSettingsPanel', 'playerSpeedPanel']
+      .map((id) => document.getElementById(id))
+      .filter((el) => el && !el.hidden)
+      .map((el) => box(el.getBoundingClientRect()));
+    const args = {
+      x: Math.round(wr.left * scale),
+      y: Math.round(top * scale),
+      width: Math.round(wr.width * scale),
+      height: Math.round((bottom - top) * scale),
+      keepRects,
+    };
+    // 浮层显隐没有统一入口，靠轮询兜着；签名没变就不重设区域，免得每 200ms 触发一次重绘
+    const sig = JSON.stringify(args);
+    if (sig === this._mpvRectSig) return;
+    this._mpvRectSig = sig;
+    window.__TAURI__.core.invoke('resize_embedded_player', args).catch(() => {});
     window.__TAURI__.core.invoke('set_embedded_player_visible', { visible: true }).catch(() => {});
   },
 
@@ -1458,20 +2348,38 @@ const Player = {
     }
   },
 
+  // 进度条上的已播条与滑块：拖动中跟手指（_scrubPct），否则跟播放头
+  renderScrub() {
+    const dur = this.engDuration();
+    const frac = this._scrubPct != null
+      ? this._scrubPct
+      : (dur ? this.engPos() / dur : 0);
+    const pct = Math.max(0, Math.min(1, frac)) * 100;
+    const fill = document.getElementById('playerSeekFill');
+    const thumb = document.getElementById('playerSeekThumb');
+    if (fill) fill.style.width = pct + '%';
+    if (thumb) thumb.style.left = pct + '%';
+  },
+
   updateProgress() {
     if (this.isSeeking) return;
     if (!this.isMpv() && !this.video) return;
     const cur = this.engPos();
     const dur = this.engDuration();
-    const pct = dur ? (cur / dur) * 100 : 0;
 
-    const fill = document.getElementById('playerSeekFill');
-    const thumb = document.getElementById('playerSeekThumb');
-    if (fill) fill.style.width = pct + '%';
-    if (thumb) thumb.style.left = pct + '%';
+    this.renderScrub();
 
+    // 下行两端：左「已播」，右「剩余」或「总长」（点它切换，同 QuickTime）。
+    // 片长还没起（起播中）时右侧显示占位，不显示「-0:00」（同 macOS）
     const timeEl = document.getElementById('playerTime');
-    if (timeEl) timeEl.textContent = this.formatTime(cur) + ' / ' + this.formatTime(dur);
+    if (timeEl) timeEl.textContent = this.formatTime(cur);
+    const remEl = document.getElementById('playerRemaining');
+    if (remEl) {
+      remEl.textContent = dur > 0
+        ? (this.showsTotal ? this.formatTime(dur) : '-' + this.formatTime(Math.max(0, dur - cur)))
+        : '--:--';
+      remEl.title = this.showsTotal ? '显示剩余时间' : '显示总时长';
+    }
   },
 
   updateBuffer() {

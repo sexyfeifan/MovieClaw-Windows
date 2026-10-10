@@ -152,6 +152,16 @@ const API = {
     return this.request('/playback/sessions', { method: 'POST', body });
   },
 
+  // 预连：详情页一出现就把到服务器的连接建好，点播放时会话 POST 不必再付一次冷握手。
+  // 对齐 macOS PlaybackPreconnect.warm（20 秒内合并，别每次进详情都打一发）。
+  // GET 不是 HEAD：服务端 /api/v1/health 只注册了 GET，FastAPI 不会自动补 HEAD
+  preconnectPlayback() {
+    const now = Date.now();
+    if (this._preconnectAt && now - this._preconnectAt < 20000) return;
+    this._preconnectAt = now;
+    this.request('/health').catch(() => {});
+  },
+
   // 进度上报
   // POST /playback/progress body: { media_item_id, event, position_ms, duration_ms, season_number?, episode_number? }
   // event: "start" | "progress" | "stop"
@@ -185,6 +195,13 @@ const API = {
   // 原先 POST .../stop 恒 405，会话只能等 180s 空闲回收，直通槽位被占满后 503
   sessionStop(sessionId) {
     return this.request(`/playback/sessions/${sessionId}`, { method: 'DELETE' });
+  },
+
+  // 播放策略增量保存（PUT /playback/policy，playback.py save_playback_policy）。
+  // 同意弹窗只翻 software_transcode_enabled 一个开关，未带的字段保持原值。
+  // 只有超管能存（require_admin）——同 macOS playbackPolicySet
+  playbackPolicySet(body) {
+    return this.request('/playback/policy', { method: 'PUT', body });
   },
 
   // 继续观看列表

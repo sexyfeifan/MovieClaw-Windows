@@ -700,7 +700,7 @@ const App = {
           </button>
           <div class="person-header">
             ${person.avatar_url || person.profile_url ? `
-              <img class="person-avatar" src="${resolveUrl(person.avatar_url || person.profile_url)}" alt="" style="opacity:0;transition:opacity 0.3s" onload="this.style.opacity='1'" onerror="this.style.display='none'">
+              <img class="person-avatar" src="${resolveUrl(person.avatar_url || person.profile_url)}" alt="" data-raw="${person.avatar_url || person.profile_url}" style="opacity:0;transition:opacity 0.3s" onload="this.style.opacity='1'" onerror="imgFallback(this, this.dataset.raw)">
             ` : '<div class="person-avatar person-avatar-placeholder"></div>'}
             <div class="person-info">
               <h1 class="person-name">${person.name || ''}</h1>
@@ -735,6 +735,8 @@ const App = {
   // 下面 = 分集横排 → 系列 → 演职员 → 合集 → 信息。头图讲的那一集与下面浏览的
   // 那一季是两套状态：换季只换分集横排。
   async renderDetail(container, params) {
+    // 详情页一出现就预连（对齐 macOS PlaybackPreconnect.warm）：进了详情紧接着多半就是点播放
+    API.preconnectPlayback();
     container.innerHTML = '<div class="page-loading"><div class="spinner"></div></div>';
     try {
       const resp = await API.getItemDetail(params.libraryId, params.itemId);
@@ -917,8 +919,9 @@ const App = {
       const playUnit = (startMs, season, ep) => {
         if (isMovie) {
           // library_id 必传：startPlayback 自动选集用它查详情判断 kind；
-          // files 也带上：能力申报分级要用它判片源吃不吃得下，省一次详情请求
-          this.startPlayback({ media_item_id: mediaId, title: info.title, library_id: params.libraryId, startMs, files: info.files });
+          // files/kind 也带上：能力申报分级要用 files 判片源吃不吃得下，
+          // kind 让起播链不必再为「是不是剧集」查一遍详情
+          this.startPlayback({ media_item_id: mediaId, title: info.title, library_id: params.libraryId, startMs, files: info.files, kind: info.kind });
           return;
         }
         const useSeason = season ?? st.season;
@@ -940,6 +943,9 @@ const App = {
           episodeNumber: useEp.episode_number,
           startMs,
           files: info.files,
+          // 同季剧集表：播放器的上一集/下一集与自动下一集都按它算（服务端会话不带
+          // next_episode，PlaybackSessionView 里压根没这个字段）
+          episodes: st.browseEpisodes,
         });
       };
 
@@ -1269,7 +1275,7 @@ const App = {
     return `
       <div class="person-card" ${p.personId ? `data-person-id="${p.personId}"` : ''}>
         ${p.avatar
-          ? `<img class="person-card-avatar" src="${resolveUrl(p.avatar)}" alt="" data-raw="${p.avatar}" onerror="this.style.visibility='hidden'">`
+          ? `<img class="person-card-avatar" src="${resolveUrl(p.avatar)}" alt="" data-raw="${p.avatar}" onerror="imgFallback(this, this.dataset.raw)">`
           : '<div class="person-card-avatar person-card-avatar-placeholder"></div>'}
         <div class="person-card-name">${p.name}</div>
         <div class="person-card-role">${p.role || ''}</div>
@@ -1736,13 +1742,19 @@ const App = {
 
   // ===== 播放（内置 HTML5 播放器） =====
   async startPlayback(item, isRetry) {
+    // 错误对话框的「重试」要重跑这一份（同 macOS retry() 重新 request）
+    this._retryItem = item;
+    this._retryStartMs = null;
     // 连点/返回竞态：新请求立即作废旧请求（清掉上一部的播放器状态），
     // 后续每个 await 之后用 alive() 检查，旧请求回来不再碰界面
     Player.close();
+    // 上一集/下一集的兄弟表：新一轮带了就换上；降档/重连那几条回路没带，沿用上一份
+    if (Array.isArray(item.episodes)) Player.episodes = item.episodes;
     if (!isRetry) {
       // 全新播放：清掉上一轮的降档记录（web-player.md §6.3 的 failed_tiers 回路）
       this._failedTiers = [];
       this._contentFailures = 0;
+      this._netRestarts = 0;
     }
     const seq = (this._playbackSeq = (this._playbackSeq || 0) + 1);
     const alive = () => this._playbackSeq === seq;
@@ -1764,11 +1776,16 @@ const App = {
       const mediaId = Number(item.media_item_id);
       if (!mediaId || isNaN(mediaId)) throw new Error('无效的媒体项 ID: ' + item.media_item_id);
 
-      // TV 剧集需要季/集号 — 若未指定则自动选择
+      // TV 剧集需要季/集号 — 若未指定则自动选择。
+      // 详情页起播已把 kind 带在 item 上（和 files 同理）：已知就不用为判「是不是剧集」
+      // 再查一遍详情——电影起播链上少一次串行往返
       if (item.seasonNumber == null || item.episodeNumber == null) {
         try {
-          const detailResp = await API.getItemDetail(item.library_id || this.libraries[0]?.id, mediaId);
-          const detail = detailResp?.data || detailResp;
+          let detail = item.kind != null ? { kind: item.kind } : null;
+          if (!detail) {
+            const detailResp = await API.getItemDetail(item.library_id || this.libraries[0]?.id, mediaId);
+            detail = detailResp?.data || detailResp;
+          }
           if (detail?.kind === 'tv') {
             // 优先用续播信息
             try {
@@ -1803,9 +1820,15 @@ const App = {
       // mpv 在场且这单片源 HTML5 啃不动 → 报 universal 换 tier-0 原文件直出，交给 mpv；
       // 否则报浏览器真值，服务端据此直通/换壳/转码。报了 universal 就必须真让 mpv 播：
       // 档 0 给的是裸文件地址，HTML5 啃不动 mkv/ISO
+      //
+      // 例外：用户限了画质上限就绝不能报 universal——decide.py 的 universal 分支
+      // 故意不受 max_height 影响（全解码客户端自己拉流），报了还是原文件直出、上限
+      // 整个失效。按浏览器真值申报让服务端按上限转码，交 HTML5 放（对齐 macOS
+      // negotiationInputs「限了画质时按系统播放器的能力申报，让服务端按上限转码」）
+      const qualityCapped = item.__maxHeight > 0;
       const mpvReady = await this.hasEmbeddedPlayer();
       let wantsMpv = false;
-      if (mpvReady && !item.__forceHtml5) {
+      if (mpvReady && !item.__forceHtml5 && !qualityCapped) {
         // 详情页起播已把 files 带在 item 上（省一次详情请求）；别的入口没有就现查
         let files = item.files;
         if (!files) {
@@ -1833,18 +1856,14 @@ const App = {
       if (this._failedTiers && this._failedTiers.length) body.failed_tiers = this._failedTiers;
 
       // 续播位置：详情页「从头播放」带 startMs=0 必须显式传——缺省时
-      // 服务端会自己按观看记录续播（playback.py resolved_start_ms）
+      // 服务端会自己按观看记录续播（playback.py resolved_start_ms）。
+      // 不传就别再抢着问一次 /resume：服务端开会话时本来就把续播点并进
+      // start_ms 一起带回，前端先问一遍等于起播链上白加一次串行往返
       if (item.startMs != null) {
         body.start_ms = item.startMs;
-      } else {
-        try {
-          const resumeResp = await API.getResume(mediaId, item.seasonNumber, item.episodeNumber);
-          const resume = resumeResp?.data || resumeResp;
-          if (resume?.position_ms > 0) {
-            body.start_ms = resume.position_ms;
-          }
-        } catch (_) { /* 无续播位置 */ }
       }
+      // 画质上限（decide.py 的 max_height 参数）：只有不报 universal 时它才生效
+      if (qualityCapped) body.max_height = item.__maxHeight;
       if (!alive()) return;
 
       // 服务端个别文件的决策/转码准备可能极慢：45 秒无响应给出明确错误，
@@ -1864,8 +1883,21 @@ const App = {
       if (!alive()) return;
       const session = sessionResp?.data || sessionResp;
 
-      if (session?.decision && session.decision.outcome !== 'plan') {
-        throw new Error('播放不可用: ' + (session.decision.reason || session.decision.outcome));
+      // 决策三态（同 macOS PlaybackController.handleSession）：
+      // consent = 要用户同意开软件转码；rejected = 彻底放不了。两者都换对话框，
+      // 不再像别的错误那样 5 秒后自己消失——用户还没表态
+      const outcome = session?.decision ? session.decision.outcome : null;
+      if (outcome === 'consent') {
+        if (loading) loading.hidden = true;
+        Player.showConsentDialog(session.decision);
+        return;
+      }
+      if (outcome === 'rejected') {
+        this._showPlaybackError(session.decision.reason || '播放不可用', session.decision.suggestion);
+        return;
+      }
+      if (outcome && outcome !== 'plan') {
+        throw new Error('播放不可用: ' + (session.decision.reason || outcome));
       }
       if (!session?.stream_url) throw new Error('服务器未返回播放地址');
 
@@ -1892,12 +1924,19 @@ const App = {
       // __forceHtml5 是上一轮 mpv 没起来的重谈：这回一律 HTML5，别再试一遍 mpv
       const source = session.source || {};
       const decision = session.decision || {};
-      const needsNative = !item.__forceHtml5
+      const needsNative = !item.__forceHtml5 && !qualityCapped
         && (wantsMpv || (mpvReady && this.needsNativePlayer(source, decision.audio_tracks || [])));
 
       if (needsNative && window.__TAURI__) {
         loading.hidden = true;
-        await this.openEmbeddedPlayer(item, streamUrl, subtitleUrls, startMs, session);
+        // 档 0 直出的是裸文件，mpv 自己就 demux 得出 MKV 内封字幕轨。再把
+        // embedded:N 当 --sub-file 传进去：轨重复一遍，还让服务端现场从几十 GB
+        // 的 MKV 里逐条抽字幕——同一部片 10 条字幕首播实测 30 秒没出首帧。
+        // 只留外挂字幕（容器里没有，必须旁挂）。HLS 档的流里没有内封轨，全留
+        const nativeSubs = decision.tier === 0
+          ? subtitleUrls.filter((s) => !decodeURIComponent(s).includes('track=embedded:'))
+          : subtitleUrls;
+        await this.openEmbeddedPlayer(item, streamUrl, nativeSubs, startMs, session);
       } else {
         // 打开内置 HTML5 播放器
         loading.hidden = true;
@@ -1907,12 +1946,8 @@ const App = {
     } catch (e) {
       if (!alive()) return; // 已被新的播放请求取代，别覆盖新界面
       console.error('Playback error:', e);
-      if (loadingText) loadingText.textContent = '播放失败: ' + (e.message || e);
-      setTimeout(() => {
-        if (!alive()) return;
-        playerView.hidden = true;
-        loading.hidden = true;
-      }, 5000);
+      // 错误对话框（重试/关闭）代替「5 秒后自己消失」的加载文案：用户还没表态
+      this._showPlaybackError((e && e.message) || String(e));
     }
   },
 
@@ -1952,32 +1987,105 @@ const App = {
     this._failedTiers = [...failed].sort((a, b) => a - b);
     const loadingText = document.getElementById('playerLoadingText');
     if (loadingText) loadingText.textContent = '正在切换播放方式...';
+    // 降档是「换一档接着看」，不是「从头再来」：把当前位置带上（startPlayback 会先
+    // Player.close()，位置必须在这之前读）
+    const resumeMs = Math.floor(Player.engPos() * 1000);
     this.startPlayback({
       media_item_id: sd.media_item_id,
       title: Player.currentTitle,
       library_id: sd.library_id,
       seasonNumber: sd.season_number,
       episodeNumber: sd.episode_number,
+      startMs: resumeMs > 0 ? resumeMs : null,
     }, true);
   },
 
-  // 终态错误展示：清掉播放器与服务端会话，但保持错误文字可见
-  _showPlaybackError(reason) {
+  // 缓冲见底且连续 N 秒一个字节都没收到（StallWatch 的 .dead）→ 同档原地重开。
+  // 预算连续 2 次（NetworkRestartBudget）：归因可能出错，防「网络」误判导致无限重开
+  onPlaybackNetworkDead(reason) {
+    const view = document.getElementById('playerView');
+    if (view && view.hidden) return;
+    const sd = Player.sessionData;
+    this._netRestarts = (this._netRestarts || 0) + 1;
+    const loadingText = document.getElementById('playerLoadingText');
+    if (this._netRestarts > 2) {
+      // 预算用尽：原文件直出没得可降，落错误页；服务端流还能走降档回路
+      const tier = sd && sd.decision ? sd.decision.tier : null;
+      if (tier === 0) this._showPlaybackError(reason + '（已多次重连失败）');
+      else this.onPlaybackContentFailed(reason);
+      return;
+    }
+    if (loadingText) loadingText.textContent = '连接中断，正在重连...';
+    const resumeMs = Math.floor(Player.engPos() * 1000);
+    this.startPlayback({
+      media_item_id: sd && sd.media_item_id,
+      title: Player.currentTitle,
+      library_id: sd && sd.library_id,
+      seasonNumber: sd && sd.season_number,
+      episodeNumber: sd && sd.episode_number,
+      startMs: resumeMs > 0 ? resumeMs : null,
+    }, true);
+  },
+
+  // 真播起来过就清网络重开预算（同 macOS reachedPlaying()）
+  onPlaybackRecovered() {
+    this._netRestarts = 0;
+  },
+
+  // 终态错误：清掉播放器与服务端会话，换成「重试 / 关闭」对话框
+  // （同 macOS fail() → phase .error → MacPlayerDialog(title:message:重试:关闭)）
+  _showPlaybackError(reason, suggestion) {
+    // 位置要在 close() 之前读：close 会把 <video> 的 src 摘掉
+    const resumeMs = Math.floor(Player.engPos() * 1000);
+    this._retryStartMs = resumeMs > 0 ? resumeMs : null;
     Player.close();
     const view = document.getElementById('playerView');
     const loading = document.getElementById('playerLoading');
-    const loadingText = document.getElementById('playerLoadingText');
     if (view) view.hidden = false;
-    if (loading) loading.hidden = false;
-    if (loadingText) loadingText.textContent = '播放失败: ' + reason;
+    if (loading) loading.hidden = true;
+    Player.showPlayerDialog({
+      title: reason,
+      message: suggestion || null,
+      primary: ['重试', () => this.retryPlayback()],
+      secondary: ['关闭', () => Player.close()],
+    });
+  },
+
+  // 对话框「重试」：上一次播放以失败收尾，这是一次新的（同 macOS retry()）。
+  // 起播链里的 Player.close() 会顺手把对话框收掉
+  retryPlayback() {
+    const item = this._retryItem;
+    if (!item) { Player.close(); return; }
+    const next = Object.assign({}, item);
+    if (this._retryStartMs) next.startMs = this._retryStartMs;
+    this.startPlayback(next);
+  },
+
+  // 同意弹窗「开启并播放」：写入全局开关后重新决策（同 macOS grantConsent）。
+  // 失败不关框——原因就显示在框里，用户还能再点一次
+  async grantConsent() {
+    const saved = await API.playbackPolicySet({ software_transcode_enabled: true });
+    const view = (saved && saved.data !== undefined) ? saved.data : saved;
+    // 保存接口回显的是落库后的取值：不是 true 说明开关根本没生效，不能假装成功
+    if (!view || view.software_transcode_enabled !== true) {
+      throw new Error('软件转码开关保存后未生效，请重试或查看服务端日志');
+    }
+    this.retryPlayback();
   },
 
   // 播放结束 → 自动下一集
-  onPlaybackEnded(sessionData) {
+  // 下一集按同季剧集表算（服务端会话没有 next_episode 字段，旧代码读它这一段从没跑过）。
+  // 把剧集表条目补成 showAutoNextCard 认的形状，卡片本身不动
+  onPlaybackEnded() {
     if (localStorage.getItem('mc_autoNext') === '0') return;
-    if (!sessionData?.next_episode) return;
-    const next = sessionData.next_episode;
-    this.showAutoNextCard(next);
+    const next = Player.nextEpisode();
+    if (!next) return;
+    this.showAutoNextCard({
+      media_item_id: Player.sessionData?.media_item_id ?? Player.mediaItemId,
+      title: next.name || `第 ${next.episode_number} 集`,
+      season_number: Player.seasonNumber,
+      episode_number: next.episode_number,
+    });
   },
 
   // 这单片源 HTML5 是否啃不动（DV/全景声/TrueHD/MKV/冷门编码）→ 要原生引擎。
@@ -2069,6 +2177,19 @@ const App = {
 
       // 会话切到 mpv：画质重协商是 HTML5 那条链，selectQuality 据此不接
       window.__MOVIECLAW_MPV_ACTIVE = true;
+
+      // mpv 这条链以前不落 sessionData：诊断面板读不到档位/码率，看门狗更是
+      // 连「现在是哪一档」都不知道（onPlaybackContentFailed 会直接当成没会话报错）
+      Player.sessionData = session;
+      Player.sessionId = session.session_id || session.id || null;
+      Player.mediaItemId = session.media_item_id || item.media_item_id || null;
+      Player.currentTitle = item.title || 'MovieClaw';
+      // 选中态是 HTML5 那条链跟的，mpv 自己挑默认轨；留着上一次的值会把勾打错行
+      Player.selectedSubtitle = undefined;
+      // 上下集按钮只在剧集里亮；mpv 这条链不走 Player.open，季集号与兄弟表同步要在这做
+      Player.seasonNumber = session.season_number ?? item.seasonNumber ?? null;
+      Player.episodeNumber = session.episode_number ?? item.episodeNumber ?? null;
+      Player.syncEpisodeNav();
 
       // mpv 没有 media element 也没有事件：进度/时长/暂停态靠轮询喂给 UI
       Player.startMpvPoll();

@@ -19,8 +19,25 @@ mod win32 {
     pub const WS_VISIBLE: u32 = 0x10000000;
     pub const WS_CLIPSIBLINGS: u32 = 0x04000000;
     pub const WS_CLIPCHILDREN: u32 = 0x02000000;
-    pub const SWP_NOZORDER: u32 = 0x0004;
     pub const SWP_SHOWWINDOW: u32 = 0x0040;
+    /// SetWindowPos 的 hWndInsertAfter：压到兄弟 z-order 最底，保证 WebView2 永远浮在视频子窗口之上
+    pub const HWND_BOTTOM: isize = 1;
+    /// CombineRgn 的 fnMode：dst = src1 \ src2
+    pub const RGN_DIFF: i32 = 3;
+
+    #[repr(C)]
+    pub struct POINT {
+        pub x: i32,
+        pub y: i32,
+    }
+
+    #[repr(C)]
+    pub struct RECT {
+        pub left: i32,
+        pub top: i32,
+        pub right: i32,
+        pub bottom: i32,
+    }
 
     #[repr(C)]
     pub struct WNDCLASSW {
@@ -65,6 +82,23 @@ mod win32 {
         pub fn DestroyWindow(hWnd: HWND) -> i32;
         pub fn DefWindowProcW(hWnd: HWND, Msg: u32, wParam: usize, lParam: isize) -> isize;
         pub fn RegisterClassW(lpWndClass: *const WNDCLASSW) -> u16;
+        pub fn FindWindowExW(
+            hWndParent: HWND,
+            hWndChildAfter: HWND,
+            lpszClass: LPCWSTR,
+            lpszWindow: LPCWSTR,
+        ) -> HWND;
+        pub fn GetWindowRect(hWnd: HWND, lpRect: *mut RECT) -> i32;
+        pub fn ClientToScreen(hWnd: HWND, lpPoint: *mut POINT) -> i32;
+        /// 区域所有权交给系统：成功后由系统负责释放 hRgn，调用方不得再 DeleteObject
+        pub fn SetWindowRgn(hWnd: HWND, hRgn: isize, bRedraw: i32) -> i32;
+    }
+
+    #[link(name = "gdi32")]
+    extern "system" {
+        pub fn CreateRectRgn(x1: i32, y1: i32, x2: i32, y2: i32) -> isize;
+        pub fn CombineRgn(hrgnDst: isize, hrgnSrc1: isize, hrgnSrc2: isize, fnMode: i32) -> i32;
+        pub fn DeleteObject(hObject: isize) -> i32;
     }
 
     #[link(name = "kernel32")]
@@ -76,6 +110,8 @@ mod win32 {
 use win32::*;
 
 static CHILD_HWND: AtomicIsize = AtomicIsize::new(0);
+/// Tauri 主窗口 HWND（launch 时写入，stop 时清空）：挖洞/填洞都要回到它身上找 WebView2
+static PARENT_HWND: AtomicIsize = AtomicIsize::new(0);
 static MPV_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 static MPV_PIPE_ID: AtomicU32 = AtomicU32::new(0);
 /// 当前 mpv 实例的 IPC 管道名（launch 时写入，stop 时清空）
@@ -83,6 +119,81 @@ static MPV_PIPE: Mutex<Option<String>> = Mutex::new(None);
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// 在 WebView2 上挖洞，让底下 mpv 子窗口的画面透出来。
+///
+/// 普通父子/兄弟窗口之间**不做逐像素 alpha 混合**：就算把 webview 背景色设成 alpha=0，
+/// 它照样整块遮住下面的视频（有声音没画面的根因）。WS_EX_LAYERED 也不行——
+/// 挂上会把整条 Chromium 渲染链打成全黑。实测唯一可行的是 SetWindowRgn 裁剪。
+///
+/// 副作用是洞里的网页层内容一起被剪掉，所以洞只能开在「纯视频带」上：
+/// 带内仍要显示的浮层（加载层/设置面板）由 keep_rects 刨出去，留在网页层里画。
+/// x/y/width/height 与 keep_rects 同坐标系（父窗口客户区，JS 的 viewport × devicePixelRatio）
+fn set_webview_hole(
+    parent_hwnd: isize,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    keep_rects: &[[i32; 4]],
+) {
+    if parent_hwnd == 0 || width <= 0 || height <= 0 {
+        return;
+    }
+    unsafe {
+        let class_name = wide("WRY_WEBVIEW");
+        let webview = FindWindowExW(
+            parent_hwnd as *mut _,
+            std::ptr::null_mut(),
+            class_name.as_ptr(),
+            std::ptr::null(),
+        );
+        if webview.is_null() {
+            return;
+        }
+        // SetWindowRgn 用的是**窗口坐标**，JS 给的是父窗口客户区坐标，差一个 webview 原点
+        let mut origin = POINT { x: 0, y: 0 };
+        ClientToScreen(parent_hwnd as *mut _, &mut origin);
+        let mut wv = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        GetWindowRect(webview, &mut wv);
+        let (dx, dy) = (wv.left - origin.x, wv.top - origin.y);
+
+        let full = CreateRectRgn(0, 0, wv.right - wv.left, wv.bottom - wv.top);
+        let hole = CreateRectRgn(x - dx, y - dy, x - dx + width, y - dy + height);
+        for k in keep_rects {
+            let (kx, ky, kw, kh) = (k[0] - dx, k[1] - dy, k[2], k[3]);
+            if kw <= 0 || kh <= 0 {
+                continue;
+            }
+            let keep = CreateRectRgn(kx, ky, kx + kw, ky + kh);
+            CombineRgn(hole, hole, keep, RGN_DIFF);
+            DeleteObject(keep);
+        }
+        CombineRgn(full, full, hole, RGN_DIFF);
+        DeleteObject(hole);
+        // full 的所有权交给系统，这里不能再 DeleteObject
+        SetWindowRgn(webview, full, 1);
+    }
+}
+
+/// 把洞填回去（退出播放器/换片时）：否则主界面上会一直缺一块
+fn clear_webview_hole(parent_hwnd: isize) {
+    if parent_hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let class_name = wide("WRY_WEBVIEW");
+        let webview = FindWindowExW(
+            parent_hwnd as *mut _,
+            std::ptr::null_mut(),
+            class_name.as_ptr(),
+            std::ptr::null(),
+        );
+        if !webview.is_null() {
+            SetWindowRgn(webview, 0, 1);
+        }
+    }
 }
 
 unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
@@ -191,6 +302,7 @@ pub fn launch_embedded_player(
 ) -> Result<serde_json::Value, String> {
     // 先关闭已有实例
     stop_embedded_player().ok();
+    PARENT_HWND.store(parent_hwnd, Ordering::SeqCst);
 
     let mpv = find_mpv().ok_or("未找到 mpv")?;
 
@@ -241,6 +353,9 @@ pub fn launch_embedded_player(
         .arg("--no-border")
         .arg("--no-ontop")
         .arg("--no-terminal")
+        // 洞里的鼠标会落到 mpv 子窗口上：mpv 默认绑定含 MBTN_LEFT_DBL 全屏，
+        // 双击视频会弹出一个独立全屏窗，整个交互就串了。输入全走 IPC + 网页层控件
+        .arg("--no-input-default-bindings")
         .arg("--input-ipc-server=".to_string() + &pipe_name);
 
     if let Some(s) = start_secs {
@@ -260,6 +375,9 @@ pub fn launch_embedded_player(
     // mpv 是异步建管道的，spawn 返回时管道可能还没就绪，首条命令偶发连不上属正常
     *MPV_PIPE.lock().unwrap() = Some(pipe_name.clone());
 
+    // 视频子窗口在 WebView2 下面（见 resize 的 HWND_BOTTOM），网页层不挖空就整块黑掉没画面
+    set_webview_hole(parent_hwnd, x, y, width, height, &[]);
+
     eprintln!("[embedded-player] mpv started, pid={}, hwnd={}, pipe={}", pid, child_hwnd as isize, pipe_name);
 
     Ok(serde_json::json!({
@@ -270,9 +388,16 @@ pub fn launch_embedded_player(
     }))
 }
 
-/// 调整视频子窗口的位置和大小
+/// 调整视频子窗口的位置和大小，同时把网页层的洞挪到同一块区域。
+/// keep_rects: 带内仍要由网页层画的浮层矩形（加载层/设置面板等），挖洞时刨出去
 #[tauri::command]
-pub fn resize_embedded_player(x: i32, y: i32, width: i32, height: i32) -> Result<bool, String> {
+pub fn resize_embedded_player(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    keep_rects: Option<Vec<[i32; 4]>>,
+) -> Result<bool, String> {
     let hwnd = CHILD_HWND.load(Ordering::SeqCst);
     if hwnd == 0 {
         return Ok(false);
@@ -280,14 +405,22 @@ pub fn resize_embedded_player(x: i32, y: i32, width: i32, height: i32) -> Result
     unsafe {
         SetWindowPos(
             hwnd as *mut _,
-            std::ptr::null_mut(),
+            HWND_BOTTOM as *mut _,
             x,
             y,
             width,
             height,
-            SWP_NOZORDER | SWP_SHOWWINDOW,
+            SWP_SHOWWINDOW,
         );
     }
+    set_webview_hole(
+        PARENT_HWND.load(Ordering::SeqCst),
+        x,
+        y,
+        width,
+        height,
+        keep_rects.as_deref().unwrap_or(&[]),
+    );
     Ok(true)
 }
 
@@ -328,6 +461,9 @@ pub fn stop_embedded_player() -> Result<bool, String> {
             DestroyWindow(hwnd as *mut _);
         }
     }
+
+    // 网页层的洞填回去，否则主界面上会一直缺一块
+    clear_webview_hole(PARENT_HWND.swap(0, Ordering::SeqCst));
     Ok(true)
 }
 

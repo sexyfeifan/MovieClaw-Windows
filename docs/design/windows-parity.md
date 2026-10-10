@@ -72,7 +72,7 @@ Windows 现状（apps/desktop/ui/desktop + src-tauri），v0.2.110。
 | # | macOS | Windows 现状 | 差距 |
 |---|---|---|---|
 | 5.1 | 剧集卡右键菜单 播放 / 标为已看·未看 | 无 | 缺 |
-| 5.2 | `PlaybackPreconnect.warm`（详情页出现即预连，实测 cold 105ms → hot 63ms） | 无 | **起播性能** |
+| 5.2 | `PlaybackPreconnect.warm`（详情页出现即预连，实测 cold 105ms → hot 63ms） | ✓ `API.preconnectPlayback()`（详情页触发、20s 合并）+ `api_proxy` 共享 `ureq::Agent`（原先每请求新建 Agent，连接池活不过一次） | **起播性能** |
 | 5.3 | `.playbackStopReported` → 重拉 marks/resume（按钮 播放→继续 翻转） | 无播放结束回抛（playUnit 注释明说与 Mac 差异） | 缺 |
 | 5.4 | 人物页：removed files 灰显「片源已移除」+ 404 fallback | 待核对 `renderPerson` | 可能缺 |
 | 5.5 | 人物卡「本片」徽章 → pop 返回 | 无 | 缺（小） |
@@ -92,17 +92,17 @@ Windows 现状（apps/desktop/ui/desktop + src-tauri），v0.2.110。
 
 | # | macOS | Windows 现状 | 差距 |
 |---|---|---|---|
-| 7.1 | 玻璃双行控制条（chromeHeight 136）：音量/上一集/-10/播放/+10/下一集/字幕·音轨/画质/全屏 + 已播 + scrubber + 剩余/总长切换 | 单行控制条 + 面板；有下一集无上一集 | 布局 + 缺上一集 + 缺剩余切换 |
-| 7.2 | scrubber：拖动 scrubFollow 预览 seek、松手精确 seek、trickplay **sprite 切片**预览 | 有 trickplay hover（有 URL 时缩略图） | sprite 切片/scrubFollow 待对齐 |
-| 7.3 | 字幕·音轨面板：中文/英语/其他分组 + 「暂时放不了」不可用行；音轨列 | 有轨道列表（AI/强制/ASS/PGS 徽章），无语言分组 | 缺分组 |
+| 7.1 | 玻璃双行控制条（chromeHeight 136）：音量/上一集/-10/播放/+10/下一集/字幕·音轨/画质/全屏 + 已播 + scrubber + 剩余/总长切换 | ✓ 居中玻璃双行面板 100×720 r22 + backdrop-filter、距底 24；上行音量 \| 上一集·-10·播放·+10·下一集 \| 倍速·设置·画中画·全屏（播放键 48×48 恒居中），下行已播 \| scrubber \| 剩余·总长（点按翻转）；上下集按同季已入库集算、缺集跳过 | 轨道/画质入口在右钮区（Mac 是独立字幕·音轨/画质键）|
+| 7.2 | scrubber：拖动 scrubFollow 预览 seek、松手精确 seek、trickplay **sprite 切片**预览 | ✓ scrubFollow 按 macOS `ScrubFollow.plan` 落地（cheap 跟手 10Hz 兜底 / 原文件直出停稳 60ms 后沿跟 / 其余松手才跳；跟随不计入 seek、不作废看门狗，mpv 跟随走关键帧 seek，松手才精确落地）；有 trickplay hover（有 URL 时缩略图） | sprite 切片待对齐 |
+| 7.3 | 字幕·音轨面板：中文/英语/其他分组 + 「暂时放不了」不可用行；音轨列 | ✓ 字幕按 中文→英语→其他语言 分组（空组不出现，组内保持 `decision.subtitles` 原序）+「暂时放不了」置灰行（缺地址 / 暂不支持格式各给中文原因，0.4 透明、不挂点击）；音轨列仅 ≥2 条时出现，标签拆「语言 · 编码 · 声道」，认不出的编码置灰给原因；行文案走 macOS `displayTitle`/`detail` 两行（原 AI/强制/ASS/PGS 徽章收进小字） | 布局是标签页非 macOS 双列，其余对齐 |
 | 7.4 | 画质面板档位命名「原画」+ 提示；guest share 隐藏 | 原画/1080p/720p/480p + 当前画质信息块 | 基本对齐 |
 | 7.5 | — | 字幕延迟仅 UI 未应用到渲染 | 自债 |
 | 7.6 | 跳过片头/片尾/广告/预告/其他（`MacSkipButton`） | 跳过片头/片尾/segments | 广告/预告 kind 待补 |
 | 7.7 | up-next 卡：8s 倒计时条 + dismiss（`nextDismissed`） | autoNextCard 8s（取消/立即播放） | 基本对齐 |
-| 7.8 | **画质建议卡**（实测带宽 vs 需求，换/不换） | 无 | 缺 |
-| 7.9 | **软件转码同意对话框**（`MacConsentDialog`，原因/代价/自我放行） | 无 | 缺 |
-| 7.10 | 错误对话框 重试/关闭（⏎） | failed_tiers 降档 + loading 错误文案，无对话框 | 缺 |
-| 7.11 | 键盘：Space / ←→ ±10s / ⌥←→ / ⌘←→ 上下集 / ↑↓ 音量 / M / F·⌃⌘F / Esc 阶梯（面板→全屏→关闭）/ ⌘. 关闭 | Space·k / ←→ **±5s** / ↑↓ / m / f / Esc | ±10s、上下集键、Esc 阶梯缺 |
+| 7.8 | **画质建议卡**（实测带宽 vs 需求，换/不换） | ✓ `createQualitySuggestion` 阈值照搬（10s 保护期 / 300s 窗 / 单次长等 ≥8s 或 ≥2 次卡顿 / `实测 < 码率×0.9` 才建议 / 1080·720·480 阶梯）；卡片文案、双按钮、20s 自动收起与 mac 一致；「改用 Np」带 `max_height` 重谈且**不报 universal**（decide.py 的 universal 分支故意无视 `max_height`，报了上限整个失效） | QualityMemory 未做（8.5） |
+| 7.9 | **软件转码同意对话框**（`MacConsentDialog`，原因/代价/自我放行） | ✓ 标题「这部片需要软件转码才能播放」+ `原因`/`代价` 两行小字（`decision.reason`/`cost_hint`，服务端原样）；能自开（`can_self_enable`）给「取消 · 开启并播放」，存开关期间按钮变「正在开启…」并禁用，存不下去把原因红字留在框里（不静默关）；不能自开只给「知道了」+ 联系管理员提示 | 玻璃 r24/460 宽，其余对齐 |
+| 7.10 | 错误对话框 重试/关闭（⏎） | ✓ `MacPlayerDialog` 形状：告警三角（内联 SVG，非 emoji）+ 标题 + 建议 +「关闭(次) · 重试(主)」，次左主右；`decision.reason`/`suggestion` 原样；⏎ 认主、Esc 认次（不落到 Esc 阶梯）；**不再 5 秒自己消失**；「重试」清 `failed_tiers` 重跑同一份（同 macOS `retry()`），起播链的 `Player.close()` 收框 | 形状/键位对齐 |
+| 7.11 | 键盘：Space / ←→ ±10s / ⌥←→ / ⌘←→ 上下集 / ↑↓ 音量 / M / F·⌃⌘F / Esc 阶梯（面板→全屏→关闭）/ ⌘. 关闭 | ✓ Space·k / ←→ **±10s**（长按连跳）/ Ctrl·⌘←→ 上下集（只触发一次）/ ↑↓ 音量 / m / f / Esc 阶梯 / Ctrl·⌘. 关闭 | ⌥←→ 逐帧步进缺 |
 | 7.12 | 单击只显 chrome 不 toggle；双击全屏；拖动移窗 | 点击播放/暂停 | 交互差异 |
 | 7.13 | 字幕上抬避开控制条 | 无 | 样式 |
 | 7.14 | 窗口按宽高比 refit（Infuse 式，含最小/最大约束、关闭还原） | 无 | 缺 |
@@ -124,9 +124,9 @@ Windows 现状：HTML5 `<video>` + hls.js（`ProxyHlsLoader` 走 Rust `/__stream
 | # | macOS | Windows 现状 | 差距 |
 |---|---|---|---|
 | 8.1 | **能力上报分级**：native 报 universal 全解码 → 服务器给 tier-0 原文件直出；AVPlayer 只报 VideoToolbox 真值 | 统一报 `client:'web'` + 真实 decode 探测（mediaCapabilities）→ 服务器易给转码流 | **画质/性能关键**：mpv 路径应报 universal 拿原文件 |
-| 8.2 | 起播链：点击即建 controller（`playRequestedAt`）+ `@concurrent` 协商 + 协商期预构 AVURLAsset + `PlaybackPreconnect.warm`（HEAD /health 20s 合并） | 45s 会话 POST 超时、35s 卡死看门狗；无预热 | 起播延迟（前次已做 6.5s→1s 优化，仍有余量） |
+| 8.2 | 起播链：点击即建 controller（`playRequestedAt`）+ `@concurrent` 协商 + 协商期预构 AVURLAsset + `PlaybackPreconnect.warm`（HEAD /health 20s 合并） | ✓ 预连 + 起播链去串行（详情页带 `kind`/`files`，删 `getResume` 抢跑）；起播链 API 3–4 次/113–690ms → **1 次/48–123ms**。缺：`playRequestedAt` QoE 计时、P49 `matroska_cues`（服务端已随会话下发，客户端未用） | 起播延迟（前次已做 6.5s→1s 优化，仍有余量） |
 | 8.3 | FailurePolicy 阶梯：reconnect / retryNative / retryNativeLowStorage / failNetwork / failSourceMissing / fallbackToServerStream / stepDownTier + 预算（NativeRetryBudget、NetworkRestartBudget、ReconnectBackoff、PrematureEndGuard、SourceProbe） | failed_tiers 降档回路 + `__contentFailed` 去重 + `_playbackSeq` 竞态取消 | 阶梯不全 |
-| 8.4 | FrameDropTracker（10s 窗 ≥100 帧 ≥10% → 强制降档）+ StallWatch（解码卡/网络饿/播完归因）+ QualitySuggestion | 诊断面板显示丢帧（>2% 告警），不触发降档 | 看门狗闭环缺 |
+| 8.4 | FrameDropTracker（10s 窗 ≥100 帧 ≥10% → 强制降档）+ StallWatch（解码卡/网络饿/播完归因）+ QualitySuggestion | ✓ 三块 1 Hz 喂样/吐判定（`player.js`），动作由 App 执行：掉帧→`onPlaybackContentFailed` 降档、解码卡→同上、网络死→`onPlaybackNetworkDead` 同档重连、线路慢→画质卡。**一处刻意差异**：macOS 原文件直出不判掉帧（那条路拿不到总帧数做分母），Windows mpv 有 `frame-drop-count` + `time-pos×container-fps`，故档 0 也判；转码档 3/4 仍不判（连转码产物都放不动，再降只会更糟）。「线路慢」明确不算失败（buffer 低但还在收 → `.ok`，2026-09-28《哪吒》），唯一出口是画质卡 | 缺：PrematureEndGuard 播完归因、SourceProbe/NativeRetryBudget/ReconnectBackoff（8.3） |
 | 8.5 | QualityMemory（按 item × 网络环境 home/away）+ 音轨/字幕记忆（server marks） | 全局 localStorage（mc_subLang/mc_audioLang），无 per-item 记忆 | 缺 |
 | 8.6 | QoE：PlaybackRecord / ReportQueue / StartupTrace → `playbackMetricReport`/`playbackClientLog`（结果、起播分段、卡顿、seek 延迟、投递事实） | 无遥测上报 | 缺 |
 | 8.7 | `Server-Timing` 响应头解析（decide/prep/ffmpeg 分段） | 无 | 缺 |
@@ -182,11 +182,14 @@ Windows 现状：HTML5 `<video>` + hls.js（`ProxyHlsLoader` 走 Rust `/__stream
 **P0 — 播放性能对等**（用户核心诉求「同等或接近的播放性能」）
 1. ✓ 能力上报分级：mpv/原文件路径报 universal → tier-0 原文件直出（8.1）→ 验证：4K DV 片诊断面板 tier=原文件直出 —— 已达成（9c098ead）
 2. ✓ mpv IPC 补全 + 窗口跟随（10.1/10.2）→ 验证：mpv 路径可暂停/seek/音量 —— 已达成（1c2bce0b）
-3. 详情页 `PlaybackPreconnect.warm` + 起播链提前建控（8.2）→ 验证：起播耗时基准对比
-4. 看门狗闭环：丢帧/卡顿触发降档 + 画质建议卡（8.4、7.8）→ 验证：构造卡顿场景出卡片
+3. ✓ 详情页 `PlaybackPreconnect.warm` + 起播链提前建控（8.2）→ 验证：起播耗时基准对比 —— 已达成（未提交）：起播链 API 3–4 次/113–690ms → **1 次/48–123ms**；`--sub-file` 10 条 → **1 条**（内封轨 mpv 自己 demux，冷缓存下 10 条首播 30s+ 不出帧 → 0.42s）
+4. ✓ 看门狗闭环：丢帧/卡顿触发降档 + 画质建议卡（8.4、7.8）→ 验证：构造卡顿场景出卡片 —— 已达成（未提交）：600 KB/s 节流代理构造慢线路（只限视频/音频，API 全速），4K HEVC tier-0 出卡「实测约 509 KB/s，这一版需要约 3.1 MB/s…改用 720p」。触发走的是 macOS 两条路径里的 **≥2 次独立卡顿/300s 窗**（另一条是单次连续等待 ≥8s；`PlaybackRouting.swift:269-283` 两条等价，实测该片 5s 一次的卡顿在 8s 阈值之前就凑满两次）。点「改用 720p」→ `max_height=720`、capability **不报 universal**、档 4 transcode、`currentQuality` 记下 720。实测暴露并修掉四个度量 bug：`ProxyHlsLoader` 整片交付使 `_net.bps` 的 2 秒窗「收片瞬间虚高十几倍、其余恒 0」（HTML5 测速源改 1 Hz 累计字节差分）；mpv `cache-speed` 是**字节**/秒，当 bps 用会把带宽报小 8 倍、推荐档掉到 480p；`_everPlayed` 只由 HTML5 `playing` 事件置位，mpv 路径恒 false → 「缓冲」在正常播放时一直成立、8s 假等待会误触发；`selectQuality` 的 mpv 分支提前 return 漏记 `currentQuality`
 
 **P1 — 播放器 UI 对齐**（7.x）
-5. 玻璃双行控制条、上一集、剩余切换、scrubFollow、轨道分组、错误/同意对话框、Esc 阶梯、±10s
+5. ✓ 玻璃双行控制条、上一集/下一集、剩余切换、Esc 阶梯、±10s（7.1/7.11）→ 验证：真机真播双引擎 —— 已达成（未提交）：面板 100×720 r22 + `backdrop-filter: blur(28px) saturate(180%)`，距底 24；上行「音量 | 上一集·-10·播放·+10·下一集 | 倍速·设置·画中画·全屏」（播放键 48×48 居中恒定，两侧等宽块保证不随按钮增减漂移），下行「已播 | 进度条 | 剩余/总长」。**上下集不是服务端字段**：`PlaybackSessionView` 没有 `next_episode`，旧代码判 `sessionData.next_episode` 是死路，改成 macOS 同款客户端算（`PlaybackController.swift:466-498`）——`episodes.filter{owned && episode_number>cur}.min`，**缺集自动跳过**。这一改同时把从来没触发过的自动连播（`onPlaybackEnded`）救活了。剩余↔总长点按翻转（同 QuickTime / `movieclaw.mac.player.showsTotal`），时长未知显 `--:--` 不显 `-0:00`。←/→ ±10s（长按连跳），Ctrl+←/→ 换集（只触发一次），Esc 阶梯「面板 → 退全屏 → 关播放器」，⌘. 直接关。实测暴露并修掉一个真缺口：HTML5 的 `updateProgress` 只挂 `timeupdate`，**`loadedmetadata` 到首次 `timeupdate` 之间片长已知但右侧还挂着 HTML 占位 `0:00`**，起播慢时用户看到的就是假值；mpv 那条链靠轮询首个 `tick()` 补上、HTML5 没有对应动作 → `loadedmetadata` 里补调 `updateProgress()`。mpv 链单独补验（`openEmbeddedPlayer` 不走 `Player.open`，季集号与兄弟表是另加的同步）：mkv 剧集 lib2/550 走 mpv 不静默回落 HTML5，上下集同样正确、点下一集换集后邻居重算
+5a. ✓ scrubFollow 精化（7.2 前半）→ 验证：真机三类拖动场景 —— 已达成（未提交）：旧实现**每个 mousemove 都 `engSeekTo`**，等于「拖到哪抽到哪」，还顺手把掉帧/卡顿窗口一路清掉。按 macOS `ScrubFollow.plan`（`PlaybackWatchdogs.swift:134`）重写：`cheap`（落点在当前位置前 1s~已缓冲尾内）跟手但压在 **10Hz 兜底**（`maxWaitMs=100`，后沿落地 `settleMs=60`）；`!cheap` 分两支——原文件直出（档 0，每次 seek 都是一条新 Range 请求）只在**手指停住 60ms** 后跟一次，转码流则 `.skip`、松手才跳。跟随走 `engFollowTo`（**不**作废掉帧/卡顿窗口、mpv 用 `keyframe` seek），松手那一次才算真 seek（精确 + 作废窗口）。进度条滑块改为跟手指（`_scrubPct`），否则 `.skip` 分支下拖动会「画面和滑块都不动」。验收覆盖合同矩阵四格：plan 与 macOS 单测 5 条向量逐条一致；cheap 跟手 6 次/480ms；tier 4 转码拖出缓冲途中 0 次、**停住 200ms 仍 0 次**（这一步才把 `.skip` 和 `.deferred` 分开）；mkv/mpv 原文件扫动途中 0 次、停住后恰好 1 次
+5b. ✓ 轨道分组 +「暂时放不了」不可用行（7.3）→ 验证：真机 HTML5/mpv 双链 + 纯函数合同 —— 已达成（未提交）：按 macOS `MacSubtitleGroups.build` / `SubtitleTracks.plan` / `AudioOption.plan` / `MacTrackText.split` 落地。语言标记 23 条向量与 `kind(of:)` 逐条一致（`zh/zh-Hans/zh_CN/chi/zho/chs/cht/cmn/yue/chinese` 及大写 → 中文；`en/en-US/english/English` → 英语，含 `hasPrefix("en")` 会吃进去的 `end`；`jpn/kor/fre/und/空/null` → 其他）。真片爱麻夫人 S1E2（lib2/550，44 条 vtt）分成 中文 2 / 英语 3 / 其他语言 39，行上 `data-sub-index` 记的是 `decision.subtitles` **原位**（中文=[3,4]，英语=[10,11,12]）而不是过滤后的位置——分组只换摆法，`selectSubtitle(index)` 仍按原位走。行文案改成 macOS 两行 `displayTitle`/`detail`（`语言 · 格式 · 内封/外挂 · AI 翻译 · 默认 · 强制`），原徽章信息一条没丢、还补上语言/格式/内封外挂。「暂时放不了」两条理由分得开：`index >= subtitle_urls.length` →「服务端没有给出这条轨的地址」，`kind ∉ [vtt,ass,pgs]` →「暂不支持的字幕格式：xxx」，排在所有语言分组之后、置灰 0.4、不挂点击、点了选中态不动，也不混进语言分组。音轨列只在 ≥2 条时才出现（macOS「没得选的菜单是纯噪音」），爱情没有神话 4 条音轨 4 行、勾在默认那条；认不出的编码（`none`/`unknown`/空）置灰给「Audio Vivid」原因，但整片都认不出时不下结论。没字幕的片（阿凡提 4322）只剩「关闭字幕」+「字幕延迟」+「无可用字幕」；mpv 链（550 裸起 mkv）分组渲染与 HTML5 一致。**验收时暴露、与本次无关不改**：直通播放服务端 `session_id` 是 null（只有转码才分配会话号），`Player.close()` 里的 `sessionStop` 对直通片永远发不出去——就是 `close()` 里「4/4 槽位占满」那条老账的另一半；`selectSubtitle`/`selectAudio` 在 mpv 链仍 inert（`if (!this.video) return`）
+5c. ✓ 错误/同意对话框（`MacConsentDialog`，7.9/7.10）→ 验证：真机真决策双向（真 `rejected` + 真 `consent`）—— 已达成（未提交）：按 macOS `MacPlayerDialog` / `MacConsentDialog` / `MacPlayerScreen.dialogs` / `PlaybackController.handleSession`·`fail`·`retry`·`grantConsent` 落地。`api.js` 补 `playbackPolicySet`（`PUT /playback/policy`，只翻 `software_transcode_enabled` 一个字段，未带的字段服务端保持原值；`require_admin`）。`player.js` 加 `showPlayerDialog`/`showConsentDialog`/`hidePlayerDialog`/`_mountDialog`：scrim `rgba(0,0,0,.6)` 压在 `#playerView` 内、玻璃 r24、错误框 420 宽带告警三角（内联 SVG，界面不用 emoji）、同意框 460 宽纯说明文左对齐无图标；按钮**次左主右**（同 SwiftUI `.cancelAction`/`.defaultAction`），服务器来源文案全走 `textContent` 不落 HTML。`close()` 一起收框（否则黑屏上留个框）。键盘：⏎ 认主按钮、Esc 认次按钮并吞掉不落到 Esc 阶梯（焦点在框内按钮上时交给按钮自己触发，不重复触发）；Ctrl·⌘. 仍关播放器。`app.js`：`startPlayback` 开头存 `_retryItem`/`_retryStartMs` 供重试；决策三态分流——`consent` → `showConsentDialog(session.decision)`、`rejected` → `_showPlaybackError(reason, suggestion)`、其余非 `plan` 仍当异常；catch 从「loading 文案 + 5 秒自己消失」换成 `_showPlaybackError` 对话框；`retryPlayback` 重跑同一份（不带 `isRetry` → `_failedTiers` 自动清空，同 macOS `retry()`）；`grantConsent` 写开关后**校验服务端回显** `software_transcode_enabled === true` 才算成功（同 macOS `guard saved.softwareTranscodeEnabled`），不是就把「开关保存后未生效，请重试或查看服务端日志」红字留在框里、按钮复位、框不关。55/55：展示契约（两种形态、字段、按钮顺序、无 emoji）、键盘契约（⏎/Esc/不落阶梯/无框时 Esc 阶梯没弄坏）、存开关失败路径；**真 `rejected`** 用 `failed_tiers=[4]` 顶掉转码档（`decide.py` 降档回路 `tier >= SOFTWARE_TRANSCODE` → `PlaybackRejected`）拿到服务端原话「这部片在当前浏览器上尝试了所有播放方式都失败了。」+ suggestion，6 秒后框仍在，「重试」真起播且决策回到 `plan`；**真 `consent`** 把全局 `software_transcode_enabled` 关掉（这台服务端 `hardware_available: false`，限高 720 的 mkv 必落 `SOFTWARE_TRANSCODE`，`decide.py:465` 就返回 `ConsentRequired`）拿到服务端原样 `reason`/`cost_hint`，「开启并播放」真起播、决策回到 `plan`、开关经独立回读确认回到 `true`。**本次刻意不做**：macOS `infoError` 那个只有「返回」的框（Windows 起播链上没有对应触发点，做了是臆测）；「烧录撞上软件转码同意」自动回退选字幕关（Windows 从不要求服务端烧字幕——会话 body 没有字幕字段，字幕在客户端 JASSUB/`<track>` 渲染）。**与本次无关不改**：直通片 `session_id` 为 null 导致 `Player.close()` 的 `sessionStop` 发不出去；`selectSubtitle`/`selectAudio` 在 mpv 链 inert
 6. 窗口宽高比 refit、显示休眠抑制、SMTC
 
 **P2 — 功能链路补齐**

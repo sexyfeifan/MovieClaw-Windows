@@ -43,6 +43,8 @@ Section "安装" SecInstall
     File "..\dist\portable\WebView2Loader.dll"
     ; 桌面 UI
     File /nonfatal /r "..\dist\portable\desktop"
+    ; mpv 播放引擎 (find_mpv 读 $INSTDIR\mpv\mpv.exe)
+    File /nonfatal /r "..\dist\portable\mpv"
 
     ; 写注册表
     WriteRegStr HKCU "Software\MovieClaw\Desktop" "InstallDir" "$INSTDIR"
@@ -72,6 +74,7 @@ Section "Uninstall"
     Delete "$INSTDIR\connect.html"
     Delete "$INSTDIR\WebView2Loader.dll"
     RMDir /r "$INSTDIR\desktop"
+    RMDir /r "$INSTDIR\mpv"
     Delete "$INSTDIR\uninstall.exe"
     RMDir "$INSTDIR"
 

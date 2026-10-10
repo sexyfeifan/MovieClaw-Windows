@@ -6,6 +6,13 @@ use std::sync::{LazyLock, Mutex};
 static COOKIES: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(load_cookies_from_disk()));
 
+/// 全局共享的 ureq Agent。
+///
+/// `ureq::request()` / `ureq::get()` 每次都 `AgentBuilder::new().build()` 新建一个 Agent，
+/// 连接池随之一起丢弃——于是每个 API 调用都是冷握手，一次也复用不上。共享一个 Agent
+/// 才能让 `ConnectionPool` 活过单次请求（HTTPS 反代场景实测 cold 105ms → hot 63ms）。
+static AGENT: LazyLock<ureq::Agent> = LazyLock::new(ureq::Agent::new);
+
 /// Cookie 持久化路径
 fn cookie_file_path() -> std::path::PathBuf {
     let base = std::env::var("APPDATA")
@@ -72,7 +79,7 @@ pub async fn proxy_api(
     let url = format!("{}/api/v1{}", server.trim_end_matches('/'), path);
     eprintln!("[proxy_api] {} {}", method, url);
 
-    let mut req = ureq::request(&method, &url).set("Accept", "application/json");
+    let mut req = AGENT.request(&method, &url).set("Accept", "application/json");
 
     // 携带 Cookie
     if let Some(ck) = cookie_header() {
@@ -132,7 +139,7 @@ async fn fetch_image_as_data_uri(path_or_url: &str) -> Result<ProxyResponse, Str
     };
 
     eprintln!("[proxy_image] GET {}", url);
-    let mut req = ureq::get(&url).set("Accept", "image/*");
+    let mut req = AGENT.get(&url).set("Accept", "image/*");
     if let Some(ck) = cookie_header() {
         req = req.set("Cookie", &ck);
     }
@@ -189,7 +196,7 @@ async fn fetch_stream_proxy(url: &str) -> Result<ProxyResponse, String> {
     };
 
     eprintln!("[proxy_stream] GET {}", full_url);
-    let mut req = ureq::get(&full_url);
+    let mut req = AGENT.get(&full_url);
     if let Some(ck) = cookie_header() {
         req = req.set("Cookie", &ck);
     }
