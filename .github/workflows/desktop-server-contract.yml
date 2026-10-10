@@ -1,0 +1,72 @@
+name: Desktop server authentication contract
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, feat/windows-native, 'codex/**']
+    paths:
+      - 'src/movieclaw_api/schemas/auth.py'
+      - 'src/movieclaw_api/services/auth.py'
+      - 'src/movieclaw_api/services/login_devices.py'
+      - 'src/movieclaw_api/api/routes/auth.py'
+      - 'tests/api/test_auth.py'
+      - 'tests/api/test_device_auth.py'
+      - 'tests/api/test_login_devices.py'
+      - 'apps/web/lib/devices-display.ts'
+      - 'apps/web/test/devices-display.test.mjs'
+      - '.github/workflows/desktop-server-contract.yml'
+  pull_request:
+    paths:
+      - 'src/movieclaw_api/**'
+      - 'tests/api/test_auth.py'
+      - 'tests/api/test_device_auth.py'
+      - 'tests/api/test_login_devices.py'
+      - 'apps/web/lib/devices-display.ts'
+      - 'apps/web/test/devices-display.test.mjs'
+      - '.github/workflows/desktop-server-contract.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-auth-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-device-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: astral-sh/setup-uv@v6
+      - name: Install isolated backend test dependencies
+        run: |
+          uv venv .venv
+          uv pip install -e '.[dev]'
+      - name: Authentication contract lint
+        run: >-
+          uv run --no-project ruff check
+          src/movieclaw_api/schemas/auth.py src/movieclaw_api/services/auth.py
+          src/movieclaw_api/services/login_devices.py src/movieclaw_api/api/routes/auth.py
+          tests/api/test_auth.py tests/api/test_device_auth.py tests/api/test_login_devices.py
+      - name: Real API device login, pairing, revoke and password invalidation
+        run: >-
+          uv run --no-project python -m pytest
+          tests/api/test_auth.py tests/api/test_device_auth.py tests/api/test_login_devices.py
+          --disable-warnings --junitxml=desktop-auth-results.xml
+      - name: Web device approval and privilege descriptions
+        run: node --test apps/web/test/devices-display.test.mjs
+      - name: Upload authentication result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-auth-${{ github.sha }}
+          path: desktop-auth-results.xml
+          if-no-files-found: warn
+          retention-days: 14
