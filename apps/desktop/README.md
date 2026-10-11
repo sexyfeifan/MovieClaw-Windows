@@ -2,6 +2,8 @@
 
 Windows x64 client with a Tauri/WebView2 interface and bundled mpv playback. The UI is embedded in the executable. The server remains a separate MovieClaw deployment.
 
+Implementation coverage, measured CI evidence and the remaining physical Windows acceptance checklist are recorded in [the full parity report](../../docs/design/windows-full-parity-results-2026-10-11.md).
+
 ## Build and test
 
 Install PowerShell 7, Node.js 22.23.3, Python 3.12.9 (release-gate tests), Rust 1.99.0 for `x86_64-pc-windows-msvc`, Visual Studio Build Tools (Desktop development with C++), and 7-Zip. CI pins these tool versions and records the hosted Windows image/runtime environment. Windows builds have no developer-specific paths or GNU/MinGW dependency.
