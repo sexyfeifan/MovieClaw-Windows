@@ -18,6 +18,26 @@ test('native picture in picture has compact controls and restores on Escape and 
   await expect.poll(()=>page.evaluate(()=>window.__fixture.platform?.active)).toBe(false);
 });
 
+test('native video Escape restores PiP and the fullscreen button keeps restored fullscreen active', async ({page,request}) => {
+  await nativeTracks(page,request);
+  await expect.poll(()=>page.evaluate(()=>window.MovieClawPlatform.status?.active)).toBe(true);
+  await page.locator('#btnFullscreen').click();
+  await expect.poll(()=>page.evaluate(()=>window.__fixture.fullscreen)).toBe(true);
+  await page.locator('#btnPip').click();
+  await expect(page.locator('#playerView')).toHaveClass(/native-pip/);
+  await expect.poll(()=>page.evaluate(()=>window.__fixture.fullscreen)).toBe(false);
+  await page.evaluate(()=>Player.handleNativeInput(['escape']));
+  await expect(page.locator('#playerView')).not.toHaveClass(/native-pip/);
+  await expect(page.locator('#playerView')).toBeVisible();
+  await expect.poll(()=>page.evaluate(()=>window.__fixture.fullscreen)).toBe(true);
+  await page.locator('#btnPip').click();
+  await expect(page.locator('#playerView')).toHaveClass(/native-pip/);
+  await page.locator('#btnFullscreen').click();
+  await expect(page.locator('#playerView')).not.toHaveClass(/native-pip/);
+  await expect.poll(()=>page.evaluate(()=>window.__fixture.fullscreen)).toBe(true);
+  await page.locator('#playerBack').click();
+});
+
 async function nativeTracks(page, request) {
   await page.route('**/api/v1/playback/sessions', async route => {
     const response = await route.fetch(); const body = await response.json();

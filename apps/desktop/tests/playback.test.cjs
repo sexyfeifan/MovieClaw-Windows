@@ -922,6 +922,31 @@ test('native fullscreen preserves prior window mode through engine replacement a
   assert.deepEqual(changes, [false, true]);
 });
 
+test('fullscreen from PiP keeps an already restored fullscreen and cannot reenter after playback closes', async () => {
+  const h = harness();
+  h.P.activeEngine = 'mpv'; h.P.nativePip = true;
+  const changes = [];
+  h.win.__TAURI__.window = { getCurrentWindow: () => ({ isFullscreen: async () => true, setFullscreen: async value => changes.push(value) }) };
+  h.P.togglePip = async () => { h.P.nativePip = false; h.P._nativeFullscreen = true; };
+  await h.P.toggleFullscreen();
+  assert.deepEqual(changes, []);
+  h.P.nativePip = true; h.P._nativeFullscreen = false;
+  h.P.togglePip = async () => { h.P.nativePip = false; h.P.generation++; h.P.activeEngine = null; };
+  await h.P.toggleFullscreen();
+  assert.deepEqual(changes, []);
+});
+
+test('Escape forwarded from mpv restores PiP instead of closing playback', () => {
+  const h = harness();
+  h.P.nativePip = true;
+  let restored = 0, closed = 0;
+  h.P.closeAnyPanel = () => false;
+  h.P.togglePip = () => restored++;
+  h.P.close = () => closed++;
+  h.P.handleNativeInput(['escape']);
+  assert.equal(restored, 1); assert.equal(closed, 0);
+});
+
 test('probed DVD bitmap subtitles are unavailable with an accurate reason instead of claiming no tracks', () => {
   const h = harness();
   h.P.sessionData = session({ source: { subtitle_codecs: ['dvd_subtitle'] }, decision: { subtitles: [] } });

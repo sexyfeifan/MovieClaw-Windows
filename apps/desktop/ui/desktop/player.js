@@ -2730,7 +2730,12 @@ const Player = {
   },
 
   toggleFullscreen() {
-    if (this.nativePip) return this.togglePip().then(() => { if (!this.nativePip) return this.toggleFullscreen(); });
+    if (this.nativePip) {
+      const generation = this.generation;
+      return this.togglePip().then(() => {
+        if (generation === this.generation && this.activeEngine && !this.nativePip && !this.isFullscreen()) return this.toggleFullscreen();
+      });
+    }
     const view = document.getElementById('playerView');
     if (!view) return Promise.resolve();
     if (this.isMpv() && window.__TAURI__?.window?.getCurrentWindow) {
@@ -2994,7 +2999,7 @@ const Player = {
     else if (action === 'enter') this._dialog?.primary?.();
     else if (action === 'previous') this.playEpisode(this.prevEpisode());
     else if (action === 'next') this.playEpisode(this.nextEpisode());
-    else if (action === 'escape') { if (this._dialog) { this._dialog.secondary?.(); return; } if (this.closeAnyPanel()) return; if (this.isFullscreen()) this.toggleFullscreen(); else this.close(); }
+    else if (action === 'escape') { if (this._dialog) { this._dialog.secondary?.(); return; } if (this.closeAnyPanel()) return; if (this.nativePip) this.togglePip(); else if (this.isFullscreen()) this.toggleFullscreen(); else this.close(); }
   },
 
   initialSubtitle() {

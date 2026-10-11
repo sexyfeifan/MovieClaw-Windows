@@ -80,6 +80,8 @@ async function openDesktop(page, request, options = {}) {
         if (command === 'end_native_playback') { if (f.platform?.sequence === args.sequence) f.platform.active = false; return; }
         if (command === 'set_native_picture_in_picture') {
           if (f.platform?.sequence !== args.sequence) throw new Error('stale playback');
+          if (args.enabled) { f.pipBeforeFullscreen = !!f.fullscreen; f.fullscreen = false; }
+          else f.fullscreen = !!f.pipBeforeFullscreen;
           f.platform.pictureInPicture = args.enabled;
           return {...f.platform};
         }
