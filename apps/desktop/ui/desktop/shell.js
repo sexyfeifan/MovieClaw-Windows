@@ -8,6 +8,16 @@ window.DesktopUpdates = {
     while (this.retiredIds.size > 32) this.retiredIds.delete(this.retiredIds.values().next().value);
   },
   text(value, limit = 1200) { return Array.from(typeof value === 'string' ? value : '').slice(0, limit).join(''); },
+  releaseText(value) {
+    // Release Markdown stays inert text; internal comments are not user instructions.
+    return this.text((typeof value === 'string' ? value : '')
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/^#{1,6}\s+/gm, '')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '$1')
+      .trim());
+  },
   errorText(error) {
     const raw = typeof error === 'string' ? error : error?.message || '';
     try { return this.text(JSON.parse(raw).message, 600) || '操作失败，请重试。'; }
@@ -18,7 +28,7 @@ window.DesktopUpdates = {
     if (this.busy()) return;
     this.retire(this.active);
     this.info = { has_update: info?.has_update === true, current_version: this.text(info?.current_version, 128),
-      latest_version: this.text(info?.latest_version, 128), message: this.text(info?.message, 600), release_notes: this.text(info?.release_notes) };
+      latest_version: this.text(info?.latest_version, 128), message: this.text(info?.message, 600), release_notes: this.releaseText(info?.release_notes) };
     this.phase = this.info.has_update ? 'available' : 'current';
     this.error = ''; this.download = null; this.progress = null; this.active = null;
     this.render(true);
@@ -132,7 +142,7 @@ window.DesktopUpdates = {
       const message = document.createElement('p'); message.id = 'desktopUpdateMessage'; message.setAttribute('role', 'status'); dialog.append(message);
       if (this.info?.current_version || this.info?.latest_version) {
         const versions = document.createElement('p'); versions.className = 'update-versions';
-        versions.textContent = [this.info.current_version && '当前 ' + this.info.current_version, this.info.latest_version && '新版本 ' + this.info.latest_version].filter(Boolean).join(' · '); dialog.append(versions);
+        versions.textContent = [this.info.current_version && '当前 ' + this.info.current_version, this.info.latest_version && '最新 ' + this.info.latest_version.replace(/^desktop-v/, '')].filter(Boolean).join(' · '); dialog.append(versions);
       }
       if (this.info?.release_notes && ['available', 'ready', 'current'].includes(this.phase)) {
         const notes = document.createElement('p'); notes.className = 'update-release-notes'; notes.textContent = this.info.release_notes; dialog.append(notes);

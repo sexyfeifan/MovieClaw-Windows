@@ -18,8 +18,10 @@ test('a newer build of 1.0.0 is downloadable while current and failed checks sta
   await page.locator('#updateDownload').click(); await expect(page.locator('#updateInstall')).toBeVisible();
   expect((await state(request)).updateRequests.find(value=>value.command==='download_update').args).toEqual({version:'desktop-v1.0.0'});
   await page.locator('#updateClose').click();
-  await updates(page,request,{updateCurrent:true});
+  await updates(page,request,{updateCurrent:true,updateNotes:'<!-- desktop-release-policy: ci-verified -->\n\n# MovieClaw Windows 1.0.0\n\n- **安装版**：下载 `Setup.exe`。\n[使用说明](https://example.com)'});
   await expect(page.locator('#desktopUpdateMessage')).toContainText('已是最新版本 (1.0.0)');
+  await expect(page.locator('.update-versions')).toHaveText('当前 1.0.0 · 最新 1.0.0');
+  await expect(page.locator('.update-release-notes')).toHaveText('MovieClaw Windows 1.0.0\n\n- 安装版：下载 Setup.exe。\n使用说明');
   await expect(page.locator('#updateDownload')).toHaveCount(0);
   await page.locator('#updateClose').click();
   await updates(page,request,{updateCheckFailure:true});
