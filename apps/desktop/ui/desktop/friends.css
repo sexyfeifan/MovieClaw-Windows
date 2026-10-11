@@ -1,6 +1,6 @@
 .friends-panel {position:absolute;z-index:45;left:16px;top:68px;bottom:136px;width:340px;max-width:calc(100% - 32px);display:flex;flex-direction:column;background:rgba(24,25,30,.98);border:1px solid rgba(255,255,255,.14);border-radius:18px;box-shadow:0 16px 50px #0007;color:#f4f4f7;overflow:hidden}
 .friends-panel[hidden] {display:none}
-#btnPlayerFriends {width:auto;display:flex;align-items:center;gap:7px;padding:0 12px;white-space:nowrap;font-size:12px}
+#btnPlayerFriends {width:auto;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;gap:7px;padding:0 14px;border-radius:999px;white-space:nowrap;font-size:12px}
 #btnPlayerFriends[hidden] {display:none}
 #btnBrowseFriends {width:100%;border:0;background:transparent;font:inherit;text-align:left;cursor:pointer}
 #btnBrowseFriends[hidden] {display:none}

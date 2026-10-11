@@ -289,18 +289,21 @@ class Presence:
         async with self.lock, get_database().session() as db:
             owners = await self.owners(db, viewer)
             live = await self.live(db, viewer, owners)
+            visible = []
+            for owner, info in owners.items():
+                if info["is_self"] and not live[owner] and not await self.history_rows(db, viewer, info):
+                    continue
+                visible.append(
+                    {
+                        "member_id": owner,
+                        "name": info["name"],
+                        "is_self": info["is_self"],
+                        "sessions": live[owner],
+                    }
+                )
             return response(
                 {
-                    "members": [
-                        {
-                            "member_id": owner,
-                            "name": info["name"],
-                            "is_self": info["is_self"],
-                            "sessions": live[owner],
-                        }
-                        for owner, info in owners.items()
-                        if not info["is_self"] or live[owner]
-                    ],
+                    "members": visible,
                     "sampled_at": stamp(utcnow()),
                     "refresh_seconds": 8,
                 }

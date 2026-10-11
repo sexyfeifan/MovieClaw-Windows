@@ -3006,6 +3006,9 @@ const App = {
     const item = this._retryItem;
     if (!item) { Player.close(); return; }
     const next = Object.assign({}, item);
+    // Manual retry starts with the native capability again, rather than retaining
+    // an automatic browser fallback from the failed attempt.
+    delete next.__forceHtml5;
     if (this._retryStartMs != null) next.startMs = this._retryStartMs;
     delete next.attemptId;
     next.__autoNext = false;

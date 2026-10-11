@@ -781,6 +781,16 @@ test('retry budget permits one native retry then server fallback and caps repeat
   h.A.onPlaybackNetworkDead('lost'); assert.match(final, /预算已用尽/);
 });
 
+test('manual retry restores native routing while preserving selected tracks, quality and position', () => {
+  const h = harness(); let next;
+  h.A._retryItem = {media_item_id:3, __forceHtml5:true, audio_track:'a:1', subtitle_track:'s:2', __maxHeight:0, attemptId:'failed'};
+  h.A._retryStartMs = 120000;h.A.startPlayback = item => next = item;
+  h.A.retryPlayback();
+  assert.equal(next.__forceHtml5,undefined);assert.equal(next.attemptId,undefined);
+  assert.equal(next.startMs,120000);assert.equal(next.audio_track,'a:1');assert.equal(next.subtitle_track,'s:2');assert.equal(next.__maxHeight,0);
+  assert.equal(h.A._retryItem.__forceHtml5,true);
+});
+
 test('native mouse input uses the same controls and does not toggle pause on a single click', () => {
   const h = harness(); nativeTracks(h); let full = 0;
   h.P.toggleFullscreen = () => full++;

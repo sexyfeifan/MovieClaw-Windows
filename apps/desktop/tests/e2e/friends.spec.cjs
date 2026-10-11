@@ -74,6 +74,7 @@ test('display setting restores the homepage entry after login and is scoped to i
 });
 test('left drawer shows devices, progress and history, closes with Esc and preserves native video overlay',async({page,request},info)=>{
  await playing(page,request);await expect(page.locator('.friends-watch')).toContainText('Windows 客户端');await expect(page.locator('.friends-watch')).toContainText('2:00 / 20:00');
+ await expect(page.locator('#btnPlayerFriends')).toHaveCSS('border-radius','999px');
  const box=await page.locator('#playerFriendsPanel').boundingBox();expect(box.x).toBeLessThan(30);
  const controls=await page.locator('.player-transport').boundingBox();expect(box.y+box.height).toBeLessThanOrEqual(controls.y-8);
  await page.screenshot({path:info.outputPath('friends-list.png')});
@@ -81,6 +82,21 @@ test('left drawer shows devices, progress and history, closes with Esc and prese
  await page.getByRole('button',{name:'最近观看',exact:true}).click();await expect(page.locator('.friends-content')).toContainText('最近 7 天');await expect(page.locator('.friends-watch')).toContainText('3:00 / 20:00');
  await page.screenshot({path:info.outputPath('friends-history.png')});
  await page.keyboard.press('Escape');await expect(page.locator('#playerFriendsPanel')).toBeHidden();await expect(page.locator('#playerView')).toBeVisible();
+});
+
+test('offline shared members and own account retain their history entry',async({page,request},info)=>{
+ await settings(page,request,{friendsSelf:true,friendsSelfOffline:true,friendsNoLive:true});
+ await page.locator('#setFriendsVisible').check();await page.locator('[data-page="home"]').click();await page.locator('#btnBrowseFriends').click();
+ await expect(page.locator('.friends-member')).toHaveCount(2);
+ await expect(page.locator('.friends-watch')).toHaveCount(0);
+ await expect(page.locator('.friends-member').nth(0)).toContainText('当前未在观看，可查看最近观看');
+ await page.locator('.friends-member').nth(0).getByRole('button',{name:'最近观看'}).click();
+ await expect(page.locator('#homeFriendsDialog .friends-content')).toContainText('我的最近观看');await expect(page.locator('.friends-watch')).toHaveCount(1);
+ await page.locator('#friendsBack').click();await page.locator('.friends-member').nth(1).getByRole('button',{name:'最近观看'}).click();
+ await expect(page.locator('#homeFriendsDialog .friends-content')).toContainText('Alice的最近观看');await expect(page.locator('.friends-watch')).toHaveCount(1);
+ await page.screenshot({path:info.outputPath('offline-history.png')});
+ await page.locator('#friendsBack').click();await patch(request,{friendsRevoked:true});await page.keyboard.press('Escape');await page.locator('#btnBrowseFriends').click();
+ await expect(page.locator('.friends-member')).toHaveCount(1);
 });
 test('follow refreshes consent and starts correct episode at fresh progress with own playback session',async({page,request})=>{
  await playing(page,request);await page.getByRole('button',{name:'跟上进度',exact:true}).click();await expect(page.locator('#playerDialog')).toContainText('切换影片');await page.getByRole('button',{name:'开始播放',exact:true}).click();

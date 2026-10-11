@@ -2,6 +2,17 @@ const { test, expect } = require('@playwright/test');
 
 const { openDesktop, state, browseLibrary } = require('./helpers.cjs');
 
+test('manual playback retry reclaims native capability after an automatic browser fallback', async ({page,request}) => {
+  await openDesktop(page,request);await browseLibrary(page);await page.locator('#posterGrid .poster-card[data-item-id="3"]').click();await page.locator('#btnPlay').click();
+  await expect.poll(()=>page.evaluate(()=>Player.activeEngine)).toBe('mpv');
+  const retryPosition=await page.evaluate(()=>{App._retryItem={...Player.context,__forceHtml5:true};App._showPlaybackError('播放失败');return App._retryStartMs;});
+  await expect(page.locator('#playerDialog')).toBeVisible();await page.locator('#playerDialog').getByRole('button',{name:'重试',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>Player.activeEngine)).toBe('mpv');
+  await expect.poll(async()=> (await state(request)).requests.filter(row=>row.path==='/playback/sessions').length).toBe(2);
+  const body=(await state(request)).requests.filter(row=>row.path==='/playback/sessions').at(-1).body;
+  expect(body.capability.universal).toBe(true);expect(body.capability.hdr_passthrough).toBe(true);expect(body.start_ms).toBe(retryPosition);
+});
+
 test('search excludes hidden and adult libraries even when an old server ignores the scope', async ({page,request}) => {
   const hit=(id,title,ids,extra={})=>({item:{media_item_id:id,kind:'movie',title,...extra},library_ids:ids,match:{label:'片名匹配'}});
   await openDesktop(page,request,{legacySearchScope:true,searchPeople:true,libraries:[

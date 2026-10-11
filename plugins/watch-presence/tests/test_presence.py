@@ -224,6 +224,30 @@ def test_defaults_and_anonymous_denied(server):
         assert client.get(BASE + path).status_code == 401
 
 
+def test_offline_members_keep_authorized_history_entry(server):
+    client, ids, use = server
+    activity.reset()
+    own = client.get(BASE + "/members").json()["data"]["members"]
+    assert len(own) == 1 and own[0]["member_id"] == ids["alice"]
+    assert own[0]["is_self"] is True and own[0]["sessions"] == []
+    assert client.get(BASE + f"/members/{ids['alice']}/history").json()["data"]["items"]
+    use("bob")
+    assert client.get(BASE + "/members").json()["data"]["members"] == []
+    use("alice")
+    share(client, (1,))
+    use("bob")
+    offline = client.get(BASE + "/members").json()["data"]["members"]
+    assert len(offline) == 1 and offline[0]["member_id"] == ids["alice"]
+    assert offline[0]["sessions"] == []
+    history = client.get(BASE + f"/members/{ids['alice']}/history").json()["data"]["items"]
+    assert {row["media"]["media_item_id"] for row in history} == {11}
+    use("alice")
+    share(client, (1,), enabled=False)
+    use("bob")
+    assert client.get(BASE + "/members").json()["data"]["members"] == []
+    assert client.get(BASE + f"/members/{ids['alice']}/history").status_code == 404
+
+
 def test_same_version_reinstall_preserves_account_privacy(server):
     client, ids, use = server
     share(client, (1,))
