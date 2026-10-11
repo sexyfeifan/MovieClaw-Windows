@@ -552,6 +552,34 @@ test('mpv track mapping uses per-type ffmpeg ordinal, real id, and gateway sourc
   assert.deepEqual(Array.from(map.subtitles, t => [t.ref, t.id]), [['embedded:0', 19], ['external:English.ass', 91]]);
 });
 
+test('native playback starts one idle timer, preserves it across polls, and ignores inactive video events', async () => {
+  const props = { pause: false };
+  const h = harness({ invoke: name => Promise.resolve(name === 'get_embedded_player_state'
+    ? { status: { running: true }, properties: props } : {}) });
+  nativeTracks(h);
+  h.P.startMpvPoll();
+  await flush();
+  const idle = h.P.hideTimer;
+  assert.ok(idle);
+  h.video.emit('pause');
+  assert.equal(h.P.hideTimer, idle);
+  await [...h.intervals.values()].find(t => t.ms === 500).fn();
+  assert.equal(h.P.hideTimer, idle);
+  h.timers.get(idle).fn();
+  assert.equal(h.P.controlsVisible, false);
+  h.P.handleNativeInput(['move']);
+  assert.equal(h.P.controlsVisible, true);
+  assert.notEqual(h.P.hideTimer, idle);
+  props.pause = true;
+  await [...h.intervals.values()].find(t => t.ms === 500).fn();
+  assert.equal(h.P.hideTimer, null);
+  assert.equal(h.P.controlsVisible, true);
+  props.pause = false;
+  await [...h.intervals.values()].find(t => t.ms === 500).fn();
+  assert.ok(h.P.hideTimer);
+  h.P.stopMpvPoll();
+});
+
 function nativeTracks(h) {
   h.P.adoptSession('Native', session({ timeline: 'session', start_ms: 100000,
     decision: { tier: 0, file_id: 81, audio: { track_ref: 'embedded:0' },

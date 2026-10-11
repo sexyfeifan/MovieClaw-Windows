@@ -650,11 +650,14 @@ const Player = {
     });
     this.video.addEventListener('progress', () => this.updateBuffer());
     this.video.addEventListener('play', () => {
+      if (this.activeEngine !== 'html5') return;
       this.showIcon('pause');
       this.hideCenterBtn();
       this.autoHideControls();
     });
     this.video.addEventListener('pause', () => {
+      if (this.activeEngine !== 'html5') return;
+      this.autoHideControls();
       this._buffering = false;
       this.showIcon('play');
       this.showCenterBtn();
@@ -1631,7 +1634,7 @@ const Player = {
     this.trickplayIndex = null;
     this._spriteImages = new Map();
     this._outroOffered = false;
-    this.controlsVisible = true;
+    this.showControls();
     const pip = document.getElementById('btnPip');
     if (pip) { pip.hidden = engine !== 'mpv' && !document.pictureInPictureEnabled; pip.title = '画中画'; pip.setAttribute('aria-pressed', 'false'); }
     this._reportedStart = false;
@@ -2251,7 +2254,12 @@ const Player = {
         this.mpvState.properties = v;
         if (typeof v['time-pos'] === 'number') this.mpvState.time = v['time-pos'];
         if (typeof v.duration === 'number') this.mpvState.duration = v.duration;
-        if (typeof v.pause === 'boolean') this.mpvState.paused = v.pause;
+        if (typeof v.pause === 'boolean' && v.pause !== this.mpvState.paused) {
+          this.mpvState.paused = v.pause;
+          if (v.pause) { this.showCenterBtn(); this.showControls(); }
+          else this.hideCenterBtn();
+          this.autoHideControls();
+        }
         if (typeof v.volume === 'number') this.mpvState.volume = v.volume / 100;
         if (typeof v.mute === 'boolean') this.mpvState.muted = v.mute;
         if (typeof v.speed === 'number') this.mpvState.speed = v.speed;
@@ -2708,7 +2716,7 @@ const Player = {
       // HTML5 的 play/pause 事件在 mpv 会话里不会来，图标/控制条这里补上
       this.showIcon(wasPaused ? 'pause' : 'play');
       if (wasPaused) { this.hideCenterBtn(); this.autoHideControls(); }
-      else { this.showCenterBtn(); this.showControls(); }
+      else { this.showCenterBtn(); this.showControls(); this.autoHideControls(); }
       window.MovieClawPlatform?.update();
     } else if (this.video) {
       if (this.video.paused) this.video.play().catch(() => {});
@@ -2869,10 +2877,14 @@ const Player = {
 
   autoHideControls() {
     clearTimeout(this.hideTimer);
-    if (!this.engPaused()) {
+    this.hideTimer = null;
+    if (this.activeEngine && !this.engPaused() && !this._ended) {
       this.hideTimer = setTimeout(() => {
+        this.hideTimer = null;
+        if (!this.activeEngine || this.engPaused() || this._ended) return;
         this.hideControls();
-        this.hideCenterBtn();
+        if (this.controlsVisible) this.autoHideControls();
+        else this.hideCenterBtn();
       }, 3000);
     }
   },

@@ -1,6 +1,32 @@
 const { test, expect } = require('@playwright/test');
 const { openDesktop, browseLibrary, state } = require('./helpers.cjs');
 
+test('native controls hide after startup and resume, and return on mouse movement', async ({page,request}) => {
+  await nativeTracks(page,request);
+  await expect(page.locator('#playerControls')).toHaveCSS('opacity','0',{timeout:6000});
+  await page.evaluate(()=>window.__fixture.emit('movieclaw:player-input',{instanceId:Player.mpvInstanceId,args:['movieclaw-input','move']}));
+  await expect(page.locator('#playerControls')).toHaveCSS('opacity','1');
+  await expect(page.locator('#playerControls')).toHaveCSS('opacity','0',{timeout:6000});
+  await page.mouse.move(300,300);
+  await expect(page.locator('#playerControls')).toHaveCSS('opacity','1');
+  await page.keyboard.press('Space');
+  await expect.poll(()=>property(page,'pause')).toBe(true);
+  await page.waitForTimeout(3500);
+  await expect(page.locator('#playerControls')).toHaveCSS('opacity','1');
+  await page.keyboard.press('Space');
+  await expect(page.locator('#playerControls')).toHaveCSS('opacity','0',{timeout:6000});
+});
+
+test('controls remain available while a panel is open and hide after it closes', async ({page,request}) => {
+  await nativeTracks(page,request);
+  await page.locator('#btnSettings').click();
+  await page.waitForTimeout(3500);
+  await expect(page.locator('#playerControls')).toHaveCSS('opacity','1');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#playerSettingsPanel')).toBeHidden();
+  await expect(page.locator('#playerControls')).toHaveCSS('opacity','0',{timeout:6000});
+});
+
 test('native playback shows real read speed and optional diagnostics through button, shortcut and right click', async ({page,request}) => {
   await nativeTracks(page,request);
   await page.evaluate(()=>{window.__fixture.props['cache-speed']=4*1024*1024;window.__fixture.props['hwdec-current']='d3d11va';window.__fixture.props['demuxer-cache-duration']=42;window.__fixture.props.ipc_connected=true;});
