@@ -1,0 +1,15 @@
+<!-- desktop-release-policy: ci-verified -->
+
+# MovieClaw Windows 1.0.3
+
+连接自己的 MovieClaw 服务器，在 Windows 上浏览媒体库、播放电影与剧集。
+
+- 安装：下载 `MovieClaw-Desktop-1.0.3-Setup-x64.exe`，安装后输入服务器地址并登录。
+- 服务器好友：在播放器查看已授权成员的设备、影片和进度，查看最近观看历史，选择从头播放或跟上进度。
+- 隐私：好友入口和观看共享默认关闭。各成员可选择允许共享的媒体库；未选或新建的库默认保密。
+- 插件：在服务器 Web 设置 → 插件上传 `MovieClaw-Watch-Presence-1.0.0.mcplugin`，核对并批准主进程运行。兼容基线为 MovieClaw 0.36.0，无额外运行程序或容器。详见附带的 `Watch-Presence-Guide.md`。
+- Windows 10/11 x64。安装版包含 mpv 播放器与 WebView2 离线组件；便携版要求系统已有 WebView2。
+
+[使用说明](https://github.com/sexyfeifan/MovieClaw-Windows#readme)
+
+附 `SHA256SUMS.txt` 和 `release-manifest.json`。客户端及插件自动化测试通过，本机安装和启动已验证；NAS 多设备实测及完整 Windows/macOS 物理硬件对等验收尚未完成。安装包未签名，HDR、音频直通与原盘功能以设备能力及支持范围为准。

@@ -4,7 +4,7 @@ MovieClaw 的 Windows 桌面客户端。连接自己的 MovieClaw 服务器，�
 
 ## 安装
 
-1. 打开 [下载页面](https://github.com/sexyfeifan/MovieClaw-Windows/releases/latest)，下载 `MovieClaw-Desktop-1.0.2-Setup-x64.exe`。
+1. 打开 [下载页面](https://github.com/sexyfeifan/MovieClaw-Windows/releases/latest)，下载 `MovieClaw-Desktop-1.0.3-Setup-x64.exe`。
 2. 运行安装包，启动 MovieClaw。
 3. 输入服务器地址并登录，例如 `http://NAS地址:3000`。
 
@@ -21,6 +21,7 @@ MovieClaw 的 Windows 桌面客户端。连接自己的 MovieClaw 服务器，�
 - 双击视频区域或按 `F` 切换全屏；全屏画幅可选“保持原比例”或“填满屏幕”。
 - 右上角显示读取速度，点击速度或“播放信息”按钮查看详细信息；`I` 也可打开。
 - 在“设置 → 关于”检查更新、查看构建号与开源许可。
+- 安装可选的[服务器观看动态插件](plugins/watch-presence/README.md)，可在播放器查看成员的公开观看状态、最近历史，并从头播放或跟上进度。好友入口和共享默认关闭，允许共享的媒体库由各成员自行选择。
 
 扫码登录入口暂时隐藏。AI 字幕使用服务器上的参考字幕和已配置的 AI 模型；PGS 图片字幕需要服务器支持 OCR。无参考字幕的语音转写暂不支持。库管理与服务器设置使用服务端 Web 管理界面。
 
@@ -30,6 +31,7 @@ MovieClaw 的 Windows 桌面客户端。连接自己的 MovieClaw 服务器，�
 apps/desktop/      Windows 客户端、测试与打包脚本
 apps/apple/        上游 Apple 客户端
 apps/web/          服务器 Web 界面
+plugins/           可选服务端插件
 src/movieclaw_api/ 服务器 API
 alembic/          数据库迁移
 docker/           Docker 配置
