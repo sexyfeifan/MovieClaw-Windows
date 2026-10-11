@@ -12,6 +12,7 @@ function uiIcon(name) {
     right: '<path d="m10 6 6 6-6 6"/>',
     down: '<path d="m7 10 5 5 5-5"/>',
     close: '<path d="m6 6 12 12M18 6 6 18"/>',
+    account: '<circle cx="12" cy="8" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/>',
   };
   return `<svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[name] || ''}</svg>`;
 }
@@ -726,9 +727,36 @@ const App = {
     finally { this._pairingStarting = false; }
   },
 
+  setSidebarCollapsed(collapsed, persist = true) {
+    this.sidebarCollapsed = !!collapsed;
+    document.documentElement?.classList.toggle('sidebar-collapsed', this.sidebarCollapsed);
+    const toggle = document.getElementById('btnToggleSidebar');
+    const label = this.sidebarCollapsed ? '展开侧边栏' : '收起侧边栏';
+    toggle?.setAttribute('aria-expanded', String(!this.sidebarCollapsed));
+    toggle?.setAttribute('aria-label', label);
+    if (toggle) toggle.title = label;
+    if (persist) localStorage.setItem('mc_sidebarCollapsed', String(this.sidebarCollapsed));
+    DesktopSelect.close();
+    window.dispatchEvent?.(new Event('resize'));
+  },
+
+  focusSearch() {
+    if (!this.session || this._authPending) return;
+    this.setSidebarCollapsed(false);
+    const search = document.getElementById('searchInput');
+    search?.focus(); search?.select();
+  },
+
   bindEvents() {
     if (this._eventsBound) return;
     this._eventsBound = true;
+    this.setSidebarCollapsed(localStorage.getItem('mc_sidebarCollapsed') === 'true', false);
+    document.getElementById('btnToggleSidebar')?.addEventListener('click', () => this.setSidebarCollapsed(!this.sidebarCollapsed));
+    document.getElementById('btnSidebarSearch')?.addEventListener('click', () => this.focusSearch());
+    document.querySelectorAll('.nav-item[data-page]').forEach(item => {
+      const label = item.querySelector('span')?.textContent || '';
+      item.setAttribute('aria-label', label); item.title = label;
+    });
     // Image events do not bubble; capture keeps authenticated fallback CSP-compatible.
     document.addEventListener('load', onImageLoad, true);
     document.addEventListener('error', onImageError, true);
@@ -811,8 +839,7 @@ const App = {
       if (e.key === 'f' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         if (!this.session || this._authPending) return;
-        searchInput?.focus();
-        searchInput?.select();
+        this.focusSearch();
       }
       if ((e.ctrlKey || e.metaKey) && e.key === '[') { e.preventDefault(); this.goBack(); }
       if ((e.ctrlKey || e.metaKey) && /^[1-9]$/.test(e.key) && document.getElementById('playerView').hidden) {
@@ -849,7 +876,7 @@ const App = {
   renderSidebar() {
     const libNav = document.getElementById('libraryNav');
     libNav.innerHTML = this.libraries.map(lib => `
-      <a class="nav-item" data-library-id="${Number(lib.id)}" href="#">
+      <a class="nav-item" data-library-id="${Number(lib.id)}" href="#" aria-label="${escapeHtml(lib.name)}" title="${escapeHtml(lib.name)}">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
           ${lib.kind === 'tv' ? '<rect x="2" y="7" width="20" height="15" rx="2"/><polyline points="17 2 12 7 7 2"/>' : '<rect x="2" y="2" width="20" height="20" rx="2"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/>'}
         </svg>
@@ -871,7 +898,7 @@ const App = {
     // CollectionView.kind: "user" | "builtin" | "series"
     const userCollections = HomeRows.pinned(this.homeRows || []);
     colNav.innerHTML = userCollections.map(col => `
-      <a class="nav-item" data-collection-id="${Number(col.id)}" href="#">
+      <a class="nav-item" data-collection-id="${Number(col.id)}" href="#" aria-label="${escapeHtml(col.name)}" title="${escapeHtml(col.name)}">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
         <span>${escapeHtml(col.name)}</span>
         ${col.item_count != null ? `<span class="badge">${Number(col.item_count)}</span>` : ''}
@@ -886,7 +913,11 @@ const App = {
       });
     });
     const account = document.getElementById('accountButton');
-    if (account) account.innerHTML = `<span>${escapeHtml(this.session?.nickname || this.session?.username || '账号')}</span>${uiIcon('down')}`;
+    if (account) {
+      const name = this.session?.nickname || this.session?.username || '账号';
+      account.innerHTML = `${uiIcon('account')}<span>${escapeHtml(name)}</span>${uiIcon('down')}`;
+      account.title = '账号：' + name; account.setAttribute('aria-label', '账号：' + name);
+    }
   },
 
   captureRoute() {
@@ -2324,7 +2355,7 @@ const App = {
     document.getElementById('accountPanel')?.remove();
     const panel = document.createElement('dialog'); panel.id = 'accountPanel'; panel.className = 'account-panel';
     panel.innerHTML = `<button class="panel-close" aria-label="关闭">${uiIcon('close')}</button><h2>${escapeHtml(this.session?.nickname || this.session?.username)}</h2><p>${escapeHtml(API.baseUrl)}</p>
-      <div id="panelAccountList" class="account-list" role="status">正在读取账号…</div><div class="account-actions"><button id="panelAddAccount" class="btn-secondary">添加账号</button><button id="panelSettings" class="btn-secondary">设置</button><button id="panelLogout" class="btn-secondary">退出当前账号</button></div>`;
+      <div id="panelAccountList" class="account-list" role="status">正在读取账号…</div><div class="account-actions"><button id="panelAddAccount" class="btn-secondary">添加账号</button><button id="panelSettings" class="btn-secondary">设置</button><button id="panelAbout" class="btn-secondary">关于 MovieClaw</button><button id="panelLogout" class="btn-secondary">退出当前账号</button></div>`;
     document.body.appendChild(panel); panel.showModal();
     const close = () => { panel.close(); panel.remove(); };
     panel.querySelector('.panel-close').addEventListener('click', close);
@@ -2332,8 +2363,24 @@ const App = {
     panel.addEventListener('close', () => panel.remove());
     panel.querySelector('#panelAddAccount').addEventListener('click', async () => { close(); await Player.close(); this.renderLogin({ addAccount: true }); });
     panel.querySelector('#panelSettings').addEventListener('click', () => { close(); this.selectTab('settings'); });
+    panel.querySelector('#panelAbout').addEventListener('click', () => { close(); this.showAbout(); });
     panel.querySelector('#panelLogout').addEventListener('click', () => { close(); this.logout(); });
     this.loadAccounts('panelAccountList');
+  },
+
+  async showAbout() {
+    document.getElementById('aboutDialog')?.remove();
+    const dialog = document.createElement('dialog'); dialog.id = 'aboutDialog'; dialog.className = 'about-dialog';
+    dialog.setAttribute('aria-labelledby', 'aboutTitle');
+    dialog.innerHTML = `<button class="panel-close" aria-label="关闭关于">${uiIcon('close')}</button><h2 id="aboutTitle">关于 MovieClaw</h2><div class="about-body" role="status">正在读取…</div>`;
+    dialog.querySelector('.panel-close').addEventListener('click', () => dialog.close());
+    dialog.addEventListener('close', () => dialog.remove());
+    document.body.appendChild(dialog); dialog.showModal();
+    try {
+      const info = await window.__TAURI__.core.invoke('get_about_info');
+      if (!dialog.isConnected) return;
+      dialog.querySelector('.about-body').innerHTML = `<p>版本 ${escapeHtml(info.version)} · 构建 ${escapeHtml(info.revision?.slice(0, 8) || '未知')}</p><p>媒体、账号与观看记录保存在你连接的 MovieClaw 服务器上。</p><h3>数据来源</h3><p>影视资料与图片由服务器从 TMDB 等来源获取。本产品使用 TMDB API，但未经 TMDB 认可或认证。</p><h3>开源组件</h3>${info.components.map(component => `<details><summary>${escapeHtml(component.name)}</summary><p class="about-source">${escapeHtml(component.source)}</p><pre>${escapeHtml(component.text)}</pre></details>`).join('')}`;
+    } catch (_) { if (dialog.isConnected) dialog.querySelector('.about-body').textContent = '无法读取关于信息，请重试。'; }
   },
 
   // ===== 设置 =====
@@ -2427,6 +2474,7 @@ const App = {
           <p>MovieClaw Desktop</p>
           <p style="color:var(--text-secondary);margin-top:4px;" id="settingsVersion">正在读取版本…</p>
           <button class="btn-secondary" id="btnCheckUpdates">检查更新</button>
+          <button class="btn-secondary" id="btnAbout">开源许可与数据来源</button>
         </div>
       </div>
     `;
@@ -2439,6 +2487,7 @@ const App = {
     DesktopSelect.enhance(container);
     // 事件绑定
     document.getElementById('btnCheckUpdates')?.addEventListener('click', () => window.DesktopUpdates?.check());
+    document.getElementById('btnAbout')?.addEventListener('click', () => this.showAbout());
     document.getElementById('setAutoNext')?.addEventListener('change', (e) => {
       localStorage.setItem('mc_autoNext', e.target.checked ? '1' : '0');
     });

@@ -39,6 +39,7 @@
     "allow-cancel-proxy-request",
     "allow-complete-shutdown",
     "allow-get-app-version",
+    "allow-get-about-info",
     "allow-get-embedded-player-status",
     "allow-native-auth-status",
     "allow-native-password-login",

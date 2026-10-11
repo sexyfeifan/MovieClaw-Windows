@@ -4,6 +4,49 @@ pub mod verified;
 
 const GITHUB_REPO: &str = "sexyfeifan/MovieClaw-Windows";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const CURRENT_REVISION: &str = env!("MOVIECLAW_BUILD_REVISION");
+const CURRENT_TIMESTAMP: &str = env!("MOVIECLAW_BUILD_TIMESTAMP");
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReleaseBuild {
+    version: String,
+    source_revision: String,
+    #[serde(default)]
+    source_timestamp: u64,
+}
+
+impl ReleaseBuild {
+    fn newer_than(&self, version: &str, revision: &str, timestamp: u64) -> bool {
+        self.version == version
+            && self.source_revision.len() == 40
+            && self.source_revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && revision != "unknown"
+            && self.source_revision != revision
+            && self.source_timestamp > timestamp
+    }
+}
+
+async fn release_build(release: &serde_json::Value) -> Result<Option<ReleaseBuild>, String> {
+    let tag = release["tag_name"].as_str().ok_or("发布版本无效")?;
+    if !verified::valid_tag(tag) { return Err("发布版本无效".into()); }
+    let Some(asset) = release["assets"].as_array().and_then(|assets| assets.iter().find(|asset| asset["name"] == "release-manifest.json")) else { return Ok(None); };
+    let expected = format!("https://github.com/{GITHUB_REPO}/releases/download/{tag}/release-manifest.json");
+    if asset["browser_download_url"].as_str() != Some(&expected) { return Err("发布构建信息的仓库不匹配".into()); }
+    let bytes = verified::small(verified::delivery_url(&expected)?, 64 * 1024).await?;
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
+    let build: ReleaseBuild = serde_json::from_slice(bytes).map_err(|_| "发布构建信息无效")?;
+    if build.source_revision.len() != 40 || !build.source_revision.bytes().all(|byte| byte.is_ascii_hexdigit()) { return Err("发布构建标识无效".into()); }
+    if format!("desktop-v{}", build.version) != tag && format!("v{}", build.version) != tag {
+        return Err("发布构建版本与标签不一致".into());
+    }
+    Ok(Some(build))
+}
+
+async fn same_version_update(release: &serde_json::Value) -> Result<Option<String>, String> {
+    Ok(release_build(release).await?.filter(|build| build.newer_than(CURRENT_VERSION, CURRENT_REVISION, CURRENT_TIMESTAMP.parse().unwrap_or(0)))
+        .map(|build| build.source_revision))
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateInfo {
@@ -97,14 +140,21 @@ pub async fn check_for_updates() -> Result<UpdateInfo, String> {
             }
 
             let ver = parse_version(tag);
-            if ver > best_ver {
+            if ver > best_ver || ver == best_ver && best_release.is_none() {
                 best_ver = ver;
                 best_release = Some(release);
-                has_update = true;
+                has_update = ver > current_ver;
             }
         }
     }
 
+    let mut latest_revision = None;
+    if !has_update {
+        if let Some(release) = best_release {
+            latest_revision = same_version_update(release).await?;
+            has_update = latest_revision.is_some();
+        }
+    }
     let (latest_tag, download_url, release_notes) = if let Some(release) = best_release {
         let tag = release
             .get("tag_name")
@@ -135,7 +185,9 @@ pub async fn check_for_updates() -> Result<UpdateInfo, String> {
         latest_version: latest_tag.clone(),
         download_url,
         release_notes,
-        message: if has_update {
+        message: if let Some(revision) = latest_revision {
+            format!("发现 {CURRENT_VERSION} 的新构建 {}（当前 {}）", &revision[..8], &CURRENT_REVISION[..8])
+        } else if has_update {
             format!("发现新版本 {latest_tag}（当前 {CURRENT_VERSION}）")
         } else {
             format!("已是最新版本 ({CURRENT_VERSION})")
@@ -172,6 +224,21 @@ mod tests {
         assert_eq!(parse_version("v0.2.111"), (0, 2, 111));
         assert_eq!(truncate_notes(&"更".repeat(700)).chars().count(), 500);
         assert_eq!(truncate_notes("short"), "short");
+    }
+
+    #[test]
+    fn same_version_build_updates_require_a_newer_matching_revision() {
+        let mut build = ReleaseBuild { version: "1.0.0".into(), source_revision: "b".repeat(40), source_timestamp: 200 };
+        assert!(build.newer_than("1.0.0", &"a".repeat(40), 100));
+        assert!(!build.newer_than("1.0.0", &"b".repeat(40), 100));
+        assert!(!build.newer_than("1.0.0", &"a".repeat(40), 200));
+        assert!(!build.newer_than("1.0.0", &"a".repeat(40), 300));
+        assert!(!build.newer_than("1.0.1", &"a".repeat(40), 100));
+        assert!(!build.newer_than("1.0.0", "unknown", 0));
+        build.source_timestamp = 0;
+        assert!(!build.newer_than("1.0.0", &"a".repeat(40), 100));
+        build.source_timestamp = 200; build.source_revision = "invalid".into();
+        assert!(!build.newer_than("1.0.0", &"a".repeat(40), 100));
     }
 
     #[test]

@@ -1,6 +1,29 @@
 const { test, expect } = require('@playwright/test');
 const { openDesktop, browseLibrary, state } = require('./helpers.cjs');
 
+test('native playback shows real read speed and optional diagnostics through button, shortcut and right click', async ({page,request}) => {
+  await nativeTracks(page,request);
+  await page.evaluate(()=>{window.__fixture.props['cache-speed']=4*1024*1024;window.__fixture.props['hwdec-current']='d3d11va';window.__fixture.props['demuxer-cache-duration']=42;window.__fixture.props.ipc_connected=true;});
+  await expect(page.locator('#playerSpeedBadge')).toHaveText('↓ 4.0 MB/s');
+  await expect(page.locator('#playerInfoPanel')).toBeHidden();
+  await page.locator('#btnPlayerInfo').click();
+  await expect(page.locator('#btnPlayerInfo')).toHaveAttribute('aria-expanded','true');
+  await expect(page.locator('#playerInfoBody')).toContainText('实际解码 d3d11va');
+  await expect(page.locator('#playerInfoBody')).toContainText('缓冲 42.0 秒');
+  await expect(page.locator('#playerInfoBody')).toContainText('4.0 MB/s');
+  await page.locator('#playerInfoClose').click();
+  await page.keyboard.press('i'); await expect(page.locator('#playerInfoPanel')).toBeVisible();
+  await page.evaluate(()=>window.__fixture.emit('movieclaw:player-input',{instanceId:Player.mpvInstanceId,args:['movieclaw-input','info']}));
+  await expect(page.locator('#playerInfoPanel')).toBeHidden();
+  await page.evaluate(()=>{Player.hideControls();window.__fixture.props['cache-speed']=0;});
+  await expect(page.locator('#playerSpeedBadge')).toHaveText('↓ 0 KB/s');
+  await page.locator('#playerSpeedBadge').click(); await expect(page.locator('#playerInfoPanel')).toBeVisible();
+  await page.evaluate(()=>{delete window.__fixture.props['cache-speed'];});
+  await expect(page.locator('#playerSpeedBadge')).toHaveText('↓ —');
+  await page.locator('#playerInfoClose').click(); await page.locator('#playerBack').click();
+  await expect(page.locator('#playerSpeedBadge')).toBeHidden();
+});
+
 test('native picture in picture has compact controls and restores on Escape and stop', async ({page,request}) => {
   await nativeTracks(page,request);
   await expect.poll(()=>page.evaluate(()=>window.MovieClawPlatform.status?.active)).toBe(true);
@@ -198,11 +221,11 @@ test('native fullscreen video fills its viewport while only visible controls kee
   await page.locator('#btnFullscreen').click();
   await page.setViewportSize({ width: 1920, height: 1080 });
   await page.evaluate(() => Player.hideControls());
-  await expect.poll(async () => (await geometry()).actual?.keepRects).toEqual([]);
+  await expect.poll(async () => (await geometry()).actual?.keepRects.length).toBe(1); // Persistent speed badge.
   boxes = await geometry();
   expect(boxes.actual).toMatchObject({ x: 0, y: 0, width: 1920, height: 1080 });
   await page.evaluate(() => Player.showControls());
-  await expect.poll(async () => (await geometry()).actual?.keepRects.length).toBe(2);
+  await expect.poll(async () => (await geometry()).actual?.keepRects.length).toBe(3);
   expect((await geometry()).actual).toMatchObject(boxes.expected);
   await page.evaluate(() => Player.togglePlay());
   await expect(page.getByRole('button',{name:'播放或暂停',exact:true})).toBeVisible();

@@ -28,6 +28,7 @@ async function openDesktop(page, request, options = {}) {
         f.calls.push({ command, args });
         if (command === 'get_server_url') return location.origin;
         if (command === 'get_app_version') return '0.2.111';
+        if (command === 'get_about_info') return {version:'1.0.0',revision:'a'.repeat(40),components:[{name:'mpv — GPL',source:'https://github.com/mpv-player/mpv',text:'GNU GENERAL PUBLIC LICENSE\n<img src=x onerror=alert(1)> fixture license'}]};
         if (updater && ['check_for_updates', 'download_update', 'cancel_update_download', 'install_downloaded_update', 'open_downloaded_update', 'open_release_page'].includes(command)) {
           let fixtureDownloadId;
           if (command === 'download_update') {

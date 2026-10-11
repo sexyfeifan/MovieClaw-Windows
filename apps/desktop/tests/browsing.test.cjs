@@ -52,6 +52,24 @@ test('server configuration comes from the current Rust value and updates image r
   assert.equal(vm.runInContext('resolveUrl("/images/assets/poster.jpg")', h.context), 'http://current.invalid/api/v1/images/assets/poster.jpg');
 });
 
+test('sidebar collapse persists without changing navigation and search restores the input', () => {
+  const h = harness(), classes = new Set(), attributes = {};
+  h.context.document.documentElement = { classList: { toggle(name, enabled) { if (enabled) classes.add(name); else classes.delete(name); } } };
+  const toggle = h.context.document.getElementById('btnToggleSidebar');
+  toggle.setAttribute = (name, value) => { attributes[name] = value; };
+  h.A.currentPage = 'detail'; h.A.currentParams = { itemId: 3 }; h.A.session = { username: 'fixture' };
+  h.A.setSidebarCollapsed(true);
+  assert.equal(h.storage.get('mc_sidebarCollapsed'), 'true');
+  assert.equal(attributes['aria-expanded'], 'false'); assert.equal(toggle.title, '展开侧边栏');
+  assert.ok(classes.has('sidebar-collapsed')); assert.equal(h.A.currentPage, 'detail');
+  const search = h.context.document.getElementById('searchInput'); let focused = 0;
+  search.focus = () => focused++; search.select = () => {};
+  h.A.focusSearch(); assert.equal(focused, 1); assert.equal(attributes['aria-expanded'], 'true');
+  assert.equal(h.storage.get('mc_sidebarCollapsed'), 'false'); assert.equal(h.A.currentParams.itemId, 3);
+  h.A.setSidebarCollapsed(true, false); assert.equal(h.storage.get('mc_sidebarCollapsed'), 'false');
+  h.A.session = null; h.A.focusSearch(); assert.equal(h.A.sidebarCollapsed, true);
+});
+
 test('a delayed configuration read cannot overwrite a newer server selection', async () => {
   const h = harness(), old = deferred(), recent = deferred();
   let reads = 0;

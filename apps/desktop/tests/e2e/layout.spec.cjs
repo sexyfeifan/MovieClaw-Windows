@@ -1,6 +1,45 @@
 const { test, expect } = require('@playwright/test');
 const { openDesktop, browseLibrary, state } = require('./helpers.cjs');
 
+test('sidebar collapse keeps named navigation available and survives restart at narrow widths', async ({page,request}) => {
+  await openDesktop(page, request);
+  await expect(page.locator('#sidebar')).toBeVisible();
+  await page.getByRole('button', {name:'收起侧边栏',exact:true}).click();
+  await expect(page.getByRole('button', {name:'展开侧边栏',exact:true})).toHaveAttribute('aria-expanded','false');
+  expect((await page.locator('#sidebar').boundingBox()).width).toBe(64);
+  await page.getByRole('link',{name:'测试媒体库',exact:true}).click();
+  await expect(page.locator('#posterGrid .poster-card')).toHaveCount(60);
+  await page.reload();
+  await expect(page.getByRole('button',{name:'展开侧边栏',exact:true})).toBeVisible();
+  await page.setViewportSize({width:800,height:700});
+  expect((await page.locator('#sidebar').boundingBox()).width).toBe(64);
+  await page.getByRole('button',{name:'搜索',exact:true}).click();
+  await expect(page.locator('#searchInput')).toBeFocused();
+  expect((await page.locator('#sidebar').boundingBox()).width).toBe(190);
+  await expect(page.locator('[data-page="home"] span')).toBeVisible();
+  await page.locator('#searchInput').fill('测试');
+  await expect(page.locator('.page-title')).toContainText('搜索结果');
+  await page.getByRole('button',{name:'收起侧边栏',exact:true}).click();
+  await page.keyboard.press('Control+f');
+  await expect(page.locator('#searchInput')).toBeFocused();
+  await expect(page.locator('#searchInput')).toHaveValue('测试');
+});
+
+test('about exposes local build identity, attribution and selectable inert license text from settings and account', async ({page,request}) => {
+  await openDesktop(page, request); await page.locator('[data-page="settings"]').click();
+  await page.getByRole('button',{name:'开源许可与数据来源'}).click();
+  const dialog=page.getByRole('dialog',{name:'关于 MovieClaw'});
+  await expect(dialog).toContainText('版本 1.0.0 · 构建 aaaaaaaa');
+  await expect(dialog).toContainText('未经 TMDB 认可或认证');
+  await dialog.locator('summary').click(); await expect(dialog.locator('pre')).toContainText('GNU GENERAL PUBLIC LICENSE');
+  await expect(dialog.locator('pre img')).toHaveCount(0);
+  await expect(dialog).toHaveCSS('user-select','text');
+  await page.keyboard.press('Escape'); await expect(dialog).toHaveCount(0);
+  await page.locator('#accountButton').click(); await page.getByRole('button',{name:'关于 MovieClaw',exact:true}).click();
+  await expect(dialog).toBeVisible(); await page.getByRole('button',{name:'关闭关于',exact:true}).click();
+  await expect(dialog).toHaveCount(0);
+});
+
 test('episode selection preserves decoded authenticated stills and hides pending broken images', async ({page,request}) => {
   await openDesktop(page,request,{episodeImages:true}); await browseLibrary(page);
   await page.locator('.poster-card[data-item-id="3"]').click();

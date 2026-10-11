@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod about;
 mod api_proxy;
 mod connect;
 mod credential_vault;
@@ -312,6 +313,7 @@ fn main() {
             native_ready,
             complete_shutdown,
             get_app_version,
+            about::get_about_info,
             connect::save_server_url,
             connect::load_server_url,
             connect::clear_server_url,

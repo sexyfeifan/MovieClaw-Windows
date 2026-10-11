@@ -96,7 +96,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: desktop-environment-${{ github.sha }}
-          path: apps/desktop/dist/smoke-environment.json
+          path: |
+            apps/desktop/dist/smoke-environment.json
+            apps/desktop/dist/dependency-audit.json
+            apps/desktop/dist/offline-webview2.json
           if-no-files-found: warn
           retention-days: 14
       - name: Upload browser performance evidence

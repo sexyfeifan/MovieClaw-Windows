@@ -169,6 +169,7 @@ async fn response(mut url: Url) -> Result<reqwest::Response, String> {
         let result = tokio::time::timeout(
             Duration::from_secs(30),
             HTTP.get(url.clone())
+                .header("Cache-Control", "no-cache")
                 .header(
                     "Accept",
                     if url.host_str() == Some("api.github.com") {
@@ -299,7 +300,7 @@ pub async fn download_update(
         return Err(error("UPDATE_SHUTDOWN", "程序正在退出，不能开始更新下载"));
     }
     if !valid_tag(&version)
-        || super::parse_version(&version) <= super::parse_version(super::CURRENT_VERSION)
+        || super::parse_version(&version) < super::parse_version(super::CURRENT_VERSION)
     {
         return Err(error("UPDATE_VERSION", "只能下载较新的正式版本"));
     }
@@ -327,6 +328,11 @@ pub async fn download_update(
             || release["prerelease"].as_bool() != Some(false)
         {
             return Err(error("UPDATE_RELEASE", "该版本不是可安装的正式发布"));
+        }
+        if super::parse_version(&version) == super::parse_version(super::CURRENT_VERSION)
+            && super::same_version_update(&release).await?.is_none()
+        {
+            return Err(error("UPDATE_VERSION", "该版本没有较新的构建"));
         }
         let assets = release["assets"]
             .as_array()

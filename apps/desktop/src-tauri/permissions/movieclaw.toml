@@ -122,6 +122,11 @@ description = "Allows get_app_version"
 commands.allow = ["get_app_version"]
 
 [[permission]]
+identifier = "allow-get-about-info"
+description = "Reads local build identity and bundled open-source notices"
+commands.allow = ["get_about_info"]
+
+[[permission]]
 identifier = "allow-get-embedded-player-status"
 description = "Allows get_embedded_player_status"
 commands.allow = ["get_embedded_player_status"]

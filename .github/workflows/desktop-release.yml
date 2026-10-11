@@ -15,6 +15,10 @@ on:
         default: signed-hardware
         type: choice
         options: [signed-hardware, ci-verified]
+      replace_existing:
+        description: Replace an existing release with newer CI-verified packages of the same version
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -85,8 +89,27 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+          REPLACE_EXISTING: ${{ inputs.replace_existing || false }}
         run: |
           cd dist
           sha256sum --check SHA256SUMS.txt
           VERSION=$(python3 -c "import json; print(json.load(open('release-manifest.json', encoding='utf-8-sig'))['version'])")
-          gh release create "$RELEASE_TAG" MovieClaw-Desktop-*-Setup-x64.exe MovieClaw-Desktop-*-portable-x64.zip SHA256SUMS.txt release-manifest.json --target "$GITHUB_SHA" --latest --title "MovieClaw Windows $VERSION" --notes-file "../docs/changelog/desktop-v$VERSION.md"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            test "$REPLACE_EXISTING" = "true" || { echo 'Existing releases require explicit replace_existing'; exit 1; }
+            gh release download "$RELEASE_TAG" --pattern release-manifest.json --dir previous
+            python3 - <<'PY'
+          import json
+          old = json.load(open('previous/release-manifest.json', encoding='utf-8-sig'))
+          new = json.load(open('release-manifest.json', encoding='utf-8-sig'))
+          assert new['version'] == old['version'], 'Replacement must preserve the version'
+          assert new['sourceRevision'] == old['sourceRevision'] or new['sourceTimestamp'] > old.get('sourceTimestamp', 0), 'Cannot replace with an older build'
+          PY
+            # Hide the release while replacing its manifest and packages, so clients
+            # cannot select a mixture of the old and new build of the same version.
+            gh release edit "$RELEASE_TAG" --draft=true
+            gh api "repos/$GH_REPO/git/refs/tags/$RELEASE_TAG" --method PATCH -f sha="$GITHUB_SHA" -F force=true
+            gh release upload "$RELEASE_TAG" MovieClaw-Desktop-*-Setup-x64.exe MovieClaw-Desktop-*-portable-x64.zip SHA256SUMS.txt release-manifest.json --clobber
+            gh release edit "$RELEASE_TAG" --draft=false --latest --title "MovieClaw Windows $VERSION" --notes-file "../docs/changelog/desktop-v$VERSION.md"
+          else
+            gh release create "$RELEASE_TAG" MovieClaw-Desktop-*-Setup-x64.exe MovieClaw-Desktop-*-portable-x64.zip SHA256SUMS.txt release-manifest.json --target "$GITHUB_SHA" --latest --title "MovieClaw Windows $VERSION" --notes-file "../docs/changelog/desktop-v$VERSION.md"
+          fi

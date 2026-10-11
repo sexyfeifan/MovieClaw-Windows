@@ -12,6 +12,22 @@ async function screenshot(page, info, name) {
   await info.attach(name,{path:filename,contentType:'image/png'});
 }
 
+test('a newer build of 1.0.0 is downloadable while current and failed checks stay distinct', async ({page,request}) => {
+  await updates(page,request,{updateSameVersion:true});
+  await expect(page.locator('#desktopUpdateMessage')).toContainText('1.0.0 的新构建 bbbbbbbb');
+  await page.locator('#updateDownload').click(); await expect(page.locator('#updateInstall')).toBeVisible();
+  expect((await state(request)).updateRequests.find(value=>value.command==='download_update').args).toEqual({version:'desktop-v1.0.0'});
+  await page.locator('#updateClose').click();
+  await updates(page,request,{updateCurrent:true});
+  await expect(page.locator('#desktopUpdateMessage')).toContainText('已是最新版本 (1.0.0)');
+  await expect(page.locator('#updateDownload')).toHaveCount(0);
+  await page.locator('#updateClose').click();
+  await updates(page,request,{updateCheckFailure:true});
+  await expect(page.locator('#desktopUpdateMessage')).toContainText('检查更新失败');
+  await expect(page.locator('#updateRetryCheck')).toBeVisible();
+  await expect(page.locator('#updateDownload')).toHaveCount(0);
+});
+
 test('verified updater displays release text safely and installs only the registered package', async ({page,request},info) => {
   const notes='更新中文说明 <img src=x onerror=alert(1)> '+ '改'.repeat(1600);
   await updates(page,request,{updateNotes:notes});

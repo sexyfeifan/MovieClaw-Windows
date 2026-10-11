@@ -535,7 +535,7 @@ const Player = {
     document.getElementById('btnPlayPause')?.addEventListener('click', () => this.togglePlay());
     document.getElementById('playerCenterBtn')?.addEventListener('click', () => this.togglePlay());
     this.video.addEventListener('click', () => { this.showControls(); this.autoHideControls(); });
-    this.video.addEventListener('dblclick', () => this.toggleFullscreen());
+    document.querySelector('.player-video-wrap')?.addEventListener('dblclick', () => this.toggleFullscreen());
     window.__TAURI__?.event?.listen('movieclaw:player-input', event => {
       const input = event.payload;
       if (!this.isMpv() || input.instanceId !== this.mpvInstanceId) return;
@@ -731,6 +731,7 @@ const Player = {
         case 'ArrowDown': e.preventDefault(); this.engSetVolume(this.engVolume() - 0.1); break;
         case 'm': if (once) this.toggleMute(); break;
         case 'f': if (once) this.toggleFullscreen(); break;
+        case 'i': case 'I': if (once) this.toggleInfoPanel(); break;
         case 'Home': e.preventDefault(); if (once) this.engSeekTo(0); break;
         case 'PageUp': e.preventDefault(); if (once) this.seekChapter(-1); break;
         case 'PageDown': e.preventDefault(); if (once) this.seekChapter(1); break;
@@ -888,6 +889,7 @@ const Player = {
       e.stopPropagation();
       this.toggleInfoPanel();
     });
+    document.getElementById('btnPlayerInfo')?.addEventListener('click', () => this.toggleInfoPanel());
   },
 
   toggleInfoPanel() {
@@ -895,6 +897,7 @@ const Player = {
     if (!panel) return;
     if (panel.hidden) {
       panel.hidden = false;
+      document.getElementById('btnPlayerInfo')?.setAttribute('aria-expanded', 'true');
       this._renderInfoPanel();
       clearInterval(this._infoTimer);
       this._infoTimer = setInterval(() => this._renderInfoPanel(), 500);
@@ -906,6 +909,7 @@ const Player = {
   hideInfoPanel() {
     const panel = document.getElementById('playerInfoPanel');
     if (panel) panel.hidden = true;
+    document.getElementById('btnPlayerInfo')?.setAttribute('aria-expanded', 'false');
     clearInterval(this._infoTimer);
     this._infoTimer = null;
   },
@@ -944,6 +948,19 @@ const Player = {
     const n = this._net;
     if (!n) return;
     const now = performance.now();
+    if (this.isMpv()) {
+      // mpv fetches the source itself; WebView/HLS byte counters do not measure it.
+      const speed = this.mpvState?.properties?.['cache-speed'];
+      n.bps = typeof speed === 'number' && Number.isFinite(speed) && speed >= 0 ? speed * 8 : null;
+      if (n.bps != null) {
+        n.frags.push({ at: now, bps: n.bps });
+        n.frags = n.frags.filter(sample => now - sample.at < 30000).slice(-60);
+      }
+      const badge = document.getElementById('playerSpeedBadge');
+      if (badge) { badge.hidden = false; badge.textContent = '↓ ' + (this.formatNetSpeed(n.bps) || '—'); }
+      if (!document.getElementById('playerInfoPanel')?.hidden) this._renderInfoPanel();
+      return;
+    }
     n.points.push({ at: now, bytes: n.bytes });
     // 窗口起点：至少早 1.75s（2s 窗口留 250ms 给计时器抖动）的最后一个点；
     // 起播不满窗口时用最早的点，但至少隔 900ms——sampleLoadingMeter 同款逻辑，
@@ -1081,7 +1098,10 @@ const Player = {
       }
       if (lv.details) trans.push(`播放列表 ${lv.details.live ? '直播流（边播边给）' : '点播（VOD）'}`);
     }
-    if (this.isMpv()) trans.push(`IPC ${native.ipc_connected ? '已连接' : '连接中'} · ${this.engPaused() ? '已暂停' : this._buffering ? '缓冲中' : '播放中'}`);
+    if (this.isMpv()) {
+      trans.push(`缓冲 ${(Number(native['demuxer-cache-duration']) || 0).toFixed(1)} 秒 · 播放头 ${this.engPos().toFixed(1)} 秒${this.engDuration() > 0 ? ` / ${this.engDuration().toFixed(0)} 秒` : ''}`);
+      trans.push(`IPC ${native.ipc_connected ? '已连接' : '连接中'} · ${this.engPaused() ? '已暂停' : this._buffering ? '缓冲中' : '播放中'}`);
+    }
     if (v) trans.push(`${READY[v.readyState] ?? `readyState ${v.readyState}`} · ${NETST[v.networkState] ?? `networkState ${v.networkState}`} · ${v.paused ? '已暂停' : v.seeking ? '定位中' : '播放中'}`);
     trans.push(`会话 ${s.session_id || '无（直出）'}`);
 
@@ -2216,6 +2236,7 @@ const Player = {
     const instanceId = this.mpvInstanceId;
     const alive = () => generation === this.generation && this.isMpv() && this.mpvState;
     this.mpvState = { time: (startMs ?? 0) / 1000, duration: 0, paused: true, volume: 1, muted: false, properties: {} };
+    this._net = { bytes: 0, points: [], bps: null, frags: [] };
     this._mpvRectSig = null;
     this.mpvRectTimer = setInterval(() => this.syncEmbeddedPlayerRect(), 200);
     let pending = false;
@@ -2274,6 +2295,7 @@ const Player = {
     };
     tick();
     this.mpvPollTimer = setInterval(tick, 500);
+    this.startNetMeter();
     this._stuckTimer = setTimeout(() => {
       if (alive() && !this._everPlayed) App.onPlaybackContentFailed('本机播放器加载超时', { kind: 'decode' });
     }, 35000);
@@ -2987,6 +3009,7 @@ const Player = {
     const [action, number] = args;
     if (action === 'move' || action === 'click') { this.showControls(); this.autoHideControls(); }
     else if (action === 'double-click' || action === 'fullscreen') this.toggleFullscreen();
+    else if (action === 'info') this.toggleInfoPanel();
     else if (action === 'play') this.togglePlay();
     else if (action === 'seek') this.engSeekBy(Number(number) || 0);
     else if (action === 'volume') this.engSetVolume(this.engVolume() + (Number(number) || 0));

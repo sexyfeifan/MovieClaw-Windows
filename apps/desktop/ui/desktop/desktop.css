@@ -753,7 +753,7 @@ img:not([loading]) {
 .player-view.native-pip .player-ctrl-btn { width: 28px; height: 28px; flex-shrink: 0; }
 .player-view.native-pip #btnPlayPause { width: 32px; height: 32px; }
 .player-view.native-pip #btnPrevEp, .player-view.native-pip #btnNextEp,
-.player-view.native-pip #btnSpeed, .player-view.native-pip #btnSettings,
+.player-view.native-pip #btnSpeed, .player-view.native-pip #btnSettings, .player-view.native-pip #btnPlayerInfo,
 .player-view.native-pip #volumeSlider, .player-view.native-pip #playerSpeedBadge { display: none !important; }
 .player-view.native-pip .player-center-btn { width: 48px; height: 48px; }
 .player-view.native-pip .player-center-btn svg { width: 30px; height: 30px; }
@@ -1179,6 +1179,7 @@ button.player-settings-item:focus-visible { outline-offset: -3px; }
   left: 18px;
   z-index: 40;
   width: 330px;
+  max-width: calc(100% - 36px);
   max-height: calc(100% - 150px);
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -2396,25 +2397,6 @@ button.player-settings-item:focus-visible { outline-offset: -3px; }
   .hero-title {
     font-size: 28px;
   }
-  .sidebar {
-    width: 60px;
-    min-width: 60px;
-  }
-  .sidebar-search input {
-    padding-left: 12px;
-  }
-  .sidebar-search .search-icon {
-    display: none;
-  }
-  .nav-item span,
-  .nav-section-label,
-  .nav-item .badge {
-    display: none;
-  }
-  .nav-item {
-    justify-content: center;
-    padding: 8px;
-  }
   .poster-grid {
     grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
     gap: 14px;
@@ -2884,6 +2866,34 @@ button.player-settings-item:focus-visible { outline-offset: -3px; }
 
 /* Shared browsing tokens from MacTheme / MacShelf at 9139a638. */
 :root { --sidebar-width: 244px; --page-edge: 32px; --shelf-gap: 18px; --shelf-spacing: 40px; --poster-width: 168px; --landscape-width: 296px; --focus-ring: #d8e2f5; }
+.sidebar-toolbar { display: flex; flex-direction: column; align-items: flex-start; padding: 0 12px 10px; gap: 6px; }
+.sidebar-tool { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 32px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--text-secondary); cursor: pointer; }
+.sidebar-tool:hover { background: var(--glass-bg); color: var(--text); }
+.sidebar-search-button { display: none; }
+.account-button > .ui-icon:first-child { flex-shrink: 0; }
+.account-button > span { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+:root.sidebar-collapsed { --sidebar-width: 64px; }
+.sidebar-collapsed .sidebar-toolbar { align-items: center; padding: 0 8px 8px; }
+.sidebar-collapsed #btnToggleSidebar svg { transform: scaleX(-1); }
+.sidebar-collapsed .sidebar-search-button { display: inline-flex; }
+.sidebar-collapsed .sidebar-search, .sidebar-collapsed .nav-item span, .sidebar-collapsed .account-button span, .sidebar-collapsed .account-button > .ui-icon:last-child { display: none; }
+.sidebar-collapsed .nav-section-label { font-size: 0; padding: 8px 0; margin: 0 8px; border-top: 1px solid var(--glass-border); }
+.sidebar-collapsed .nav-item { justify-content: center; min-height: 36px; padding: 8px; }
+.sidebar-collapsed .account-button { justify-content: center; padding: 10px; }
+.about-dialog { width: min(700px, calc(100vw - 48px)); max-height: calc(100vh - 80px); padding: 24px; border: 1px solid var(--glass-border-strong); border-radius: 16px; background: #202126; color: var(--text); overflow-y: auto; user-select: text; }
+.about-dialog::backdrop { background: #0008; }
+.about-dialog h2 { margin-bottom: 18px; }
+.about-dialog h3 { margin: 22px 0 10px; }
+.about-dialog p { color: var(--text-secondary); margin: 10px 0; }
+.about-dialog details { border-top: 1px solid var(--glass-border); padding: 12px 0; }
+.about-dialog summary { cursor: pointer; font-size: 14px; }
+.about-dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; }
+.about-source { overflow-wrap: anywhere; font-size: 12px; }
+@media (max-width: 640px) {
+  .player-view:not(.native-pip) #btnSpeed, .player-view:not(.native-pip) #btnPlayerInfo, .player-view:not(.native-pip) #volumeSlider { display: none; }
+  .player-transport { padding-left: 12px; padding-right: 12px; }
+  .player-transport-center { gap: 8px; }
+}
 button, input, select { font-family: var(--font); }
 .ui-icon { width: 20px; height: 20px; flex: 0 0 20px; vertical-align: middle; pointer-events: none; }
 .poster-hover button { display: inline-flex; align-items: center; justify-content: center; }

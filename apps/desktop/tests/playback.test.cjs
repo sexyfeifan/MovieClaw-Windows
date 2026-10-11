@@ -4,6 +4,20 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
+test('native speed uses mpv bytes per second and never substitutes stale HLS traffic', () => {
+  const h = harness();
+  const badge = {hidden:true,textContent:''}; h.elements.set('playerSpeedBadge',badge);
+  h.elements.set('playerInfoPanel',{hidden:true});
+  h.P.activeEngine = 'mpv'; h.P._net = {bytes:90000000,points:[],bps:999999,frags:[]};
+  h.win.__MOVIECLAW_MPV_ACTIVE = true;
+  h.P.mpvState = {properties:{'cache-speed':3*1024*1024}};
+  h.P._tickNetMeter(); assert.equal(badge.textContent,'↓ 3.0 MB/s'); assert.equal(badge.hidden,false);
+  h.P.mpvState.properties['cache-speed']=0; h.P._tickNetMeter(); assert.equal(badge.textContent,'↓ 0 KB/s');
+  delete h.P.mpvState.properties['cache-speed']; h.P._tickNetMeter(); assert.equal(badge.textContent,'↓ —');
+  h.P.mpvState.properties['cache-speed']=-1; h.P._tickNetMeter(); assert.equal(h.P._net.bps,null);
+  h.P.stopNetMeter(); assert.equal(badge.hidden,true);
+});
+
 function deferred() {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
