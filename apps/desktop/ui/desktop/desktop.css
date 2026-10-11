@@ -1147,6 +1147,8 @@ button.player-settings-item:focus-visible { outline-offset: -3px; }
 
 /* 实时速度徽标：控制条淡出时保持可见，所以独立于 topbar/controls */
 .player-speed-badge {
+  transform: translateZ(0);
+  min-width: 96px;
   position: absolute;
   top: 16px;
   right: 18px;

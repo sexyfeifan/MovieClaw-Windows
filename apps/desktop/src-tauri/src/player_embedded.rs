@@ -125,6 +125,7 @@ static MPV_IPC: Mutex<Option<crate::mpv_ipc::Session>> = Mutex::new(None);
 static MPV_MEDIA_GRANTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static MPV_SUBTITLE_SOURCES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static MPV_INPUT_FILE: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+static HOST_INPUT: Mutex<Option<(tauri::AppHandle, u64)>> = Mutex::new(None);
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -222,7 +223,41 @@ unsafe extern "system" fn host_wnd_proc(
     wparam: usize,
     lparam: isize,
 ) -> isize {
+    // mpv disables its --wid child on Windows. Mouse events arrive at this host.
+    if let Some(action) = host_mouse_action(msg) {
+        use tauri::Emitter;
+        let context = HOST_INPUT.try_lock().ok().and_then(|guard| guard.clone());
+        if let Some((app, instance)) = context {
+            let _ = app.emit("movieclaw:player-input", serde_json::json!({
+                "instanceId": instance, "args": ["movieclaw-input", action]
+            }));
+        }
+        return 0;
+    }
     DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
+fn host_mouse_action(message: u32) -> Option<&'static str> {
+    match message {
+        0x0200 => Some("move"),
+        0x0202 => Some("click"),
+        0x0203 => Some("double-click"),
+        0x0205 => Some("info"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod host_input_tests {
+    #[test]
+    fn disabled_mpv_child_mouse_messages_are_handled_by_the_host() {
+        assert_eq!(super::host_mouse_action(0x0200), Some("move"));
+        assert_eq!(super::host_mouse_action(0x0202), Some("click"));
+        assert_eq!(super::host_mouse_action(0x0203), Some("double-click"));
+        assert_eq!(super::host_mouse_action(0x0205), Some("info"));
+        assert_eq!(super::host_mouse_action(0x0201), None);
+        assert_eq!(super::host_mouse_action(0x0005), None);
+    }
 }
 
 /// 注册 mpv 宿主子窗口类（进程内一次）。CreateWindowExW 用自定义类必须先注册，
@@ -234,7 +269,7 @@ fn ensure_host_class() -> isize {
     INIT.call_once(|| {
         let class_name = wide("MovieClawMpvHost");
         let wc = WNDCLASSW {
-            style: 0,
+            style: 0x0008, // CS_DBLCLKS: request WM_LBUTTONDBLCLK on the host.
             lpfnWndProc: Some(host_wnd_proc),
             cbClsExtra: 0,
             cbWndExtra: 0,
@@ -333,6 +368,7 @@ pub fn launch_embedded_player(
     // 先关闭已有实例
     stop_embedded_player_inner(None).ok();
     MPV_INSTANCE_ID.store(instance_id.unwrap_or(0), Ordering::SeqCst);
+    *HOST_INPUT.lock().unwrap() = Some((app.clone(), instance_id.unwrap_or(0)));
     PARENT_HWND.store(parent_hwnd, Ordering::SeqCst);
 
     let mpv = find_mpv().ok_or("未找到 mpv")?;
@@ -565,6 +601,7 @@ fn stop_embedded_player_inner(instance_id: Option<u64>) -> Result<bool, String> 
         let _ = std::fs::remove_file(path);
     }
     MPV_INSTANCE_ID.store(0, Ordering::SeqCst);
+    *HOST_INPUT.lock().unwrap() = None;
 
     // 销毁子窗口
     let hwnd = CHILD_HWND.swap(0, Ordering::SeqCst);
