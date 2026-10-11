@@ -70,6 +70,23 @@ test('sidebar collapse persists without changing navigation and search restores 
   h.A.session = null; h.A.focusSearch(); assert.equal(h.A.sidebarCollapsed, true);
 });
 
+test('sidebar renders library and account navigation without a collection container', () => {
+  const h = harness(), requested = [];
+  const getElement = h.context.document.getElementById;
+  h.context.document.getElementById = id => {
+    requested.push(id);
+    assert.notEqual(id, 'collectionNav');
+    return getElement(id);
+  };
+  h.A.libraries = [{ id: 1, name: '电影库', kind: 'movie', stats: { item_count: 245 } }];
+  h.A.homeRows = [{ type: 'collection', collection_id: 8, collection: { id: 8, name: '精选' } }];
+  h.A.session = { username: 'fixture' };
+  h.A.renderSidebar();
+  assert.match(h.elements.get('libraryNav').innerHTML, /data-library-id="1"/);
+  assert.match(h.elements.get('accountButton').innerHTML, /fixture/);
+  assert.deepEqual(requested, ['libraryNav', 'accountButton']);
+});
+
 test('a delayed configuration read cannot overwrite a newer server selection', async () => {
   const h = harness(), old = deferred(), recent = deferred();
   let reads = 0;
