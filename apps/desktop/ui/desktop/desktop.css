@@ -1956,22 +1956,66 @@ button.player-settings-item:focus-visible { outline-offset: -3px; }
 }
 
 /* 设置 */
-.settings-body {
-  padding: 28px 32px;
+.settings-page {
+  max-width: 1064px;
+  margin: 0 auto;
+  padding: 28px 32px 40px;
+  container-type: inline-size;
 }
-
+.settings-page > .page-header { padding: 0; margin-bottom: 24px; }
+.settings-body {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
 .settings-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
   background: var(--surface-raised);
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
   padding: 24px;
-  max-width: 480px;
 }
-
 .settings-card h3 {
   font-size: 15px;
   font-weight: 650;
-  margin-bottom: 8px;
+  margin-bottom: 16px;
+}
+.settings-playback, .settings-about { grid-column: 1 / -1; }
+.settings-preferences {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 32px;
+}
+.settings-page .settings-row { min-height: 56px; gap: 16px; }
+.settings-preferences .settings-row:nth-last-child(-n+2) { border-bottom: none; }
+.settings-page .settings-row > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.settings-page .settings-toggle { flex: 0 0 44px; }
+.settings-page .select-trigger { width: 116px; flex: 0 0 116px; }
+.settings-value { color: var(--text-secondary); overflow-wrap: anywhere; }
+.settings-row > .settings-value { text-align: right; min-width: 0; }
+.settings-page .settings-actions {
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-top: 20px;
+  margin-top: auto;
+}
+.settings-page .settings-actions .btn-secondary { flex: 1 1 auto; justify-content: center; min-height: 40px; height: auto; padding: 10px 16px; border-radius: var(--radius-sm); }
+.settings-page .settings-account-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; flex-shrink: 0; }
+.settings-page .settings-account-actions .btn-secondary { height: 30px; border-radius: var(--radius-sm); }
+.settings-about { flex-direction: row; align-items: center; justify-content: space-between; gap: 24px; }
+.settings-about .settings-actions { padding-top: 0; margin-top: 0; }
+.settings-product .settings-value { margin-top: 4px; font-size: 13px; }
+@container (max-width: 720px) {
+  .settings-body, .settings-preferences { grid-template-columns: minmax(0, 1fr); }
+  .settings-preferences .settings-row:nth-last-child(2) { border-bottom: 1px solid rgba(255,255,255,0.05); }
+  .settings-about { flex-direction: column; align-items: stretch; }
+  .settings-about .settings-actions { padding-top: 20px; }
+}
+@media (max-width: 700px) {
+  .settings-page { padding: 24px 16px 32px; }
+  .settings-card { padding: 20px; }
 }
 
 /* ===== 首页英雄横幅 ===== */

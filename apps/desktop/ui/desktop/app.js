@@ -2387,12 +2387,14 @@ const App = {
   renderSettings(container) {
     const generation = this.viewGeneration;
     container.innerHTML = `
+      <div class="settings-page">
       <div class="page-header">
         <h1 class="page-title">设置</h1>
       </div>
       <div class="settings-body">
-        <div class="settings-card">
+        <div class="settings-card settings-playback">
           <h3>播放设置</h3>
+          <div class="settings-preferences">
           <div class="settings-row">
             <span>自动播放下一集</span>
             <label class="settings-toggle">
@@ -2406,14 +2408,6 @@ const App = {
               <input type="checkbox" id="setHwDecode" aria-label="硬件解码" ${localStorage.getItem('mc_hwDecode') !== '0' ? 'checked' : ''}>
               <span class="toggle-slider"></span>
             </label>
-          </div>
-          <div class="settings-row">
-            <span>默认字幕语言</span>
-            <select id="setSubLang" class="settings-select" aria-label="默认字幕语言">
-              <option value="">关闭</option>
-              <option value="zh" ${localStorage.getItem('mc_subLang') === 'zh' ? 'selected' : ''}>中文</option>
-              <option value="en" ${localStorage.getItem('mc_subLang') === 'en' ? 'selected' : ''}>English</option>
-            </select>
           </div>
           <div class="settings-row">
             <span>播放时置顶</span>
@@ -2430,6 +2424,14 @@ const App = {
             </label>
           </div>
           <div class="settings-row">
+            <span>默认字幕语言</span>
+            <select id="setSubLang" class="settings-select" aria-label="默认字幕语言">
+              <option value="">关闭</option>
+              <option value="zh" ${localStorage.getItem('mc_subLang') === 'zh' ? 'selected' : ''}>中文</option>
+              <option value="en" ${localStorage.getItem('mc_subLang') === 'en' ? 'selected' : ''}>English</option>
+            </select>
+          </div>
+          <div class="settings-row">
             <span>默认音轨语言</span>
             <select id="setAudioLang" class="settings-select" aria-label="默认音轨语言">
               <option value="">自动</option>
@@ -2437,13 +2439,14 @@ const App = {
               <option value="en" ${localStorage.getItem('mc_audioLang') === 'en' ? 'selected' : ''}>English</option>
             </select>
           </div>
+          </div>
         </div>
 
         <div class="settings-card">
           <h3>服务器</h3>
           <div class="settings-row">
             <span>当前服务器</span>
-            <span style="color:var(--text-secondary)">${escapeHtml(API.baseUrl || '未配置')}</span>
+            <span class="settings-value">${escapeHtml(API.baseUrl || '未配置')}</span>
           </div>
           <div class="settings-actions">
             <button class="btn-secondary" id="btnSwitchServer">更改服务器</button>
@@ -2469,13 +2472,18 @@ const App = {
           </div>
         </div>
 
-        <div class="settings-card">
+        <div class="settings-card settings-about">
+          <div class="settings-product">
           <h3>关于</h3>
           <p>MovieClaw Desktop</p>
-          <p style="color:var(--text-secondary);margin-top:4px;" id="settingsVersion">正在读取版本…</p>
+          <p class="settings-value" id="settingsVersion">正在读取版本…</p>
+          </div>
+          <div class="settings-actions">
           <button class="btn-secondary" id="btnCheckUpdates">检查更新</button>
           <button class="btn-secondary" id="btnAbout">开源许可与数据来源</button>
+          </div>
         </div>
+      </div>
       </div>
     `;
     window.__TAURI__.core.invoke('get_app_version').then(version => {
@@ -2531,7 +2539,7 @@ const App = {
       if (!this.isCurrent(generation)) return;
       list.innerHTML = accounts.map(acc => `
         <div class="settings-row" data-username="${escapeHtml(acc.username)}">
-          <span>${escapeHtml(acc.nickname || acc.username)}</span><div>
+          <span>${escapeHtml(acc.nickname || acc.username)}</span><div class="settings-account-actions">
             ${acc.active ? '<span style="color:var(--accent);font-size:12px">当前</span>' : '<button class="btn-secondary account-switch" style="padding:4px 12px;font-size:12px">切换</button>'}
             <button class="btn-secondary account-remove" style="padding:4px 12px;font-size:12px">移除</button>
           </div>

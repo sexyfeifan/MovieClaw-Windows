@@ -277,3 +277,47 @@ test('strict CSP preserves authenticated images, logo fallback and the person ba
   expect(await page.locator('[onload],[onerror],[onclick]').count()).toBe(0);
   expect(await page.evaluate(()=>window.__imageCspViolations)).toEqual([]);
 });
+
+for (const width of [1280, 900, 640]) {
+  test(`settings groups align and remain usable at ${width}px`, async ({page,request},info) => {
+    await page.setViewportSize({width,height:900});
+    await openDesktop(page,request);
+    if (width===640) await page.getByRole('button',{name:'收起侧边栏',exact:true}).click();
+    await page.locator('[data-page="settings"]').click();
+    await expect(page.locator('#accountList .settings-row')).toHaveCount(2);
+    const cards=page.locator('.settings-body > .settings-card');
+    await expect(cards).toHaveCount(4);
+    const [playback,server,accounts,about]=await Promise.all([0,1,2,3].map(i=>cards.nth(i).boundingBox()));
+    const content=await page.locator('#content').boundingBox();
+    expect(Math.abs(playback.x-content.x-(content.x+content.width-playback.x-playback.width))).toBeLessThanOrEqual(1);
+    expect(Math.abs(server.width-accounts.width)).toBeLessThanOrEqual(1);
+    if (width===1280) {
+      expect(server.y).toBe(accounts.y);
+      const actions=await Promise.all([1,2].map(i=>cards.nth(i).locator('.settings-actions').boundingBox()));
+      expect(Math.abs(actions[0].y-actions[1].y)).toBeLessThanOrEqual(1);
+    } else {
+      expect(accounts.y).toBeGreaterThan(server.y+server.height);
+    }
+    expect(about.y).toBeGreaterThan(accounts.y+accounts.height);
+    const sub=await page.locator('#setSubLangTrigger').boundingBox();
+    const audio=await page.locator('#setAudioLangTrigger').boundingBox();
+    expect(sub.width).toBe(audio.width);
+    await page.getByRole('combobox',{name:'默认音轨语言',exact:true}).click();
+    await page.getByRole('option',{name:'English',exact:true}).click();
+    expect(await page.evaluate(()=>localStorage.getItem('mc_audioLang'))).toBe('en');
+    // A saved server address or account name must wrap rather than push controls out.
+    await page.locator('.settings-row > .settings-value').evaluate(el=>el.textContent='https://'+ 'server-name-'.repeat(12)+'.example.com:3000');
+    await page.locator('#accountList .settings-row > span').first().evaluate(el=>el.textContent='account-name-'.repeat(12));
+    for (const button of await page.locator('.settings-page button').all()) {
+      await button.scrollIntoViewIfNeeded();
+      const box=await button.boundingBox();
+      expect(box.x).toBeGreaterThanOrEqual(content.x);
+      expect(box.x+box.width).toBeLessThanOrEqual(content.x+content.width);
+    }
+    expect(await page.locator('#content').evaluate(el=>el.scrollWidth<=el.clientWidth+1)).toBe(true);
+    await page.locator('.settings-row > .settings-value').evaluate(el=>el.textContent='http://nas.local:3000');
+    await page.locator('#accountList .settings-row > span').first().evaluate(el=>el.textContent='当前账号');
+    await page.locator('#content').evaluate(el=>el.scrollTop=0);
+    await page.screenshot({path:info.outputPath('settings.png')});
+  });
+}
