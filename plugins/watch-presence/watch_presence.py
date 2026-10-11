@@ -1,6 +1,7 @@
 """Trusted inline plugin for MovieClaw 0.36. No separate process or dependency.
 
-Only opted-in accounts and explicitly allowed libraries are projected. Host
+Other accounts require opt-in and explicitly allowed libraries. A member can
+privately view their own devices without publishing their activity. Host
 playback logs remain private host data; no copy of the watch history is stored.
 """
 
@@ -163,6 +164,17 @@ class Presence:
             if row.status == "active"
         }
         result = {}
+        # Self access is private account access, independent of public consent.
+        own_libraries = await visible_library_ids(db, viewer)
+        if own_libraries:
+            member = members.get(viewer.owner_id)
+            result[viewer.owner_id] = {
+                "member_id": viewer.owner_id,
+                "name": (member.nickname or member.username) if member else "管理员",
+                "is_self": True,
+                "shared": own_libraries,
+                "accessible": own_libraries,
+            }
         for scope, value in saved.items():
             owner = int(scope.split(":")[1])
             if owner == viewer.owner_id or owner < 0 or (owner and owner not in members):
@@ -179,6 +191,7 @@ class Presence:
                 result[owner] = {
                     "member_id": owner,
                     "name": name,
+                    "is_self": False,
                     "shared": shared,
                     "accessible": accessible,
                 }
@@ -217,12 +230,14 @@ class Presence:
         targets = {}
         for unit, context in contexts.items():
             rating = ratings.get(unit[0])
-            if ADULT_RATING.fullmatch(rating or "") or not owner_limit.allows(rating):
+            if (
+                not owner.get("is_self") and ADULT_RATING.fullmatch(rating or "")
+            ) or not owner_limit.allows(rating):
                 continue
             libs = placements.get(unit, set())
             # Existing reports/logs do not always identify the physical file. If
             # the same episode also exists in a private library, fail closed.
-            if not libs or not libs.issubset(owner["shared"]):
+            if not libs or (not owner.get("is_self") and not libs.issubset(owner["shared"])):
                 continue
             accessible = libs & owner["accessible"]
             if not accessible:
@@ -277,8 +292,14 @@ class Presence:
             return response(
                 {
                     "members": [
-                        {"member_id": owner, "name": info["name"], "sessions": live[owner]}
+                        {
+                            "member_id": owner,
+                            "name": info["name"],
+                            "is_self": info["is_self"],
+                            "sessions": live[owner],
+                        }
                         for owner, info in owners.items()
+                        if not info["is_self"] or live[owner]
                     ],
                     "sampled_at": stamp(utcnow()),
                     "refresh_seconds": 8,

@@ -21,12 +21,47 @@ test('server privacy page lets existing Web and Mac users opt in without another
 });
 test('entry and sharing default off, only explicit libraries become public and opt-out is immediate',async({page,request})=>{
  await settings(page,request);await expect(page.locator('#setFriendsVisible')).not.toBeChecked();await expect(page.locator('#setFriendsShare')).not.toBeChecked();
+ await expect(page.locator('#btnBrowseFriends')).toBeHidden();
  await expect(page.locator('#friendsLibraries input:checked')).toHaveCount(0);await expect(page.locator('#friendsLibraries input[value="4"]')).toBeDisabled();
  await page.locator('#setFriendsShare').check();await page.locator('#saveFriendsPrivacy').click();await expect(page.locator('#friendsPrivacyState')).toContainText('请选择');
  await page.locator('#friendsLibraries input[value="1"]').check();await page.locator('#setFriendsShare').check();await page.locator('#saveFriendsPrivacy').click();
  await expect(page.locator('#friendsPrivacyState')).toContainText('已保存');expect((await state(request)).friendsPreferences.fixture).toEqual({share_enabled:true,library_ids:[1]});
  await page.locator('#setFriendsShare').uncheck();await expect(page.locator('#friendsPrivacyState')).toContainText('共享已关闭');expect((await state(request)).friendsPreferences.fixture.share_enabled).toBe(false);
 });
+test('homepage entry shows own simultaneous devices without sharing and merges account history',async({page,request},info)=>{
+ await settings(page,request,{friendsSelf:true,friendsEmpty:true});
+ await expect(page.locator('#setFriendsShare')).not.toBeChecked();
+ await page.locator('#setFriendsVisible').check();
+ await page.locator('[data-page="home"]').click();await page.locator('#btnBrowseFriends').click();
+ await expect(page.locator('#homeFriendsDialog')).toBeVisible();
+ await expect(page.locator('.friends-member')).toHaveCount(1);
+ await expect(page.locator('.friends-member > header strong')).toHaveText('我的设备');
+ await expect(page.locator('.friends-watch')).toHaveCount(2);
+ await expect(page.locator('.friends-watch').nth(0)).toContainText('我的 Windows 电脑');
+ await expect(page.locator('.friends-watch').nth(1)).toContainText('我的 MacBook');
+ await page.screenshot({path:info.outputPath('home-own-devices.png')});
+ await page.getByRole('button',{name:'最近观看',exact:true}).click();
+ await expect(page.locator('.friends-watch')).toHaveCount(1);
+ await expect(page.locator('#homeFriendsDialog .friends-content')).toContainText('不同设备按影片或单集合并');
+ expect((await state(request)).friendsPreferences.fixture.share_enabled).toBe(false);
+ await page.keyboard.press('Escape');await expect(page.locator('#homeFriendsDialog')).toHaveCount(0);
+ await page.locator('[data-page="settings"]').click();await page.locator('#setFriendsVisible').uncheck();
+ await expect(page.locator('#btnBrowseFriends')).toBeHidden();
+});
+for (const mode of ['从头看','跟上进度']) {
+ test(`homepage can ${mode} without a hidden player confirmation`,async({page,request})=>{
+  await settings(page,request,{friendsSelf:true,friendsEmpty:true});
+  await page.locator('#setFriendsVisible').check();await page.locator('[data-page="home"]').click();
+  await page.locator('#btnBrowseFriends').click();
+  await page.locator('#homeFriendsDialog .friends-watch').nth(1).getByRole('button',{name:mode,exact:true}).click();
+  await expect(page.locator('#homeFriendsDialog')).toHaveCount(0);await expect(page.locator('#playerView')).toBeVisible();
+  await expect.poll(async()=> (await state(request)).requests.filter(r=>r.path==='/playback/sessions').length).toBe(1);
+  const playback=(await state(request)).requests.find(r=>r.path==='/playback/sessions').body;
+  expect(playback.media_item_id).toBe(3);expect(playback.season_number).toBe(2);expect(playback.episode_number).toBe(3);
+  if(mode==='从头看')expect(playback.start_ms).toBe(0);
+  else {expect(playback.start_ms).toBeGreaterThanOrEqual(420000);expect(playback.start_ms).toBeLessThan(430000);}
+ });
+}
 test('display setting survives reload without enabling sharing and is scoped to identity',async({page,request})=>{
  await settings(page,request);await page.locator('#setFriendsVisible').check();await page.reload();await page.locator('[data-page="settings"]').click();await expect(page.locator('#setFriendsVisible')).toBeChecked();await expect(page.locator('#setFriendsShare')).not.toBeChecked();
  expect(await page.evaluate(()=>{App.session.username='another';return DesktopFriends.enabled();})).toBe(false);

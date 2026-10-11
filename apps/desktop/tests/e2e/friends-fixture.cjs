@@ -21,7 +21,10 @@ module.exports=async({route,req,res,state,url,body,json,ok})=>{
   }
   return send({...state.friendsPreferences[account],libraries:[{id:1,name:'电影库',shareable:true},{id:2,name:'剧集库',shareable:true},{id:4,name:'私人隐藏库',shareable:false,reason:'首页隐藏媒体库不参与共享'}],protocol_version:1,history_days:7,history_limit:20});
  }
- if(route===base+'/members')return send({members:state.friendsEmpty || state.friendsRevoked ? [] : [{member_id:7,name:state.friendsXss ? '<img src=x onerror=alert(1)>' : 'Alice',sessions:state.friendsNoLive ? [] : [live]}],refresh_seconds:8});
+ const self={member_id:5,name:account,is_self:true,sessions:[{...live,entry_id:'own-windows',device:'我的 Windows 电脑'},{...live,entry_id:'own-mac',device:'我的 MacBook',position_ms:420000}]};
+ if(route===base+'/members')return send({members:[...(state.friendsSelf ? [self] : []),...(state.friendsEmpty || state.friendsRevoked ? [] : [{member_id:7,name:state.friendsXss ? '<img src=x onerror=alert(1)>' : 'Alice',is_self:false,sessions:state.friendsNoLive ? [] : [live]}])],refresh_seconds:8});
+ if(state.friendsSelf && route===base+'/members/5/history')return send({items:[{...history,position_ms:420000,device:'我的 MacBook'}]});
+ if(state.friendsSelf && route===base+'/members/5/play')return send(self.sessions.find(row=>row.entry_id===url.searchParams.get('entry_id')) || history);
  if(state.friendsRevoked)return error('共享已关闭');
  if(route===base+'/members/7/history')return send({items:[history]});
  if(route===base+'/members/7/play'){

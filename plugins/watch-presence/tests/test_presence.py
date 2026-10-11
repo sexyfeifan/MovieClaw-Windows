@@ -85,7 +85,11 @@ def server(tmp_path, monkeypatch):
         assert uploaded.status_code == 200, uploaded.text
         approved = client.post(
             "/api/v1/app/plugins/packages/watch-presence/approve",
-            json={"version": "1.0.0", "operations": [], "allow_inline": True},
+            json={
+                "version": "1.0.0",
+                "operations": [],
+                "allow_inline": True,
+            },
         )
         assert approved.status_code == 200, approved.text
         assert approved.json()["data"]["status"] == "active", approved.text
@@ -421,6 +425,70 @@ def test_stale_pause_multiple_devices_and_viewer_permissions(server):
     client.portal.call(restrict)
     assert client.get(BASE + "/members").json()["data"]["members"] == []
     assert client.get(BASE + f"/members/{ids['alice']}/history").status_code == 404
+
+
+def test_own_devices_are_private_without_public_opt_in(server):
+    client, ids, use = server
+    start(ids, 11, "own-windows")
+    start(ids, 22, "own-mac")
+    result = client.get(BASE + "/members")
+    own = result.json()["data"]["members"]
+    assert len(own) == 1 and own[0]["is_self"] is True
+    assert own[0]["member_id"] == ids["alice"]
+    assert {r["media"]["media_item_id"] for r in own[0]["sessions"]} == {11, 22}
+    assert len({r["entry_id"] for r in own[0]["sessions"]}) == 2
+    assert "own-windows" not in result.text and "own-mac" not in result.text
+    entry = own[0]["sessions"][0]
+    assert (
+        client.get(
+            BASE + f"/members/{ids['alice']}/play",
+            params={"kind": "live", "entry_id": entry["entry_id"]},
+        ).status_code
+        == 200
+    )
+    assert client.get(BASE + "/preferences").json()["data"]["share_enabled"] is False
+    use("bob")
+    assert client.get(BASE + "/members").json()["data"]["members"] == []
+    assert client.get(BASE + f"/members/{ids['alice']}/history").status_code == 404
+    assert (
+        client.get(
+            BASE + f"/members/{ids['alice']}/play",
+            params={"kind": "live", "entry_id": entry["entry_id"]},
+        ).status_code
+        == 404
+    )
+
+
+def test_same_account_sessions_split_but_history_merges_by_unit(server):
+    client, ids, use = server
+    start(ids, 11, "windows-device")
+    start(ids, 11, "mac-device")
+    sessions = client.get(BASE + "/members").json()["data"]["members"][0]["sessions"]
+    assert len(sessions) == 2 and sessions[0]["entry_id"] != sessions[1]["entry_id"]
+
+    async def log_again():
+        async with get_database().session() as db:
+            db.add(
+                PlaybackLog(
+                    member_id=ids["alice"],
+                    media_item_id=11,
+                    title="影片 11",
+                    device_name="Mac",
+                    end_position_ms=240000,
+                )
+            )
+            await db.commit()
+
+    client.portal.call(log_again)
+    history = client.get(BASE + f"/members/{ids['alice']}/history").json()["data"]["items"]
+    same = [row for row in history if row["media"]["media_item_id"] == 11]
+    assert len(same) == 1 and same[0]["position_ms"] == 240000
+    share(client, (1,))
+    use("bob")
+    sessions = client.get(BASE + "/members").json()["data"]["members"][0]["sessions"]
+    assert len(sessions) == 2
+    history = client.get(BASE + f"/members/{ids['alice']}/history").json()["data"]["items"]
+    assert len(history) == 1 and history[0]["position_ms"] == 240000
 
 
 def test_ambiguous_private_duplicate_and_history_age_fail_closed(server):

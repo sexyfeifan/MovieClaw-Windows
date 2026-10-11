@@ -1,5 +1,21 @@
 .friends-panel {position:absolute;z-index:45;left:16px;top:68px;bottom:136px;width:340px;max-width:calc(100% - 32px);display:flex;flex-direction:column;background:rgba(24,25,30,.98);border:1px solid rgba(255,255,255,.14);border-radius:18px;box-shadow:0 16px 50px #0007;color:#f4f4f7;overflow:hidden}
 .friends-panel[hidden] {display:none}
+#btnPlayerFriends {width:auto;display:flex;align-items:center;gap:7px;padding:0 12px;white-space:nowrap;font-size:12px}
+#btnPlayerFriends[hidden] {display:none}
+#btnBrowseFriends {width:100%;border:0;background:transparent;font:inherit;text-align:left;cursor:pointer}
+#btnBrowseFriends[hidden] {display:none}
+.friends-home-dialog {margin:auto;padding:0;width:min(640px,calc(100vw - 32px));max-height:calc(100vh - 64px);color:#f4f4f7;background:#202126;border:1px solid #ffffff24;border-radius:18px;box-shadow:0 16px 50px #0007;overflow:hidden}
+.friends-home-dialog[open] {display:flex;flex-direction:column}
+.friends-home-dialog::backdrop {background:#0008}
+.friends-home-dialog > header {display:flex;align-items:center;justify-content:space-between;padding:20px 24px;border-bottom:1px solid #ffffff14;gap:16px}
+.friends-home-dialog h2 {font-size:20px;margin:0}
+.friends-home-dialog header p {margin:6px 0 0}
+.friends-home-dialog .friends-content {padding:20px 24px}
+.friends-home-dialog .friends-close {align-self:flex-start}
+.friends-guide {margin:0 0 18px;padding:10px 12px;border-radius:10px;background:#548cff12}
+.friends-help {margin:14px 0;padding:12px 14px;border:1px solid #ffffff18;border-radius:10px}
+.friends-help summary {cursor:pointer;color:#c1d5ff;font-size:13px}
+.friends-help code {display:block;overflow-wrap:anywhere;user-select:all;margin-top:8px;font-size:12px;color:#d8deed}
 .friends-panel > header {display:flex;align-items:center;gap:12px;padding:16px 18px;border-bottom:1px solid #ffffff14}
 .friends-panel h2 {margin:0;flex:1;font-size:17px}
 .friends-panel button {cursor:pointer}

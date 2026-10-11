@@ -16,11 +16,17 @@ window.DesktopFriends = (() => {
   function refreshButton() {
     const button = document.getElementById('btnPlayerFriends');
     if (button) button.hidden = !enabled();
+    const browse = document.getElementById('btnBrowseFriends');
+    if (browse) browse.hidden = !enabled();
     if (!enabled()) close();
   }
   function close() {
     epoch++; clearTimeout(timer); timer = null; controller?.abort(); controller = null;
-    if (drawer) { drawer.hidden = true; drawer.querySelector('.friends-content')?.replaceChildren(); }
+    if (drawer) {
+      const previous = drawer; drawer = null;
+      previous.hidden = true; previous.querySelector('.friends-content')?.replaceChildren();
+      if (previous.tagName === 'DIALOG') { previous.close(); previous.remove(); }
+    }
     document.getElementById('btnPlayerFriends')?.setAttribute('aria-expanded', 'false');
     Player.syncEmbeddedPlayerRect(); Player.autoHideControls();
   }
@@ -63,9 +69,10 @@ window.DesktopFriends = (() => {
   }
   function confirmPlay(row, member, mode, token) {
     if (!alive(token)) return;
+    if (!Player.activeEngine) { play(row, member, mode, token); return; }
     const card = document.createElement('div'); card.className = 'player-dialog';
     const title = document.createElement('h2'); title.textContent = '切换影片';
-    const description = document.createElement('p'); description.textContent = `将离开当前影片，${mode === 'start' ? '从头播放' : '从对方进度播放'}《${label(row)}》。`;
+    const description = document.createElement('p'); description.textContent = `将离开当前影片，${mode === 'start' ? '从头播放' : member.is_self ? '从所选设备的进度播放' : '从对方进度播放'}《${label(row)}》。`;
     const actions = document.createElement('div'); actions.className = 'player-dialog-actions';
     const confirm = () => { Player.hidePlayerDialog(); play(row, member, mode, token); };
     actions.append(Player._dialogButton('取消', false, () => Player.hidePlayerDialog()));
@@ -90,11 +97,11 @@ window.DesktopFriends = (() => {
         const history = unwrap(await API.request(`${base}/members/${selectedMember}/history`, {signal:controller.signal}));
         if (!current()) return;
         const rows = history.items || [];
-        host.innerHTML = `<button class="text-button" id="friendsBack">← 返回成员列表</button><h3>${html(selected.name)}的最近观看</h3><p class="friends-muted">最近 7 天，最多 20 条，仅展示对方允许共享的媒体库。</p>${rows.length ? rows.map(row => rowCard(row, selected)).join('') : '<p class="friends-muted">暂无可查看的共享记录</p>'}`;
+        host.innerHTML = `<button class="text-button" id="friendsBack">← 返回成员列表</button><h3>${selected.is_self ? '我的最近观看' : html(selected.name) + '的最近观看'}</h3><p class="friends-muted">最近 7 天，最多 20 条，${selected.is_self ? '同账号的不同设备按影片或单集合并记录，仅自己可见。' : '仅展示对方允许共享的媒体库。'}</p>${rows.length ? rows.map(row => rowCard(row, selected)).join('') : '<p class="friends-muted">暂无可查看的共享记录</p>'}`;
         host.querySelector('#friendsBack').onclick = () => {selectedMember = null; load(token);};
         bindRows(host, rows, selected, token);
       } else {
-        host.innerHTML = members.length ? members.map(member => `<section class="friends-member"><header><span class="friends-avatar" aria-hidden="true">${html(Array.from(member.name || '?')[0])}</span><strong>${html(member.name)}</strong><button class="text-button" data-friend-history="${member.member_id}">最近观看</button></header>${member.sessions.length ? member.sessions.map(row => rowCard(row, member)).join('') : '<p class="friends-muted">暂无公开播放</p>'}</section>`).join('') : '<p class="friends-muted">暂无公开的观看动态。成员需主动开启共享，并选择允许公开的媒体库。</p>';
+        host.innerHTML = `<p class="friends-muted friends-guide">自己的设备仅自己可见，无需公开共享。其他成员需先在客户端或插件网页中授权。</p>` + (members.length ? members.map(member => `<section class="friends-member"><header><span class="friends-avatar" aria-hidden="true">${html(Array.from(member.name || '?')[0])}</span><strong>${member.is_self ? '我的设备' : html(member.name)}</strong><button class="text-button" data-friend-history="${member.member_id}">最近观看</button></header>${member.is_self ? `<p class="friends-muted">${html(member.name)} · 同账号设备分别显示</p>` : ''}${member.sessions.length ? member.sessions.map(row => rowCard(row, member)).join('') : '<p class="friends-muted">暂无公开播放</p>'}</section>`).join('') : '<p class="friends-muted">暂无正在观看的设备或公开的观看动态。其他成员需主动开启共享，并选择允许公开的媒体库。</p>');
         host.querySelectorAll('.friends-member').forEach((section, index) => {
           const member = members[index]; bindRows(section, member.sessions, member, token);
           section.querySelector('[data-friend-history]').onclick = () => {selectedMember = member.member_id; load(token);};
@@ -120,16 +127,35 @@ window.DesktopFriends = (() => {
     document.getElementById('btnPlayerFriends').setAttribute('aria-expanded', 'true');
     Player.showControls(); Player.syncEmbeddedPlayerRect(); load(epoch);
   }
+  function openHome() {
+    if (!enabled()) return;
+    if (Player.activeEngine) { open(); return; }
+    close(); owner = identity(); selectedMember = null;
+    controller = new AbortController();
+    drawer = document.createElement('dialog'); drawer.className = 'friends-home-dialog';
+    drawer.id = 'homeFriendsDialog'; drawer.setAttribute('aria-labelledby', 'homeFriendsTitle');
+    drawer.innerHTML = '<header><div><h2 id="homeFriendsTitle">正在观看</h2><p class="friends-muted">我的设备与服务器好友</p></div><button class="friends-close" aria-label="关闭正在观看">×</button></header><div class="friends-content"><p role="status">正在读取观看动态…</p></div>';
+    drawer.querySelector('.friends-close').onclick = close;
+    drawer.addEventListener('cancel', event => {event.preventDefault(); close();});
+    document.body.append(drawer); drawer.showModal(); load(epoch);
+  }
   function init() {
     document.getElementById('btnPlayerFriends').onclick = open;
+    document.getElementById('btnBrowseFriends').onclick = openHome;
     document.getElementById('friendsClose').onclick = close;
     document.addEventListener('visibilitychange', () => {if (document.hidden) close();});
     refreshButton();
   }
   function settings(host) {
     const card = document.createElement('div'); card.className = 'settings-card friends-settings';
-    card.innerHTML = `<h3>好友与观看隐私</h3><div class="settings-row"><span>显示服务器好友列表<small class="friends-muted">仅控制本机播放器入口</small></span><label class="settings-toggle"><input id="setFriendsVisible" aria-label="显示服务器好友列表" type="checkbox" ${enabled() ? 'checked' : ''}><span class="toggle-slider"></span></label></div><div class="settings-row"><span>允许其他成员查看我的观看状态<small class="friends-muted">包括所选媒体库的当前播放和最近 7 天历史；按账号在服务器保存</small></span><label class="settings-toggle"><input id="setFriendsShare" aria-label="允许其他成员查看我的观看状态" type="checkbox" disabled><span class="toggle-slider"></span></label></div><fieldset class="friends-libraries"><legend>允许共享的媒体库</legend><p class="friends-muted">未勾选的库和新建的库默认保密。</p><div id="friendsLibraries"></div></fieldset><button class="btn-secondary" id="saveFriendsPrivacy" disabled>保存共享设置</button><p id="friendsPrivacyState" class="friends-muted" role="status">正在读取服务器隐私设置…</p>`;
+    card.innerHTML = `<h3>好友与观看隐私</h3><p class="friends-muted">查看与公开互相独立。自己的其他设备无需开启共享；关闭公开共享不会影响自己查看。</p><div class="settings-row"><span>显示服务器好友列表<small class="friends-muted">开启后，从主界面侧栏或播放器左上角的“正在观看”查看自己的设备与已授权好友</small></span><label class="settings-toggle"><input id="setFriendsVisible" aria-label="显示服务器好友列表" type="checkbox" ${enabled() ? 'checked' : ''}><span class="toggle-slider"></span></label></div><div class="settings-row"><span>允许其他成员查看我的观看状态<small class="friends-muted">包括所选媒体库的当前播放和最近 7 天历史；按账号在服务器保存</small></span><label class="settings-toggle"><input id="setFriendsShare" aria-label="允许其他成员查看我的观看状态" type="checkbox" disabled><span class="toggle-slider"></span></label></div><fieldset class="friends-libraries"><legend>允许共享的媒体库</legend><p class="friends-muted">未勾选的库和新建的库默认保密。</p><div id="friendsLibraries"></div></fieldset><button class="btn-secondary" id="saveFriendsPrivacy" disabled>保存共享设置</button><p id="friendsPrivacyState" class="friends-muted" role="status">正在读取服务器隐私设置…</p>`;
     host.querySelector('.settings-body')?.insertBefore(card, host.querySelector('.settings-about'));
+    const help = document.createElement('details'); help.className = 'friends-help';
+    const summary = document.createElement('summary'); summary.textContent = 'Web / Mac / 手机用户如何开启共享？';
+    const explanation = document.createElement('p'); explanation.className = 'friends-muted';
+    explanation.textContent = '请先在浏览器中登录同一服务器，再打开下方地址，选择允许共享的媒体库并保存。无需安装额外软件；未授权的成员不会向其他账号公开。';
+    const address = document.createElement('code'); address.textContent = API.baseUrl + '/api/v1/plugins/watch-presence/settings';
+    help.append(summary, explanation, address); card.append(help);
     const controller = new AbortController(), owner = identity();
     const valid = () => card.isConnected && owner === identity() && !controller.signal.aborted;
     App._pageController?.signal.addEventListener('abort', () => controller.abort(), {once:true});
@@ -170,5 +196,5 @@ window.DesktopFriends = (() => {
     }).catch(error => {if (valid() && error.name !== 'AbortError') status.textContent = message(error);});
   }
   document.addEventListener('DOMContentLoaded', init, {once:true});
-  return {init, enabled, settings, refreshButton, open, close, dispose, label};
+  return {init, enabled, settings, refreshButton, open, openHome, close, dispose, label};
 })();
