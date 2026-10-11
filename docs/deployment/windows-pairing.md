@@ -10,7 +10,7 @@ Windows 1.0.0 包含生成二维码、等待手机批准、超时/取消与设�
 ./apps/desktop/scripts/check-server-compatibility.ps1 -ServerUrl 'http://YOUR-NAS:3000'
 ```
 
-脚本仅访问公开的健康和登录引导接口，不需要密码。如果 `windowsPairing` 为 false，客户端继续使用密码登录；安装新版客户端本身不能升级 NAS。
+脚本仅访问公开的登录引导接口，不需要密码。如果 `windowsPairing` 为 false，客户端继续使用密码登录；安装新版客户端本身不能升级 NAS。
 
 ## 服务端升级
 

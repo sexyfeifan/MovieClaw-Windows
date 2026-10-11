@@ -7,7 +7,7 @@ if (-not $server.IsAbsoluteUri -or $server.Scheme -notin @('http', 'https') -or 
 $base = $server.AbsoluteUri.TrimEnd('/')
 $bootstrap = Invoke-RestMethod -Uri "$base/api/v1/auth/bootstrap" -TimeoutSec 15
 $body = if ($bootstrap.PSObject.Properties['data']) { $bootstrap.data } else { $bootstrap }
-$kinds = @($body.native_device_kinds)
+$kinds = @($body.native_device_kinds | Where-Object { $_ })
 [pscustomobject]@{
     server = $base
     nativeDeviceKinds = $kinds

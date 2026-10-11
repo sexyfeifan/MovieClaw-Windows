@@ -66,16 +66,23 @@ try {
             if (-not $read.Result) { throw 'mpv IPC closed unexpectedly' }
             $reply = $read.Result | ConvertFrom-Json
             if ($reply.request_id -eq $id) {
-                if ($reply.error -ne 'success') { throw "mpv IPC failed: $($reply.error)" }
+                if ($reply.error -ne 'success') { throw "mpv IPC failed ($($Command -join ' ')): $($reply.error)" }
                 return $reply.data
             }
         }
         throw 'mpv IPC response missing'
     }
-    # loadfile is synchronous at the command level; poll duration for demux completion.
+    # Duration is available during probing, before the player can accept seek.
+    # Require an initialized timeline and seekable demuxer as well.
     $ready = $false
     for ($attempt = 0; $attempt -lt 30; $attempt++) {
-        try { $duration = Invoke-Mpv @('get_property', 'duration'); if ($duration -ge 4.9) { $ready = $true; break } } catch { Start-Sleep -Milliseconds 100 }
+        try {
+            $duration = Invoke-Mpv @('get_property', 'duration')
+            $position = Invoke-Mpv @('get_property', 'time-pos')
+            $seekable = Invoke-Mpv @('get_property', 'seekable')
+            if ($duration -ge 4.9 -and $null -ne $position -and $seekable -eq $true) { $ready = $true; break }
+        } catch { }
+        Start-Sleep -Milliseconds 100
     }
     if (-not $ready) { throw 'mpv did not load the synthetic WAV' }
     if ((Invoke-Mpv @('get_property', 'pause')) -ne $true) { throw 'mpv pause state incorrect' }
