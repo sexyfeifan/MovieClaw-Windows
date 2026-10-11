@@ -872,6 +872,14 @@ img:not([loading]) {
   height: 5px;
 }
 
+.player-volume-value {
+  min-width: 4ch;
+  text-align: right;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255,255,255,0.8);
+}
+
 .player-volume-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
   width: 12px;
