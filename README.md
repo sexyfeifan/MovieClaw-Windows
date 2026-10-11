@@ -4,7 +4,7 @@ MovieClaw 的 Windows 桌面客户端。连接自己的 MovieClaw 服务器，�
 
 ## 安装
 
-1. 打开 [下载页面](https://github.com/sexyfeifan/MovieClaw-Windows/releases/latest)，下载 `MovieClaw-Desktop-1.0.1-Setup-x64.exe`。
+1. 打开 [下载页面](https://github.com/sexyfeifan/MovieClaw-Windows/releases/latest)，下载 `MovieClaw-Desktop-1.0.2-Setup-x64.exe`。
 2. 运行安装包，启动 MovieClaw。
 3. 输入服务器地址并登录，例如 `http://NAS地址:3000`。
 
@@ -12,6 +12,7 @@ MovieClaw 的 Windows 桌面客户端。连接自己的 MovieClaw 服务器，�
 
 ## 使用
 
+- 设置中可分别开启“我的订阅”和“发现”，两个入口默认关闭。发现支持浏览和订阅作品；我的订阅可查看下载、入库进度与追踪日程。
 - 侧栏可收起或展开，搜索支持 `Ctrl+F`。
 - 全局搜索排除首页隐藏的媒体库及已识别的成人内容。
 - 播放支持续播、字幕、音轨、画质、倍速与画中画。

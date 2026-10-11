@@ -6,6 +6,8 @@ Current capabilities and remaining hardware checks are recorded in [the Windows 
 
 Version 1.0.1 adds detail-page version/audio/subtitle selection and administrator subtitle generation through the existing NAS APIs. The client previews reference candidates, languages, bilingual output and PGS OCR requirements before submission, then restores, polls, cancels or retries the server job. Completed subtitles refresh the selected file. Configure AI models on the server; generation translates reference subtitles and does not transcribe audio without a reference. The QR login entry is temporarily hidden while Windows pairing is unavailable on deployed servers.
 
+Version 1.0.2 adds opt-in Discovery and My Subscriptions. Enable each entry in Settings → Navigation; preferences are scoped to this computer, server and account. Browse TMDB/Douban, title details and people; subscribe with smart preferences or server rules. Monitor download/import stages, weekly arrivals, tracking, season selection and safe cleanup. Features depend on the deployed server APIs and account permissions. Site/downloader configuration opens the server Web settings.
+
 ## Build and test
 
 Install PowerShell 7, Node.js 22.23.3, Python 3.12.9 (release-gate tests), Rust 1.99.0 for `x86_64-pc-windows-msvc`, Visual Studio Build Tools (Desktop development with C++), and 7-Zip. CI pins these tool versions and records the hosted Windows image/runtime environment. Windows builds have no developer-specific paths or GNU/MinGW dependency.
