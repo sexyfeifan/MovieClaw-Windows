@@ -86,7 +86,12 @@ try {
     }
     if (-not $ready) { throw 'mpv did not load the synthetic WAV' }
     if ((Invoke-Mpv @('get_property', 'pause')) -ne $true) { throw 'mpv pause state incorrect' }
-    $null = Invoke-Mpv @('seek', 1.0, 'absolute+exact')
+    $seekAccepted = $false
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        try { $null = Invoke-Mpv @('seek', 1.0, 'absolute+exact'); $seekAccepted = $true; break }
+        catch { Start-Sleep -Milliseconds 100 }
+    }
+    if (-not $seekAccepted) { throw 'mpv did not accept seek after its timeline became available' }
     $null = Invoke-Mpv @('set_property', 'pause', $false)
     if ((Invoke-Mpv @('get_property', 'pause')) -ne $false) { throw 'mpv IPC unpause failed' }
     Start-Sleep -Milliseconds 150

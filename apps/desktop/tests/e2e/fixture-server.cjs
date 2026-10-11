@@ -205,6 +205,7 @@ http.createServer(async (req, res) => {
     }
     if (route === '/playback/up-next') return json(res, ok({ items: [{ ...item(3), season_number: 3, episode_number: state.longSeason ? 1051 : 2, position_ms: 300000, duration_ms: 3600000, progress_percent: 8, episode_title: state.longSeason ? '第1051集' : '第二集' }] }));
     if (route === '/playback/marks') {
+      if (req.method === 'GET' && state.marksDelay) await new Promise(resolve => setTimeout(resolve, state.marksDelay));
       state.marks ||= {};
       const target = req.method === 'POST' ? body : Object.fromEntries(url.searchParams);
       const key = [target.media_item_id, target.season_number || '', target.episode_number || ''].join(':');

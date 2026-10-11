@@ -79,7 +79,7 @@ test('library header shows its actual total and keeps sort controls beside the h
 });
 
 test('person page opened by keyboard identifies the current movie and returns to its existing detail', async ({page,request}) => {
-  await openDesktop(page,request,{images:true});
+  await openDesktop(page,request,{images:true,marksDelay:1200});
   await browseLibrary(page);
   await page.locator('#posterGrid [data-item-id="3"]').click();
   const actor=page.locator('.person-card[data-person-id="9"]');

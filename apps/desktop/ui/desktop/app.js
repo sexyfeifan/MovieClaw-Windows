@@ -1856,6 +1856,32 @@ const App = {
         renderEpisodeShelf();
       };
 
+      // Bind static navigation before waiting for marks/resume requests.
+      document.getElementById('btnBack')?.addEventListener('click', () => this.goBack());
+      container.querySelectorAll('.collection-chip').forEach(chip => {
+        chip.addEventListener('click', e => {
+          e.preventDefault();
+          const id = chip.dataset.collectionId;
+          if (id) this.navigate('collection', { collectionId: id });
+        });
+      });
+      container.querySelectorAll('.person-card[data-person-id]').forEach(card => {
+        card.addEventListener('click', () => {
+          const pid = card.dataset.personId;
+          if (pid) this.navigate('person', { personId: pid, fromItem: mediaId });
+        });
+        card.addEventListener('keydown', event => {
+          if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); card.click(); }
+        });
+      });
+      container.querySelectorAll('.detail-lower .shelf-arrow').forEach(btn => {
+        btn.dataset.bound = '1';
+        btn.addEventListener('click', () => {
+          const row = btn.closest('.shelf-wrapper')?.querySelector('.shelf-row');
+          if (row) row.scrollBy({ left: parseInt(btn.dataset.dir, 10) * row.clientWidth * 0.75, behavior: 'smooth' });
+        });
+      });
+
       // ---- 初始化 ----
       // 收藏是整片级（Mac 头图那颗心也是）；已看/续播跟着头图那一集走
       try {
@@ -1864,6 +1890,7 @@ const App = {
         st.favorite = !!(marksResp?.data || marksResp)?.is_favorite;
       } catch (_) {}
 
+      if (!this.isCurrent(generation)) return;
       if (isMovie) {
         await loadUnitResume();
       } else {
@@ -1931,41 +1958,6 @@ const App = {
           }
         } catch (e) { console.error('Load series failed:', e); }
       }
-
-      // ---- 事件绑定 ----
-      document.getElementById('btnBack')?.addEventListener('click', () => {
-        this.goBack();
-      });
-
-      // 合集 → 合集海报墙（原先只有 href="#"，点了没有反应）
-      container.querySelectorAll('.collection-chip').forEach(chip => {
-        chip.addEventListener('click', e => {
-          e.preventDefault();
-          const id = chip.dataset.collectionId;
-          if (id) this.navigate('collection', { collectionId: id });
-        });
-      });
-
-      // 演职员 → 人物页（TMDB 影人 id）
-      container.querySelectorAll('.person-card[data-person-id]').forEach(card => {
-        card.addEventListener('click', () => {
-          const pid = card.dataset.personId;
-          if (pid) this.navigate('person', { personId: pid, fromItem: mediaId });
-        });
-        card.addEventListener('keydown', event => {
-          if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); card.click(); }
-        });
-      });
-
-      // 演职员横排的滚动箭头（这排是静态渲染的，没走 loadBrowse）
-      container.querySelectorAll('.detail-lower .shelf-arrow').forEach(btn => {
-        if (btn.dataset.bound) return;
-        btn.dataset.bound = '1';
-        btn.addEventListener('click', () => {
-          const row = btn.closest('.shelf-wrapper')?.querySelector('.shelf-row');
-          if (row) row.scrollBy({ left: parseInt(btn.dataset.dir, 10) * row.clientWidth * 0.75, behavior: 'smooth' });
-        });
-      });
 
     } catch (e) {
       this.renderPageError(container, e, generation);
