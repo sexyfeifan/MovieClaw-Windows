@@ -4,7 +4,7 @@ MovieClaw 的 Windows 桌面客户端。连接自己的 MovieClaw 服务器，�
 
 ## 安装
 
-1. 打开 [下载页面](https://github.com/sexyfeifan/MovieClaw-Windows/releases/latest)，下载 `MovieClaw-Desktop-1.0.0-Setup-x64.exe`。
+1. 打开 [下载页面](https://github.com/sexyfeifan/MovieClaw-Windows/releases/latest)，下载 `MovieClaw-Desktop-1.0.1-Setup-x64.exe`。
 2. 运行安装包，启动 MovieClaw。
 3. 输入服务器地址并登录，例如 `http://NAS地址:3000`。
 
@@ -15,11 +15,13 @@ MovieClaw 的 Windows 桌面客户端。连接自己的 MovieClaw 服务器，�
 - 侧栏可收起或展开，搜索支持 `Ctrl+F`。
 - 全局搜索排除首页隐藏的媒体库及已识别的成人内容。
 - 播放支持续播、字幕、音轨、画质、倍速与画中画。
+- 详情页可先选择播放版本、音轨和字幕；管理员可生成单语或双语 AI 字幕，并查看、取消或重试任务。
+- 左右方向键前进或后退，上下方向键调整音量，控制器显示当前音量。
 - 双击视频区域或按 `F` 切换全屏；全屏画幅可选“保持原比例”或“填满屏幕”。
 - 右上角显示读取速度，点击速度或“播放信息”按钮查看详细信息；`I` 也可打开。
 - 在“设置 → 关于”检查更新、查看构建号与开源许可。
 
-扫码登录要求服务端支持 Windows 设备配对，见 [NAS 配置说明](docs/deployment/windows-pairing.md)。库管理与服务器设置使用服务端 Web 管理界面。
+扫码登录入口暂时隐藏。AI 字幕使用服务器上的参考字幕和已配置的 AI 模型；PGS 图片字幕需要服务器支持 OCR。无参考字幕的语音转写暂不支持。库管理与服务器设置使用服务端 Web 管理界面。
 
 ## 源码
 

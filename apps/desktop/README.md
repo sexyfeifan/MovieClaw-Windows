@@ -4,6 +4,8 @@ Windows x64 client with a Tauri/WebView2 interface and bundled mpv playback. The
 
 Current capabilities and remaining hardware checks are recorded in [the Windows 1.0.0 comparison](../../docs/design/windows-1.0.0-capabilities.md).
 
+Version 1.0.1 adds detail-page version/audio/subtitle selection and administrator subtitle generation through the existing NAS APIs. The client previews reference candidates, languages, bilingual output and PGS OCR requirements before submission, then restores, polls, cancels or retries the server job. Completed subtitles refresh the selected file. Configure AI models on the server; generation translates reference subtitles and does not transcribe audio without a reference. The QR login entry is temporarily hidden while Windows pairing is unavailable on deployed servers.
+
 ## Build and test
 
 Install PowerShell 7, Node.js 22.23.3, Python 3.12.9 (release-gate tests), Rust 1.99.0 for `x86_64-pc-windows-msvc`, Visual Studio Build Tools (Desktop development with C++), and 7-Zip. CI pins these tool versions and records the hosted Windows image/runtime environment. Windows builds have no developer-specific paths or GNU/MinGW dependency.
