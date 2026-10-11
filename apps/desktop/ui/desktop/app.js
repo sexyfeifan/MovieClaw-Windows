@@ -529,6 +529,7 @@ const App = {
     this._authPending = false;
     this._changingContext = false;
     document.getElementById('sidebar').style.display = '';
+    window.DesktopFriends?.refreshButton();
     const route = this._resumeRoute || { page: 'home', params: {} };
     this._resumeRoute = null;
     await this.navigate(route.page, route.params, false);

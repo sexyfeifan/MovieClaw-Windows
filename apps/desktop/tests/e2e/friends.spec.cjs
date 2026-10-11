@@ -62,9 +62,14 @@ for (const mode of ['从头看','跟上进度']) {
   else {expect(playback.start_ms).toBeGreaterThanOrEqual(420000);expect(playback.start_ms).toBeLessThan(430000);}
  });
 }
-test('display setting survives reload without enabling sharing and is scoped to identity',async({page,request})=>{
- await settings(page,request);await page.locator('#setFriendsVisible').check();await page.reload();await page.locator('[data-page="settings"]').click();await expect(page.locator('#setFriendsVisible')).toBeChecked();await expect(page.locator('#setFriendsShare')).not.toBeChecked();
- expect(await page.evaluate(()=>{App.session.username='another';return DesktopFriends.enabled();})).toBe(false);
+test('display setting restores the homepage entry after login and is scoped to identity',async({page,request})=>{
+ await settings(page,request);await page.locator('#setFriendsVisible').check();await page.reload();
+ await expect.poll(()=>page.evaluate(()=>!!App.session && !App._authPending)).toBe(true);
+ await expect(page.locator('#btnBrowseFriends')).toBeVisible();
+ await page.locator('[data-page="settings"]').click();await expect(page.locator('#setFriendsVisible')).toBeChecked();await expect(page.locator('#setFriendsShare')).not.toBeChecked();
+ await page.evaluate(()=>App.enterSession({data:{...App.session,username:'another'}}));
+ await expect(page.locator('#btnBrowseFriends')).toBeHidden();
+ expect(await page.evaluate(()=>DesktopFriends.enabled())).toBe(false);
  expect((await state(request)).requests.filter(row=>row.path.endsWith('/members') && row.path.includes('watch-presence'))).toHaveLength(0);
 });
 test('left drawer shows devices, progress and history, closes with Esc and preserves native video overlay',async({page,request},info)=>{
