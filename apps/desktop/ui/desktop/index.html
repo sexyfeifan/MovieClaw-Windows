@@ -6,6 +6,7 @@
 <title>MovieClaw</title>
 <link rel="stylesheet" href="desktop.css">
 <link rel="stylesheet" href="catalog.css">
+<link rel="stylesheet" href="friends.css">
 </head>
 <body>
   <!-- 窗口标题栏 -->
@@ -94,8 +95,15 @@
       <button class="player-back" id="playerBack">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
       </button>
+      <button class="player-back" id="btnPlayerFriends" hidden aria-label="服务器好友" aria-controls="playerFriendsPanel" aria-expanded="false" title="服务器好友">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M21 20v-2a6 6 0 0 0-4-5"/></svg>
+      </button>
       <div class="player-title" id="playerTitle" data-tauri-drag-region></div>
     </div>
+    <aside class="friends-panel" id="playerFriendsPanel" hidden aria-label="服务器好友列表">
+      <header><h2>服务器好友</h2><button class="friends-close" id="friendsClose" aria-label="收起好友列表">×</button></header>
+      <div class="friends-content"></div>
+    </aside>
     <!-- 中央播放按钮 -->
     <button class="player-center-btn" id="playerCenterBtn" aria-label="播放或暂停">
       <svg width="48" height="48" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -214,6 +222,7 @@
   <script src="platform.js"></script>
   <script src="subtitles.js"></script>
   <script src="catalog.js"></script>
+  <script src="friends.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

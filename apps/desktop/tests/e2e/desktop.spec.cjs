@@ -340,7 +340,7 @@ test('long seasons locate 1051, browse 50-item bands and mark a single episode f
 
 test('native welcome chooses a saved account and keeps device credential material out of the browser', async ({ page, request }) => {
   await openDesktop(page,request,{nativeAuth:true,authenticated:false,savedAccounts:[{username:'alice',nickname:'Alice',authenticated:true},{username:'expired',authenticated:false}]});
-  await expect(page.locator('h2')).toHaveText('选择账号');
+  await expect(page.getByRole('heading',{name:'选择账号',exact:true})).toBeVisible();
   await page.locator('[data-account="alice"]').click(); await expect(page.locator('#heroBanner')).toBeVisible();
   expect(await page.evaluate(()=>App.session.username)).toBe('alice');
   expect((await state(request)).nativeRequests.some(r=>r.command==='native_select_account'&&r.username==='alice')).toBe(true);

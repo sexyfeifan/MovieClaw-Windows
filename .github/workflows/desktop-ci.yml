@@ -5,9 +5,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main, feat/windows-native, 'codex/**']
-    paths: ['apps/desktop/**', '.github/workflows/desktop-ci.yml', '.github/workflows/desktop-release.yml']
+    paths: ['apps/desktop/**', 'plugins/watch-presence/**', '.github/workflows/desktop-ci.yml', '.github/workflows/desktop-release.yml']
   pull_request:
-    paths: ['apps/desktop/**', '.github/workflows/desktop-ci.yml', '.github/workflows/desktop-release.yml']
+    paths: ['apps/desktop/**', 'plugins/watch-presence/**', '.github/workflows/desktop-ci.yml', '.github/workflows/desktop-release.yml']
 
 permissions:
   contents: read

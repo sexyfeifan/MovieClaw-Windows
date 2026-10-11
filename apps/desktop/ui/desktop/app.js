@@ -434,6 +434,7 @@ const App = {
     this._sessionController?.abort();
     window.DesktopCatalog?.dispose();
     window.DesktopSubtitles?.dispose();
+    window.DesktopFriends?.dispose();
     this._pageController?.abort();
     this.viewGeneration++;
     this._playbackSeq = (this._playbackSeq || 0) + 1;
@@ -2512,6 +2513,7 @@ const App = {
     DesktopSelect.enhance(container);
     // 事件绑定
     window.DesktopCatalog?.settings(container);
+    window.DesktopFriends?.settings(container);
     document.getElementById('btnCheckUpdates')?.addEventListener('click', () => window.DesktopUpdates?.check());
     document.getElementById('btnAbout')?.addEventListener('click', () => this.showAbout());
     document.getElementById('setAutoNext')?.addEventListener('change', (e) => {
