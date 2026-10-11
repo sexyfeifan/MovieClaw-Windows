@@ -42,6 +42,44 @@ from movieclaw_media.tmdb import TmdbClient
 _KEY = "0123456789abcdef0123456789abcdef"
 
 
+async def test_watcher_stop_waits_for_cancelled_tasks_to_release_resources() -> None:
+    """Database/event-loop teardown must wait for every scan task's cleanup."""
+    watcher = watch_mod.LibraryWatcher()
+    ready = asyncio.Queue()
+    cleaning = asyncio.Queue()
+    release = asyncio.Event()
+    cleaned = set()
+
+    async def resource_task(name: str) -> None:
+        await ready.put(name)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await cleaning.put(name)
+            await release.wait()
+            cleaned.add(name)
+
+    watcher._consumer = asyncio.create_task(resource_task("consumer"))
+    watcher._startup = asyncio.create_task(resource_task("startup"))
+    watcher._rescan_tasks[1] = asyncio.create_task(resource_task("rescan"))
+    tasks = [watcher._consumer, watcher._startup, watcher._rescan_tasks[1]]
+    for _ in tasks:
+        await asyncio.wait_for(ready.get(), 1)
+    stopping = asyncio.create_task(watcher.stop())
+    try:
+        for _ in tasks:
+            await asyncio.wait_for(cleaning.get(), 1)
+        assert not stopping.done(), "stop returned before task-owned resources were released"
+        release.set()
+        await asyncio.wait_for(stopping, 1)
+        assert cleaned == {"consumer", "startup", "rescan"}
+        assert all(task.done() for task in tasks)
+        await watcher.stop()  # repeated shutdown is harmless
+    finally:
+        release.set()
+        await asyncio.gather(stopping, *tasks, return_exceptions=True)
+
+
 def _body(tmdb_id: int) -> dict:
     return {
         "id": tmdb_id,

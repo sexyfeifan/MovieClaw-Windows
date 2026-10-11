@@ -53,6 +53,7 @@ class _Extent:
     block: int
     length: int
     long_part_ref: int | None
+    recorded: bool = True
 
 
 @dataclass(frozen=True)
@@ -130,6 +131,40 @@ class UDFReader:
         if len(out) < fe.size:
             raise UDFError(f"文件数据不完整：{entry.name}")
         return bytes(out)
+
+    def physical_ranges(self, entry: UDFEntry) -> tuple[tuple[int, int], ...]:
+        """Media file → validated physical (offset, length) ranges, without reading its bytes."""
+        fe = self._read_file_entry(entry.icb_block, entry.icb_part_ref)
+        if fe.embedded is not None:
+            raise UDFError("内嵌小文件不能作为媒体流")
+        position = self._fh.tell()
+        self._fh.seek(0, 2)
+        image_size = self._fh.tell()
+        self._fh.seek(position)
+        ranges: list[tuple[int, int]] = []
+        remaining = fe.size
+        for extent in fe.extents:
+            if remaining <= 0:
+                break
+            if not extent.recorded:
+                raise UDFError("媒体分配描述符包含未录制或稀疏区间")
+            length = min(extent.length, remaining)
+            ref = extent.long_part_ref if extent.long_part_ref is not None else fe.part_ref
+            # Video allocation normally references the physical partition, not metadata.
+            if ref >= len(self._maps) or self._maps[ref].is_metadata:
+                raise UDFError("媒体分配描述符未指向物理分区")
+            offset = self._resolve(extent.block, ref) * SECTOR
+            if offset < 0 or offset + length > image_size:
+                raise UDFError("媒体分配描述符越过镜像末尾")
+            if ranges and ranges[-1][0] + ranges[-1][1] == offset:
+                previous = ranges.pop()
+                ranges.append((previous[0], previous[1] + length))
+            else:
+                ranges.append((offset, length))
+            remaining -= length
+        if remaining or not ranges or len(ranges) > 4096:
+            raise UDFError("媒体分配描述符不完整或过多")
+        return tuple(ranges)
 
     # --- 读盘 -----------------------------------------------------------------
 
@@ -258,7 +293,7 @@ class UDFReader:
                 return
             if ext_len == 0:
                 return
-            out.append(_Extent(block, ext_len, long_ref))
+            out.append(_Extent(block, ext_len, long_ref, recorded=ext_type == 0))
             p += stride
 
     # --- 目录 -----------------------------------------------------------------

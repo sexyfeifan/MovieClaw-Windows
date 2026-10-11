@@ -10,12 +10,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from movieclaw_api.services.media_probe import probe_keyframe_interval
+from movieclaw_api.services.playback.disc_fallback import main_title_file
 from movieclaw_api.services.playback.disc_source import disc_source_for_file
 from movieclaw_api.services.playback.ffmpeg_args import effective_hw_backend
 from movieclaw_api.services.playback.hwprobe import hardware_available
@@ -107,9 +109,10 @@ async def decide_for_files(
         # Play 都直接跳过，避免为最终不会使用的安全信息等待慢存储。
         # 原盘：段数进决策输入（多剪辑没有单文件可直连）；关键帧密度来自 CLPI
         # 的 EP_map 而不是 ffprobe——目录探不了，m2ts 本体通读不起
-        disc = disc_source_for_file(file) if file.is_disc() else None
+        disc = await asyncio.to_thread(disc_source_for_file, file) if file.is_disc() else None
         disc_clips = len(disc.clips) if disc is not None else 0
         disc_playlist = disc.playlist_name if disc is not None else None
+        file = await asyncio.to_thread(main_title_file, file, disc)
         context = (contexts or {}).get(file.id or 0)
         profile = media_profile_from_file(
             file, disc_clips=disc_clips, disc_playlist=disc_playlist,
@@ -151,6 +154,10 @@ async def decide_for_files(
             profile = media_profile_from_file(
                 file, keyframe_interval_s=interval, disc_clips=disc_clips,
                 context=context, preferred_audio=preferred_audio,
+            )
+        if disc is not None:
+            profile = replace(
+                profile, server_disc_available=True, duration_ms=round(disc.duration_s * 1000)
             )
         decisions.append(
             (

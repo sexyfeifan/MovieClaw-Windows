@@ -116,6 +116,12 @@ static MPV_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 static MPV_PIPE_ID: AtomicU32 = AtomicU32::new(0);
 /// 当前 mpv 实例的 IPC 管道名（launch 时写入，stop 时清空）
 static MPV_PIPE: Mutex<Option<String>> = Mutex::new(None);
+static MPV_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
+static MPV_LIFECYCLE: Mutex<()> = Mutex::new(());
+static MPV_IPC: Mutex<Option<crate::mpv_ipc::Session>> = Mutex::new(None);
+static MPV_MEDIA_GRANTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static MPV_SUBTITLE_SOURCES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static MPV_INPUT_FILE: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -155,7 +161,12 @@ fn set_webview_hole(
         // SetWindowRgn 用的是**窗口坐标**，JS 给的是父窗口客户区坐标，差一个 webview 原点
         let mut origin = POINT { x: 0, y: 0 };
         ClientToScreen(parent_hwnd as *mut _, &mut origin);
-        let mut wv = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let mut wv = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
         GetWindowRect(webview, &mut wv);
         let (dx, dy) = (wv.left - origin.x, wv.top - origin.y);
 
@@ -196,7 +207,12 @@ fn clear_webview_hole(parent_hwnd: isize) {
     }
 }
 
-unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
+unsafe extern "system" fn host_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
@@ -232,17 +248,7 @@ fn find_mpv() -> Option<String> {
             return Some(p);
         }
     }
-    // PATH — 直接扫文件系统，不 spawn `where`：GUI 进程里 spawn 控制台程序会新建
-    // conhost，实测 5.47s/次（起播白白多等 5 秒）；同机独立进程只要 83ms
-    if let Some(path_var) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path_var) {
-            let p = dir.join("mpv.exe");
-            if p.is_file() {
-                return Some(p.to_string_lossy().to_string());
-            }
-        }
-    }
-    // exe 目录
+    // 发布版优先使用随应用固定的 runtime，避免 PATH 中旧 mpv 覆盖。
     if let Ok(exe_dir) = std::env::current_exe() {
         if let Some(dir) = exe_dir.parent() {
             for sub in &["mpv/mpv.exe", "mpv.exe"] {
@@ -250,6 +256,15 @@ fn find_mpv() -> Option<String> {
                 if p.exists() {
                     return Some(p.to_string_lossy().to_string());
                 }
+            }
+        }
+    }
+    // PATH — 直接扫文件系统，不 spawn `where`，避免 GUI 起播时新建 conhost。
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let p = dir.join("mpv.exe");
+            if p.is_file() {
+                return Some(p.to_string_lossy().to_string());
             }
         }
     }
@@ -290,6 +305,7 @@ pub fn has_embedded_player() -> bool {
 /// x, y, width, height: 视频区域在父窗口中的位置
 #[tauri::command]
 pub fn launch_embedded_player(
+    app: tauri::AppHandle,
     parent_hwnd: isize,
     stream_url: String,
     subtitle_urls: Option<Vec<String>>,
@@ -299,12 +315,47 @@ pub fn launch_embedded_player(
     y: i32,
     width: i32,
     height: i32,
+    instance_id: Option<u64>,
+    hardware_decode: Option<bool>,
 ) -> Result<serde_json::Value, String> {
+    let _lifecycle = MPV_LIFECYCLE.lock().map_err(|_| "播放器生命周期锁不可用")?;
     // 先关闭已有实例
-    stop_embedded_player().ok();
+    stop_embedded_player_inner(None).ok();
+    MPV_INSTANCE_ID.store(instance_id.unwrap_or(0), Ordering::SeqCst);
     PARENT_HWND.store(parent_hwnd, Ordering::SeqCst);
 
     let mpv = find_mpv().ok_or("未找到 mpv")?;
+    // mpv sees revocable local capabilities, never global Authorization headers.
+    let grants = (|| -> Result<(String, Vec<String>), String> {
+        let media = crate::media_stream::grant_native(&stream_url)?;
+        MPV_MEDIA_GRANTS.lock().unwrap().push(media.stream_id);
+        let mut subtitles = Vec::new();
+        for url in subtitle_urls.as_deref().unwrap_or_default() {
+            let grant = crate::media_stream::grant_native(url)?;
+            MPV_MEDIA_GRANTS.lock().unwrap().push(grant.stream_id);
+            subtitles.push(grant.url);
+        }
+        Ok((media.url, subtitles))
+    })();
+    let (native_stream_url, native_subtitle_urls) = match grants {
+        Ok(grants) => grants,
+        Err(error) => {
+            stop_embedded_player_inner(instance_id).ok();
+            return Err(error);
+        }
+    };
+    *MPV_SUBTITLE_SOURCES.lock().unwrap() = native_subtitle_urls.clone();
+    let input_file = std::env::temp_dir().join(format!(
+        "movieclaw-input-{}-{}.conf",
+        std::process::id(),
+        instance_id.unwrap_or(0)
+    ));
+    let bindings = "MOUSE_MOVE script-message movieclaw-input move\nMBTN_LEFT script-message movieclaw-input click\nMBTN_LEFT_DBL script-message movieclaw-input double-click\nSPACE script-message movieclaw-input play\nLEFT repeatable script-message movieclaw-input seek -10\nRIGHT repeatable script-message movieclaw-input seek 10\nShift+LEFT repeatable script-message movieclaw-input seek -1\nShift+RIGHT repeatable script-message movieclaw-input seek 1\nHOME script-message movieclaw-input home\nPGUP script-message movieclaw-input chapter -1\nPGDWN script-message movieclaw-input chapter 1\n[ script-message movieclaw-input speed -0.25\n] script-message movieclaw-input speed 0.25\ns script-message movieclaw-input subtitle-cycle\nCtrl+. script-message movieclaw-input close\nENTER script-message movieclaw-input enter\nCtrl+LEFT script-message movieclaw-input previous\nCtrl+RIGHT script-message movieclaw-input next\nUP repeatable script-message movieclaw-input volume 0.1\nDOWN repeatable script-message movieclaw-input volume -0.1\nm script-message movieclaw-input mute\nf script-message movieclaw-input fullscreen\nESC script-message movieclaw-input escape\n";
+    if let Err(error) = std::fs::write(&input_file, bindings) {
+        stop_embedded_player_inner(instance_id).ok();
+        return Err(format!("写播放器输入配置失败: {error}"));
+    }
+    *MPV_INPUT_FILE.lock().unwrap() = Some(input_file.clone());
 
     // 创建子窗口
     let class_name = wide("MovieClawMpvHost");
@@ -329,6 +380,7 @@ pub fn launch_embedded_player(
     };
 
     if child_hwnd.is_null() {
+        stop_embedded_player_inner(instance_id).ok();
         return Err("创建视频子窗口失败".into());
     }
 
@@ -338,17 +390,27 @@ pub fn launch_embedded_player(
     let start_secs = start_ms.map(|ms| ms as f64 / 1000.0);
     let title = title.unwrap_or_else(|| "MovieClaw".into());
     let pipe_id = MPV_PIPE_ID.fetch_add(1, Ordering::SeqCst);
-    let pipe_name = format!("\\\\.\\pipe\\movieclaw-mpv-embed-{}-{}", std::process::id(), pipe_id);
+    let pipe_name = format!(
+        "\\\\.\\pipe\\movieclaw-mpv-embed-{}-{}",
+        std::process::id(),
+        pipe_id
+    );
 
     let mut cmd = Command::new(&mpv);
-    cmd.arg(&stream_url)
+    cmd.arg(&native_stream_url)
         .arg(format!("--title={title}"))
         .arg(format!("--wid={}", child_hwnd as usize))
         .arg("--force-window=immediate")
-        .arg("--hwdec=d3d11va")
+        .arg(if hardware_decode.unwrap_or(true) {
+            "--hwdec=d3d11va"
+        } else {
+            "--hwdec=no"
+        })
         .arg("--vo=gpu-next")
         .arg("--gpu-context=d3d11")
-        .arg("--keep-open=no")
+        .arg("--target-colorspace-hint=auto")
+        // 保留文件与 eof-reached，宿主可准确收尾并支持重新 seek。
+        .arg("--keep-open=yes")
         .arg("--osd-level=0")
         .arg("--no-border")
         .arg("--no-ontop")
@@ -356,29 +418,45 @@ pub fn launch_embedded_player(
         // 洞里的鼠标会落到 mpv 子窗口上：mpv 默认绑定含 MBTN_LEFT_DBL 全屏，
         // 双击视频会弹出一个独立全屏窗，整个交互就串了。输入全走 IPC + 网页层控件
         .arg("--no-input-default-bindings")
+        .arg("--osc=no")
+        .arg("--sid=no")
+        .arg("--cursor-autohide=3000")
+        .arg(format!("--input-conf={}", input_file.display()))
         .arg("--input-ipc-server=".to_string() + &pipe_name);
 
     if let Some(s) = start_secs {
         cmd.arg(format!("--start={}", s));
     }
 
-    if let Some(subs) = &subtitle_urls {
-        for sub in subs {
-            cmd.arg(format!("--sub-file={sub}"));
-        }
+    for sub in native_subtitle_urls {
+        cmd.arg(format!("--sub-file={sub}"));
     }
 
-    let child = cmd.spawn().map_err(|e| format!("启动 mpv 失败: {e}"))?;
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            stop_embedded_player_inner(instance_id).ok();
+            return Err(format!("启动 mpv 失败: {error}"));
+        }
+    };
     let pid = child.id();
     *MPV_PROCESS.lock().unwrap() = Some(child);
     // 管道名必须存下来：send_mpv_command_embedded 全靠它找到 mpv。
     // mpv 是异步建管道的，spawn 返回时管道可能还没就绪，首条命令偶发连不上属正常
     *MPV_PIPE.lock().unwrap() = Some(pipe_name.clone());
+    *MPV_IPC.lock().unwrap() = Some(crate::mpv_ipc::Session::start(
+        pipe_name.clone(),
+        instance_id.unwrap_or(0),
+        Some(app),
+    ));
 
     // 视频子窗口在 WebView2 下面（见 resize 的 HWND_BOTTOM），网页层不挖空就整块黑掉没画面
     set_webview_hole(parent_hwnd, x, y, width, height, &[]);
 
-    eprintln!("[embedded-player] mpv started, pid={}, hwnd={}, pipe={}", pid, child_hwnd as isize, pipe_name);
+    eprintln!(
+        "[embedded-player] mpv started, pid={}, hwnd={}, pipe={}",
+        pid, child_hwnd as isize, pipe_name
+    );
 
     Ok(serde_json::json!({
         "ok": true,
@@ -443,16 +521,36 @@ pub fn set_embedded_player_visible(visible: bool) -> Result<bool, String> {
 
 /// 停止嵌入式播放器
 #[tauri::command]
-pub fn stop_embedded_player() -> Result<bool, String> {
+pub fn stop_embedded_player(instance_id: Option<u64>) -> Result<bool, String> {
+    let _lifecycle = MPV_LIFECYCLE.lock().map_err(|_| "播放器生命周期锁不可用")?;
+    stop_embedded_player_inner(instance_id)
+}
+
+fn stop_embedded_player_inner(instance_id: Option<u64>) -> Result<bool, String> {
+    if instance_id.is_some_and(|id| id != MPV_INSTANCE_ID.load(Ordering::SeqCst)) {
+        return Ok(false);
+    }
+    for id in MPV_MEDIA_GRANTS.lock().unwrap().drain(..) {
+        crate::media_stream::release(&id);
+    }
+    MPV_SUBTITLE_SOURCES.lock().unwrap().clear();
+    if let Some(ipc) = MPV_IPC.lock().unwrap().take() {
+        ipc.stop();
+    }
     // 停止 mpv 进程
     {
         let mut guard = MPV_PROCESS.lock().unwrap();
         if let Some(child) = guard.as_mut() {
             let _ = child.kill();
+            let _ = child.wait();
             *guard = None;
         }
     }
     *MPV_PIPE.lock().unwrap() = None;
+    if let Some(path) = MPV_INPUT_FILE.lock().unwrap().take() {
+        let _ = std::fs::remove_file(path);
+    }
+    MPV_INSTANCE_ID.store(0, Ordering::SeqCst);
 
     // 销毁子窗口
     let hwnd = CHILD_HWND.swap(0, Ordering::SeqCst);
@@ -467,69 +565,62 @@ pub fn stop_embedded_player() -> Result<bool, String> {
     Ok(true)
 }
 
+/// 正常 EOF 由 eof-reached 表示；进程退出另行归因，不能伪装成播完。
+#[tauri::command]
+pub fn get_embedded_player_status(instance_id: Option<u64>) -> Result<serde_json::Value, String> {
+    let _lifecycle = MPV_LIFECYCLE.lock().map_err(|_| "播放器生命周期锁不可用")?;
+    player_status_inner(instance_id)
+}
+
+fn player_status_inner(instance_id: Option<u64>) -> Result<serde_json::Value, String> {
+    if instance_id.is_some_and(|id| id != MPV_INSTANCE_ID.load(Ordering::SeqCst)) {
+        return Ok(serde_json::json!({ "running": false, "stale": true }));
+    }
+    let mut process = MPV_PROCESS.lock().map_err(|_| "播放器进程锁不可用")?;
+    let Some(child) = process.as_mut() else {
+        return Ok(serde_json::json!({ "running": false }));
+    };
+    match child.try_wait().map_err(|error| error.to_string())? {
+        None => Ok(serde_json::json!({ "running": true })),
+        Some(status) => Ok(serde_json::json!({ "running": false, "exit_code": status.code() })),
+    }
+}
+
+#[tauri::command]
+pub fn get_embedded_player_state(instance_id: Option<u64>) -> Result<serde_json::Value, String> {
+    let _lifecycle = MPV_LIFECYCLE.lock().map_err(|_| "播放器生命周期锁不可用")?;
+    let status = player_status_inner(instance_id)?;
+    if status["stale"] == true {
+        return Ok(serde_json::json!({ "status": status, "properties": {} }));
+    }
+    for id in MPV_MEDIA_GRANTS.lock().unwrap().iter() {
+        crate::media_stream::renew(id);
+    }
+    let mut properties = MPV_IPC
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|ipc| ipc.snapshot())
+        .unwrap_or_else(|| serde_json::json!({}));
+    properties["subtitle-source-order"] =
+        serde_json::json!(MPV_SUBTITLE_SOURCES.lock().unwrap().clone());
+    Ok(serde_json::json!({ "status": status, "properties": properties }))
+}
+
 /// 发送一条命令到 mpv JSON IPC，返回 mpv 的响应对象。
 /// 协议：管道上写一行 `{"command":[...],"request_id":N}`，再按 request_id 收响应；
 /// 管道里还会混着 `{"event":...}` 异步事件，按 request_id 过滤掉
 #[tauri::command]
-pub fn send_mpv_command_embedded(command: Vec<serde_json::Value>) -> Result<serde_json::Value, String> {
-    let pipe = MPV_PIPE
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("mpv 未运行")?;
-    // 整段 IO 丢进工作线程：mpv 卡死不能把 UI 线程的 invoke 拖住
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(mpv_request_blocking(&pipe, command));
-    });
-    rx.recv_timeout(std::time::Duration::from_millis(3000))
-        .map_err(|_| "mpv IPC 超时".to_string())?
-}
-
-fn mpv_request_blocking(
-    pipe: &str,
+pub async fn send_mpv_command_embedded(
     command: Vec<serde_json::Value>,
+    instance_id: Option<u64>,
 ) -> Result<serde_json::Value, String> {
-    use std::io::{BufRead, BufReader, Write};
-
-    static REQ_ID: AtomicU64 = AtomicU64::new(1);
-    let id = REQ_ID.fetch_add(1, Ordering::SeqCst);
-
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(pipe)
-        .map_err(|e| format!("连接 mpv IPC 失败: {e}"))?;
-
-    let payload = serde_json::json!({ "command": command, "request_id": id });
-    file.write_all(payload.to_string().as_bytes())
-        .and_then(|_| file.write_all(b"\n"))
-        .map_err(|e| format!("写 mpv IPC 失败: {e}"))?;
-
-    let mut reader = BufReader::new(file);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let n = reader
-            .read_line(&mut line)
-            .map_err(|e| format!("读 mpv 响应失败: {e}"))?;
-        if n == 0 {
-            return Err("mpv IPC 已关闭".into());
+    let ipc = {
+        let _lifecycle = MPV_LIFECYCLE.lock().map_err(|_| "播放器生命周期锁不可用")?;
+        if instance_id.is_some_and(|id| id != MPV_INSTANCE_ID.load(Ordering::SeqCst)) {
+            return Err("播放请求已被替换".into());
         }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let v: serde_json::Value = serde_json::from_str(trimmed)
-            .map_err(|e| format!("mpv 响应解析失败: {e}"))?;
-        if v.get("request_id").and_then(|r| r.as_u64()) != Some(id) {
-            continue; // 异步事件，不是本条命令的响应
-        }
-        if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
-            if err != "success" {
-                return Err(format!("mpv 命令失败: {err}"));
-            }
-        }
-        return Ok(v);
-    }
+        MPV_IPC.lock().unwrap().clone().ok_or("mpv 未运行")?
+    };
+    ipc.command(command).await
 }

@@ -49,6 +49,8 @@ class DiscClip:
     path: Path
     in_time: int
     out_time: int
+    input_url: str | None = None
+    timed: bool = True
 
     @property
     def duration_s(self) -> float:
@@ -62,6 +64,31 @@ class DiscSource:
     disc_dir: Path
     playlist_name: str
     clips: tuple[DiscClip, ...]
+    keyframe_times: tuple[float, ...] | None = None
+    virtual: bool = False
+    dependencies: tuple[Path, ...] = ()
+    stream_ids: tuple[int, ...] = ()
+
+    @property
+    def fingerprint(self) -> str:
+        return self._fingerprint(stream_contract=True)
+
+    @property
+    def probe_fingerprint(self) -> str:
+        # Raw stream discovery must not depend on the IDs it discovers. Subtitle
+        # cache identity does include that contract, invalidating older manifests.
+        return self._fingerprint(stream_contract=False)
+
+    def _fingerprint(self, *, stream_contract: bool) -> str:
+        import hashlib
+
+        paths = set(self.dependencies or (self.disc_dir, *(clip.path for clip in self.clips)))
+        records = tuple(
+            (str(path), path.stat().st_mtime_ns, path.stat().st_size) for path in sorted(paths)
+        )
+        return hashlib.sha256(
+            (self.concat_list(stream_contract=stream_contract) + repr(records)).encode()
+        ).hexdigest()
 
     @property
     def duration_s(self) -> float:
@@ -70,7 +97,7 @@ class DiscSource:
     @property
     def single_clip(self) -> DiscClip | None:
         """主片只有一个 m2ts 时返回它（可直接按文件供流）；多剪辑返回 None。"""
-        return self.clips[0] if len(self.clips) == 1 else None
+        return self.clips[0] if len(self.clips) == 1 and not self.virtual else None
 
     @property
     def display_name(self) -> str:
@@ -82,6 +109,7 @@ class DiscSource:
         *,
         entry: Callable[[int, DiscClip], str] | None = None,
         options: Sequence[tuple[str, str]] = (),
+        stream_contract: bool = True,
     ) -> str:
         """ffmpeg concat demuxer 的清单文本（``-f concat -safe 0 -i 清单``）。
 
@@ -95,13 +123,17 @@ class DiscSource:
         续读参数）。不传就是 NAS 本机读盘用的绝对路径清单。
         """
         lines = ["ffconcat version 1.0"]
+        if stream_contract:
+            for stream_id in self.stream_ids:
+                lines.extend(("stream", f"exact_stream_id {stream_id}"))
         for index, clip in enumerate(self.clips):
-            target = entry(index, clip) if entry is not None else str(clip.path)
+            target = entry(index, clip) if entry is not None else (clip.input_url or str(clip.path))
             escaped = target.replace("'", "'\\''")
             lines.append(f"file '{escaped}'")
             lines.extend(f"option {key} {value}" for key, value in options)
-            lines.append(f"inpoint {clip.in_time / MPLS_CLOCK_HZ:.6f}")
-            lines.append(f"outpoint {clip.out_time / MPLS_CLOCK_HZ:.6f}")
+            if clip.timed:
+                lines.append(f"inpoint {clip.in_time / MPLS_CLOCK_HZ:.6f}")
+                lines.append(f"outpoint {clip.out_time / MPLS_CLOCK_HZ:.6f}")
             lines.append(f"duration {clip.duration_s:.6f}")
         return "\n".join(lines) + "\n"
 
@@ -110,6 +142,8 @@ class DiscSource:
 
         只收落在各段 IN/OUT 之内的入口点，再加上该段在时间轴上的偏移。
         """
+        if self.keyframe_times is not None:
+            return KeyframeIndex(times_s=self.keyframe_times) if self.keyframe_times else None
         cached = _keyframe_cache.get(self._cache_key)
         if cached is not None:
             return cached
@@ -171,6 +205,18 @@ def disc_source_for_file(file: LibraryFile, *, read_disc: bool = True) -> DiscSo
     网络挂载上就是一次往返，列表页有上百张盘时不可接受。播放场景传 True，
     存量未补探的行退回读盘（结果缓存）。
     """
+    if (file.container or "") in {"iso", "dvd"}:
+        if not read_disc:
+            return None
+        from movieclaw_api.services.library.udf import UDFError
+        from movieclaw_api.services.playback.disc_fallback import dvd_folder_source, iso_source
+
+        try:
+            loader = iso_source if file.container == "iso" else dvd_folder_source
+            return loader(Path(file.file_path))
+        except (OSError, UDFError, ValueError, KeyError) as exc:
+            logger.info("原盘主标题不可读：%s（%s）", file.file_path, exc)
+            return None
     if (file.container or "") != "bluray":
         return None
     disc_dir = Path(file.file_path)
@@ -229,9 +275,7 @@ def _stream_resolver(stream_dir: Path) -> Callable[[str], Path]:
     """剪辑 id → 实际文件路径的解析器：整个 STREAM 目录只列一次（多剪辑主片动辄几十段）。"""
     try:
         actual = {
-            entry.stem: entry
-            for entry in stream_dir.iterdir()
-            if entry.suffix.lower() == ".m2ts"
+            entry.stem: entry for entry in stream_dir.iterdir() if entry.suffix.lower() == ".m2ts"
         }
     except OSError:
         actual = {}

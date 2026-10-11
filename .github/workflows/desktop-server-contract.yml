@@ -1,0 +1,116 @@
+name: Desktop server contracts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, feat/windows-native, 'codex/**']
+    paths:
+      - 'src/movieclaw_api/schemas/auth.py'
+      - 'src/movieclaw_api/services/auth.py'
+      - 'src/movieclaw_api/services/login_devices.py'
+      - 'src/movieclaw_api/api/routes/auth.py'
+      - 'src/movieclaw_api/api/routes/playback.py'
+      - 'src/movieclaw_api/schemas/playback.py'
+      - 'src/movieclaw_api/services/library/udf.py'
+      - 'src/movieclaw_api/services/media_extract.py'
+      - 'src/movieclaw_api/services/playback/**'
+      - 'tests/api/test_auth.py'
+      - 'tests/api/test_device_auth.py'
+      - 'tests/api/test_login_devices.py'
+      - 'tests/playback/test_decide.py'
+      - 'tests/playback/test_disc_fallback.py'
+      - 'tests/playback/test_ffmpeg_args.py'
+      - 'tests/playback/test_media_extract.py'
+      - 'tests/playback/test_embedded_subs.py'
+      - 'tests/api/test_windows_disc_playback.py'
+      - 'tests/api/test_reels_disc_index.py'
+      - 'src/movieclaw_playback/decide.py'
+      - 'apps/web/lib/devices-display.ts'
+      - 'apps/web/test/devices-display.test.mjs'
+      - '.github/workflows/desktop-server-contract.yml'
+  pull_request:
+    paths:
+      - 'src/movieclaw_api/**'
+      - 'tests/api/test_auth.py'
+      - 'tests/api/test_device_auth.py'
+      - 'tests/api/test_login_devices.py'
+      - 'tests/playback/test_decide.py'
+      - 'tests/playback/test_disc_fallback.py'
+      - 'tests/playback/test_ffmpeg_args.py'
+      - 'tests/playback/test_media_extract.py'
+      - 'tests/playback/test_embedded_subs.py'
+      - 'tests/api/test_windows_disc_playback.py'
+      - 'tests/api/test_reels_disc_index.py'
+      - 'src/movieclaw_playback/decide.py'
+      - 'apps/web/lib/devices-display.ts'
+      - 'apps/web/test/devices-display.test.mjs'
+      - '.github/workflows/desktop-server-contract.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-server-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-device-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: astral-sh/setup-uv@v6
+      - name: Install real software media tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ffmpeg fonts-dejavu-core
+          ffmpeg -version
+          ffprobe -version
+      - name: Install isolated backend test dependencies
+        run: |
+          uv venv .venv
+          uv pip install -e '.[dev]'
+      - name: Authentication and media negotiation contract lint
+        run: >-
+          uv run --no-project ruff check
+          src/movieclaw_api/schemas/auth.py src/movieclaw_api/services/auth.py
+          src/movieclaw_api/services/login_devices.py src/movieclaw_api/api/routes/auth.py
+          tests/api/test_auth.py tests/api/test_device_auth.py tests/api/test_login_devices.py
+          src/movieclaw_playback/decide.py tests/playback/test_decide.py
+          src/movieclaw_api/api/routes/playback.py src/movieclaw_api/schemas/playback.py
+          src/movieclaw_api/services/library/udf.py
+          src/movieclaw_api/services/media_extract.py
+          src/movieclaw_api/services/playback/disc_fallback.py
+          src/movieclaw_api/services/playback/disc_source.py
+          src/movieclaw_api/services/playback/ffmpeg_args.py
+          src/movieclaw_api/services/playback/plan.py
+          tests/playback/test_disc_fallback.py tests/playback/test_ffmpeg_args.py
+          tests/playback/test_media_extract.py tests/playback/test_embedded_subs.py
+          tests/api/test_windows_disc_playback.py
+          tests/api/test_reels_disc_index.py
+      - name: Real device authentication and optical disc negotiation contracts
+        run: >-
+          uv run --no-project python -m pytest
+          tests/api/test_auth.py tests/api/test_device_auth.py tests/api/test_login_devices.py
+          tests/playback/test_decide.py
+          tests/playback/test_disc_fallback.py tests/playback/test_ffmpeg_args.py
+          tests/playback/test_media_extract.py tests/playback/test_embedded_subs.py
+          tests/api/test_windows_disc_playback.py
+          tests/api/test_reels_disc_index.py
+          --disable-warnings --junitxml=desktop-server-results.xml
+      - name: Web device approval and privilege descriptions
+        run: node --test apps/web/test/devices-display.test.mjs
+      - name: Upload server contract result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-server-${{ github.sha }}
+          path: desktop-server-results.xml
+          if-no-files-found: warn
+          retention-days: 14

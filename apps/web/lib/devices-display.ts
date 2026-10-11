@@ -14,6 +14,7 @@ const CLIENT_TYPE_LABEL: Record<string, string> = {
   cli: "命令行 / Agent",
   tvos: "Apple TV",
   macos: "Mac",
+  windows: "Windows",
   manual: "手工令牌",
 };
 
@@ -55,13 +56,14 @@ export function grantSummary(type: string, role: ViewerRole = "admin"): GrantSum
         "只批准你面前这台电视上显示的配对码。",
     };
   }
-  if (type === "macos") {
+  if (type === "macos" || type === "windows") {
     // Mac App 扫码登录：与 Apple TV 同一口径，等同在这台 Mac 上用你的账号密码登录
+    const computer = type === "windows" ? "Windows 电脑" : "Mac";
     return {
-      title: role === "member" ? "将获得：这台 Mac 以你的身份登录" : "将获得：这台 Mac 以你的超级管理员身份登录",
+      title: role === "member" ? `将获得：这台 ${computer} 以你的身份登录` : `将获得：这台 ${computer} 以你的超级管理员身份登录`,
       body:
-        "等同你在这台 Mac 上输入账号密码登录：它能看到你能看到的媒体库、记录你的观看进度。" +
-        "只批准你面前这台 Mac 上显示的配对码。",
+        `等同你在这台 ${computer} 上输入账号密码登录：它能看到你能看到的媒体库、记录你的观看进度。` +
+        `只批准你面前这台 ${computer} 上显示的配对码。`,
     };
   }
   if (role === "member") {
@@ -172,7 +174,7 @@ const DEVICE_GROUPS: { key: string; label: string }[] = [
  */
 export function deviceGroupKey(kind: string): string {
   if (kind === "web") return "browser";
-  if (kind === "ios" || kind === "tvos" || kind === "macos" || kind === "android") return "app";
+  if (kind === "ios" || kind === "tvos" || kind === "macos" || kind === "windows" || kind === "android") return "app";
   if (kind === "jellyfin") return "player";
   return "paired";
 }
@@ -199,7 +201,7 @@ export function deviceGlyph(kind: string, scope: string): DeviceGlyph {
   if (kind === "worker" || scope === "transcode") return "transcoder";
   if (kind === "ios" || kind === "android") return "phone";
   if (kind === "tvos") return "tv";
-  if (kind === "macos") return "computer";
+  if (kind === "macos" || kind === "windows") return "computer";
   if (kind === "web") return "browser";
   if (kind === "jellyfin") return "player";
   return "terminal";

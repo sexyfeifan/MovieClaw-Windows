@@ -1,19 +1,49 @@
 // MovieClaw Desktop — API client
 // Uses Rust proxy command (proxy_api) for cookie-aware, CORS-free requests
 
+class APIError extends Error {
+  constructor(message, { status = 0, code = '', body = null, headers = {} } = {}) {
+    super(message);
+    this.name = 'APIError';
+    this.status = status;
+    this.code = code;
+    this.body = body;
+    this.headers = headers;
+  }
+}
+
 const API = {
   baseUrl: '',
+  contextEpoch: 0,
+  _pending: new Map(),
+  _requestSequence: 0,
+
+  scope(signal) {
+    return Object.assign(Object.create(this), { defaultSignal: signal });
+  },
+
+  invalidateContext() {
+    this.contextEpoch++;
+    this._preconnectAt = 0;
+    for (const cancel of this._pending.values()) cancel();
+  },
 
   async init() {
-    this.baseUrl = (window.__MOVIECLAW_SERVER__ || '').replace(/\/+$/, '');
-    if (!this.baseUrl && window.__TAURI__) {
+    const sequence = this._initSequence = (this._initSequence || 0) + 1;
+    let url = window.__MOVIECLAW_SERVER__ || '';
+    if (window.__TAURI__) {
       try {
-        const url = await window.__TAURI__.core.invoke('get_server_url');
-        this.baseUrl = (url || '').replace(/\/+$/, '');
+        url = await window.__TAURI__.core.invoke('get_server_url');
       } catch (e) {
-        console.error('Failed to get server URL:', e);
+        throw new APIError('无法读取服务器配置：' + (e.message || e), { code: 'CONFIG_UNAVAILABLE' });
       }
     }
+    if (sequence !== this._initSequence) return;
+    const next = (url || '').replace(/\/+$/, '');
+    if (this.baseUrl !== next) this.invalidateContext();
+    this.baseUrl = next;
+    window.__MOVIECLAW_SERVER__ = next;
+    await window.__TAURI__?.core.invoke('native_ready').catch(() => {});
   },
 
   // 通过 proxy_api 的 /__image__ 路径加载需要认证的图片，返回 data URI
@@ -25,44 +55,73 @@ const API = {
         fullPath = '/api/v1' + (pathOrUrl.startsWith('/') ? pathOrUrl : '/' + pathOrUrl);
       }
       const encoded = encodeURIComponent(fullPath);
-      const result = await window.__TAURI__.core.invoke('proxy_api', {
-        method: 'GET',
-        path: '/__image__?url=' + encoded,
-        body: null,
-      });
-      if (result.status === 200 && result.body.startsWith('data:')) {
-        return result.body;
+      const result = await this.rawFetch('/__image__?url=' + encoded);
+      const body = await result.text();
+      if (result.status === 200 && body.startsWith('data:image/')) {
+        return body;
       }
       return '';
     } catch (e) {
-      console.warn('[API] proxyImage failed:', pathOrUrl, e);
+      console.warn('[API] image request failed', { name: e?.name || 'Error', status: e?.status || 0 });
       return '';
     }
   },
 
   // 通过 Rust proxy_api 命令发送请求（自动 Cookie，绕过 CORS，无 URL scope 限制）
   async rawFetch(path, options = {}) {
+    const started = window.performance?.now();
     const method = (options.method || 'GET').toUpperCase();
     const body = options.body || null;
-
-    console.log('[API] proxy_api', method, path);
+    const signal = options.signal || this.defaultSignal;
+    const requestId = 'desktop-' + Date.now() + '-' + (++API._requestSequence);
+    // Session creation is a side effect: its late response must reach the player so it can release it.
+    const cancelable = options.cancelable ?? (method === 'GET' || method === 'HEAD');
+    const epoch = API.contextEpoch;
+    if (cancelable && signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
+    let timer;
+    let abort;
     try {
-      const result = await window.__TAURI__.core.invoke('proxy_api', {
+      const pending = window.__TAURI__.core.invoke('proxy_api', {
         method,
         path,
         body: body || null,
+        headers: options.headers || {},
+        requestId,
       });
-      console.log('[API] Response status:', result.status);
-      // 构造一个类 Response 对象
+      const canceled = new Promise((_, reject) => {
+        abort = () => {
+          window.__TAURI__.core.invoke('cancel_proxy_request', { requestId }).catch(() => {});
+          reject(new DOMException('请求已取消', 'AbortError'));
+        };
+        if (cancelable) {
+          API._pending.set(requestId, abort);
+          signal?.addEventListener('abort', abort, { once: true });
+        }
+        const timeout = options.timeoutMs ?? 20000;
+        if (timeout > 0) timer = setTimeout(() => {
+          if (cancelable) window.__TAURI__.core.invoke('cancel_proxy_request', { requestId }).catch(() => {});
+          reject(new APIError('连接服务器超时，请检查网络后重试', { code: 'TIMEOUT' }));
+        }, timeout);
+      });
+      const result = await Promise.race([pending, canceled]);
+      if (cancelable && (signal?.aborted || epoch !== API.contextEpoch)) throw new DOMException('请求已取消', 'AbortError');
+      const headerValues = result.headers || {};
+      const headers = new Headers(headerValues);
+      if (started != null) window.MovieClawPerf?.network(path, window.performance.now() - started, headers.get('server-timing'));
       return {
         ok: result.status >= 200 && result.status < 300,
         status: result.status,
+        headers,
         text: async () => result.body,
         json: async () => JSON.parse(result.body),
       };
     } catch (e) {
-      console.error('[API] proxy_api error:', e);
-      throw new Error('网络请求失败: ' + (e.message || e));
+      if (e.name === 'AbortError' || e instanceof APIError) throw e;
+      throw new APIError('网络请求失败：' + (e.message || e), { code: 'NETWORK_ERROR' });
+    } finally {
+      clearTimeout(timer);
+      API._pending.delete(requestId);
+      signal?.removeEventListener('abort', abort);
     }
   },
 
@@ -75,18 +134,21 @@ const API = {
       body = JSON.stringify(body);
     }
 
-    const res = await this.rawFetch(path, { method, body });
+    // Cookie mutations must fully settle in Rust before UI identity can recover or change again.
+    const timeoutMs = options.timeoutMs ?? (path.startsWith('/auth/') && method !== 'GET' && method !== 'HEAD' ? 0 : undefined);
+    const res = await this.rawFetch(path, { ...options, timeoutMs, method, body });
 
     if (res.status === 204) return null;
 
     const text = await res.text();
-    console.log('[API] Response body:', text.substring(0, 200));
     let data;
     try { data = JSON.parse(text); } catch { data = text; }
 
     if (!res.ok) {
-      const msg = (data && data.message) || text || `HTTP ${res.status}`;
-      throw new Error(`API ${res.status}: ${msg}`);
+      const msg = (data && data.message) || (typeof data?.detail === 'string' ? data.detail : '') || `请求失败（HTTP ${res.status}）`;
+      const error = new APIError(msg, { status: res.status, code: data?.code || '', body: data, headers: res.headers });
+      if (res.status === 401 && !path.startsWith('/auth/')) API.onUnauthorized?.(error);
+      throw error;
     }
     return data;
   },
@@ -95,6 +157,11 @@ const API = {
   listLibraries() {
     return this.request('/libraries');
   },
+
+  getUiPreferences() { return this.request('/ui/preferences'); },
+  saveUiPreferences(body) { return this.request('/ui/preferences', { method: 'PUT', body }); },
+  listKindItems(kind, params = {}) { return this.request(`/libraries/kinds/${encodeURIComponent(kind)}/items?${new URLSearchParams(params)}`); },
+  listKindGenres(kind) { return this.request(`/libraries/kinds/${encodeURIComponent(kind)}/genres`); },
 
   getLibrary(id) {
     return this.request(`/libraries/${id}`);
@@ -123,8 +190,9 @@ const API = {
     return this.request(`/collections/${id}`);
   },
 
-  listCollectionItems(id) {
-    return this.request(`/collections/${id}/items`);
+  listCollectionItems(id, params = {}) {
+    const qs = new URLSearchParams(params).toString();
+    return this.request(`/collections/${id}/items${qs ? '?' + qs : ''}`);
   },
 
   // 系列合集：「已有 N / 共 M」与逐部缺片名单（详情页的作品系列行）
@@ -133,17 +201,14 @@ const API = {
   },
 
   // ===== 搜索 =====
-  search(query) {
-    return this.request(`/search/library?q=${encodeURIComponent(query)}`);
+  search(query, params = {}) {
+    const qs = new URLSearchParams({ q: query, ...params }).toString();
+    return this.request(`/search/library?${qs}`);
   },
 
   // ===== 人物 =====
   getPerson(personId) {
     return this.request(`/people/${personId}`);
-  },
-
-  getPersonCredits(personId) {
-    return this.request(`/people/${personId}/credits`);
   },
 
   // ===== 播放 =====
@@ -165,7 +230,7 @@ const API = {
   // 进度上报
   // POST /playback/progress body: { media_item_id, event, position_ms, duration_ms, season_number?, episode_number? }
   // event: "start" | "progress" | "stop"
-  reportProgress(mediaItemId, event, positionMs, durationMs, seasonNumber, episodeNumber) {
+  reportProgress(mediaItemId, event, positionMs, durationMs, seasonNumber, episodeNumber, extras = {}, options = {}) {
     const body = {
       media_item_id: mediaItemId,
       event,
@@ -174,7 +239,10 @@ const API = {
     if (durationMs != null) body.duration_ms = durationMs;
     if (seasonNumber != null) body.season_number = seasonNumber;
     if (episodeNumber != null) body.episode_number = episodeNumber;
-    return this.request('/playback/progress', { method: 'POST', body });
+    for (const key of ['audio_track', 'subtitle_track', 'file_id', 'paused', 'device_id']) {
+      if (extras[key] != null) body[key] = extras[key];
+    }
+    return this.request('/playback/progress', { ...options, method: 'POST', body });
   },
 
   // 续播位置
@@ -210,8 +278,9 @@ const API = {
   },
 
   // 收藏列表
-  getFavorites() {
-    return this.request('/playback/favorites');
+  getFavorites(params = {}) {
+    const qs = new URLSearchParams(params).toString();
+    return this.request(`/playback/favorites${qs ? '?' + qs : ''}`);
   },
 
   // 收藏/已看 标记
@@ -235,12 +304,45 @@ const API = {
   },
 
   // ===== 认证 =====
+  async nativeCall(command, args = {}) {
+    try { return await window.__TAURI__.core.invoke(command, args); }
+    catch (error) {
+      let detail; try { detail = JSON.parse(typeof error === 'string' ? error : error.message); } catch (_) {}
+      throw new APIError(detail?.message || error.message || String(error), { status: detail?.status || 0, code: detail?.code || 'NATIVE_AUTH_ERROR' });
+    }
+  },
+
+  async getNativeAuthStatus() {
+    const epoch = API.contextEpoch;
+    try {
+      const status = await this.nativeCall('native_auth_status');
+      if (epoch !== API.contextEpoch) return null;
+      API.nativeAuthAvailable = !!status;
+      if (status) API.nativeAuthStatus = status;
+      return status;
+    } catch (error) {
+      // An older desktop binary may lack the command; a real authentication failure stays visible.
+      if (/unknown command|not found|unexpected fixture command|not registered/i.test(error.message)) {
+        API.nativeAuthAvailable = false; return null;
+      }
+      throw error;
+    }
+  },
+
+  async nativeMutation(command, args) {
+    const status = await this.nativeCall(command, args);
+    API.nativeAuthStatus = status;
+    return { data: status.session };
+  },
+
   getSession() {
     return this.request('/auth/me');
   },
 
-  async login(username, password, remember = true) {
+  async login(username, password, remember = true, options = {}) {
+    if (API.nativeAuthAvailable) return this.nativeMutation('native_password_login', { username, password });
     return this.request('/auth/login', {
+      ...options,
       method: 'POST',
       body: { username, password, remember },
     });
@@ -250,40 +352,50 @@ const API = {
     return this.request('/auth/bootstrap');
   },
 
-  async createAdmin(username, password) {
-    return this.request('/auth/bootstrap', {
+  async createAdmin(username, password, options = {}) {
+    const response = await this.request('/auth/bootstrap', {
+      ...options,
       method: 'POST',
       body: { username, password },
     });
+    if (API.nativeAuthAvailable && API.nativeAuthStatus?.mode === 'device') return this.login(username, password);
+    return response;
   },
 
   // 多账号
   async listAccounts() {
+    if (API.nativeAuthAvailable) { const status = await this.getNativeAuthStatus(); return { data: status.accounts }; }
     return this.request('/auth/accounts');
   },
 
-  async switchAccount(accountId) {
+  async switchAccount(username) {
+    if (API.nativeAuthAvailable) return this.nativeMutation('native_select_account', { username });
     return this.request('/auth/accounts/switch', {
       method: 'POST',
-      body: { account_id: accountId },
+      body: { username },
     });
   },
 
-  async removeAccount(accountId) {
-    return this.request('/auth/accounts/remove', {
-      method: 'POST',
-      body: { account_id: accountId },
-    });
+  async removeAccount(username) {
+    if (API.nativeAuthAvailable) return this.nativeMutation('native_remove_account', { username });
+    return this.request(`/auth/accounts/${encodeURIComponent(username)}`, { method: 'DELETE' });
   },
+
+  async logout() {
+    if (API.nativeAuthAvailable) return this.nativeMutation('native_logout', { all: false });
+    return this.request('/auth/logout', { method: 'POST' });
+  },
+
+  beginPairing() { return this.nativeCall('native_pair_begin'); },
+  pollPairing(pairingId) { return this.nativeCall('native_pair_poll', { pairingId }); },
+  cancelPairing(pairingId) { return this.nativeCall('native_pair_cancel', { pairingId }); },
 
   // QR 配对
-  async getDeviceCode() {
-    return this.request('/auth/device/code');
+  async getDeviceCode(client) {
+    return this.request('/auth/device/authorize', { method: 'POST', body: client });
   },
 
   async checkDeviceStatus(deviceCode) {
-    return this.request(`/auth/device/status?code=${encodeURIComponent(deviceCode)}`);
+    return this.request('/auth/device/token', { method: 'POST', body: { device_code: deviceCode } });
   },
 };
-
-API.init();

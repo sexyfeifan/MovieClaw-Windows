@@ -1,11 +1,12 @@
 """生成 mpv sidecar 校验文件 (mpv-checksum.json)"""
-import hashlib, json, os, sys
+import hashlib
+import json
+import os
+import sys
+
 
 def main():
-    if len(sys.argv) < 2:
-        mpv_path = input("mpv.exe 路径: ").strip()
-    else:
-        mpv_path = sys.argv[1]
+    mpv_path = input("mpv.exe 路径: ").strip() if len(sys.argv) < 2 else sys.argv[1]
 
     if not os.path.exists(mpv_path):
         print(f"文件不存在: {mpv_path}")

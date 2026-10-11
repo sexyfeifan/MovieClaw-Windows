@@ -68,13 +68,17 @@ def _bootstrap(client: TestClient, **overrides):
 
 def test_bootstrap_status_flips_after_init(client: TestClient) -> None:
     """空库为未初始化；建号后状态翻转，且不可逆。"""
-    assert client.get(f"{_AUTH}/bootstrap").json()["data"]["initialized"] is False
+    initial = client.get(f"{_AUTH}/bootstrap").json()["data"]
+    assert initial["initialized"] is False
+    assert initial["native_device_kinds"] == ["ios", "tvos", "macos", "windows", "android"]
 
     resp = _bootstrap(client)
     assert resp.status_code == 200
     assert resp.json()["data"]["username"] == "admin"
 
-    assert client.get(f"{_AUTH}/bootstrap").json()["data"]["initialized"] is True
+    initialized = client.get(f"{_AUTH}/bootstrap").json()["data"]
+    assert initialized["initialized"] is True
+    assert initialized["native_device_kinds"] == initial["native_device_kinds"]
 
 
 def test_bootstrap_rejects_second_attempt(client: TestClient) -> None:

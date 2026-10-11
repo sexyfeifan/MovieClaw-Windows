@@ -6,7 +6,7 @@ function ProxyHlsLoader(config) {
   this.config = config || {};
   // stats 必须在构造时创建：hls.js 在调用 load() 之前就执行 frag.stats = loader.stats
   this.stats = {
-    aborted: false, loaded: 0, total: 0, retry: 0, chunkCount: 0, bwEstimate: 0,
+    aborted: false, loaded: 0, total: 0, retry: 0, chunkCount: 0, bwEstimate: 0, _metered: false,
     loading: { start: 0, first: 0, end: 0 },
     parsing: { start: 0, end: 0 },
     buffering: { start: 0, end: 0 },
@@ -16,93 +16,194 @@ function ProxyHlsLoader(config) {
 }
 
 ProxyHlsLoader.prototype.destroy = function () {
+  this.abort();
   this.callbacks = null;
 };
 
 ProxyHlsLoader.prototype.abort = function () {
-  if (this.stats) this.stats.aborted = true;
+  const loading = this.loading;
+  this.loading = false;
+  this.stats.aborted = true;
+  this.controller?.abort();
+  if (this.streamId) window.__TAURI__.core.invoke('release_media_stream', { streamId: this.streamId }).catch(() => {});
+  this.streamId = null;
+  this.sequence = (this.sequence || 0) + 1;
+  if (loading) this.callbacks?.onAbort?.(this.stats, this.context, null);
 };
 
 ProxyHlsLoader.prototype.load = function (context, config, callbacks) {
-  this.context = context;
-  this.callbacks = callbacks;
-  // 重置字段，绝不换对象 — frag.stats 持有构造时创建的引用
-  var stats = this.stats;
-  stats.aborted = false; stats.loaded = 0; stats.total = 0; stats.retry = 0;
-  stats.chunkCount = 0; stats.bwEstimate = 0;
-  stats.loading = { start: performance.now(), first: 0, end: 0 };
-  stats.parsing = { start: 0, end: 0 };
-  stats.buffering = { start: 0, end: 0 };
-
-  var url = context.url;
-  var isBinary = context.responseType === 'arraybuffer' ||
-    /\.(ts|m4s|mp4|aac|ec3|webvtt)(\?|#|$)/i.test(url);
-
-  // 通过 Rust 流代理请求（自动携带 Cookie，绕过 CORS）
-  // 不管 url 是什么格式，统一用 /__stream__?url= 完整 URL 代理
-  var fullUrl;
-  if (url.startsWith('http://') || url.startsWith('https://')) {
-    fullUrl = url;
-  } else {
-    var base = (window.__MOVIECLAW_SERVER__ || '').replace(/\/+$/, '');
-    fullUrl = base + (url.startsWith('/') ? url : '/' + url);
-  }
-  var path = '/__stream__?url=' + encodeURIComponent(fullUrl);
-
-  var self = this;
-  window.__TAURI__.core.invoke('proxy_api', {
-    method: 'GET',
-    path: path,
-    body: null,
-  }).then(function (result) {
-    if (self.stats.aborted) return;
-    self.stats.loading.first = performance.now();
-    self.stats.loading.end = performance.now();
-
-    if (result.status !== 200) {
-      callbacks.onError({ code: result.status, text: 'HTTP ' + result.status }, self.stats, context, null);
-      return;
-    }
-
-    var responseData;
-    if (isBinary) {
-      // 二进制响应（视频分片）：base64 → ArrayBuffer
-      try {
-        var binary = atob(result.body);
-        var bytes = new Uint8Array(binary.length);
-        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        responseData = bytes.buffer;
-        self.stats.loaded = bytes.length;
-        self.stats.total = bytes.length;
-      } catch (e) {
-        callbacks.onError({ code: 0, text: 'base64 解码失败: ' + e.message }, self.stats, context, null);
+  this.abort();
+  this.context = context; this.callbacks = callbacks; this.loading = true;
+  const stats = this.stats;
+  Object.assign(stats, { aborted: false, loaded: 0, total: 0, retry: 0, chunkCount: 0, bwEstimate: 0, _metered: false,
+    loading: { start: performance.now(), first: 0, end: 0 }, parsing: { start: 0, end: 0 }, buffering: { start: 0, end: 0 } });
+  const controller = this.controller = new AbortController();
+  const sequence = this.sequence;
+  const alive = () => !stats.aborted && this.sequence === sequence && !controller.signal.aborted;
+  const binary = context.responseType === 'arraybuffer';
+  const progressive = !!this.config.progressive && binary && Number.isFinite(config?.highWaterMark) && !!callbacks.onProgress;
+  const generation = Player.generation;
+  const headers = {};
+  if (Number.isFinite(context.rangeStart)) headers.Range = 'bytes=' + context.rangeStart + '-' +
+    (Number.isFinite(context.rangeEnd) ? context.rangeEnd - 1 : '');
+  let streamId;
+  let timer;
+  const timeoutMs = config?.timeout || config?.maxLoadTimeMs || 120000;
+  const operation = async () => {
+    try {
+      const grant = await window.__TAURI__.core.invoke('grant_media_stream', { url: playbackMediaUrl(context.url) });
+      streamId = grant.streamId;
+      if (!alive()) return;
+      if (!grant.url || !streamId) throw new Error('媒体代理未返回有效地址');
+      this.streamId = streamId;
+      timer = setTimeout(() => {
+        if (!alive()) return;
+        this.loading = false;
+        controller.abort();
+        callbacks.onTimeout?.(stats, context, null);
+      }, timeoutMs);
+      const response = await fetch(grant.url, { headers, signal: controller.signal });
+      if (!alive()) return;
+      stats.loading.first = performance.now();
+      const networkDetails = { status: response.status, headers: Object.fromEntries(response.headers) };
+      if (!response.ok) {
+        this.loading = false;
+        callbacks.onError({ code: response.status, text: 'HTTP ' + response.status }, stats, context, networkDetails);
         return;
       }
-    } else {
-      responseData = result.body;
-      self.stats.loaded = result.body.length;
-      self.stats.total = result.body.length;
+      stats.total = Number(response.headers.get('content-length')) || 0;
+      const chunks = [];
+      if (response.body?.getReader) {
+        const reader = response.body.getReader();
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!alive()) return;
+            stats.loaded += value.byteLength;
+            if (binary && generation === Player.generation && Player._net) { Player._net.bytes += value.byteLength; stats._metered = true; }
+            if (progressive) callbacks.onProgress(stats, context, value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength), networkDetails);
+            else chunks.push(value);
+          }
+        } finally { reader.releaseLock(); }
+      } else {
+        const data = new Uint8Array(await response.arrayBuffer()); chunks.push(data); stats.loaded = data.byteLength;
+      }
+      if (!alive()) return;
+      const data = new Uint8Array(progressive ? 0 : stats.loaded);
+      let offset = 0;
+      for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.byteLength; }
+      stats.total = stats.loaded; stats.loading.end = performance.now();
+      if (generation === Player.generation) Player.measure('delivery', { elapsedMs: stats.loading.end - stats.loading.start });
+      this.loading = false;
+      callbacks.onSuccess({ url: context.url, data: binary ? data.buffer : new TextDecoder().decode(data), code: response.status }, stats, context, networkDetails);
+    } catch (error) {
+      if (!alive()) return;
+      stats.loading.end = performance.now();
+      this.loading = false;
+      callbacks.onError({ code: 0, text: error.message || '媒体代理请求失败' }, stats, context, null);
+    } finally {
+      clearTimeout(timer);
+      if (streamId) await window.__TAURI__.core.invoke('release_media_stream', { streamId }).catch(() => {});
+      if (this.sequence === sequence) { this.streamId = null; this.loading = false; }
     }
-
-    callbacks.onSuccess({ url: url, data: responseData, code: result.status }, self.stats, context, null);
-  }).catch(function (err) {
-    if (self.stats.aborted) return;
-    self.stats.loading.end = performance.now();
-    console.error('[ProxyHlsLoader] failed:', url, err);
-    callbacks.onError({ code: 0, text: (err && err.message) || '代理请求失败' }, self.stats, context, null);
-  });
+  };
+  operation();
 };
 
 // 挂到 window 确保全局可见
 window.ProxyHlsLoader = ProxyHlsLoader;
 
+// 收尾不能让窗口退出或换片无限等待网络。
+function boundedPlaybackWait(promise, milliseconds) {
+  let timer;
+  return Promise.race([promise, new Promise(resolve => { timer = setTimeout(resolve, milliseconds); })])
+    .finally(() => clearTimeout(timer));
+}
+
+function playerText(value) {
+  return String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function playbackNetworkKey() {
+  const connection = navigator.connection;
+  // Browser APIs cannot establish the machine's subnet. Keep unknown separate
+  // from measured link classes rather than calling every private server "home".
+  return [connection?.type || 'unknown', connection?.effectiveType || 'unknown', connection?.saveData ? 'limited' : 'normal'].join(':');
+}
+
+function playbackPreferenceKey(mediaId) {
+  return 'mc_player.' + API.baseUrl + '#' + (App.session?.username || '') + '#' + mediaId + '#' + playbackNetworkKey();
+}
+
+function rememberedQuality(mediaId) {
+  try {
+    const entries = JSON.parse(localStorage.getItem('mc_quality_memory') || '{}');
+    const value = entries[playbackPreferenceKey(mediaId)]?.height;
+    return [480, 720, 1080].includes(value) ? value : 0;
+  } catch (_) { return 0; }
+}
+
+function rememberQuality(mediaId, height) {
+  try {
+    const entries = JSON.parse(localStorage.getItem('mc_quality_memory') || '{}');
+    const key = playbackPreferenceKey(mediaId);
+    if (height > 0) entries[key] = { height, at: Date.now() };
+    else delete entries[key];
+    Object.keys(entries).sort((a, b) => entries[b].at - entries[a].at).slice(300).forEach(k => delete entries[k]);
+    localStorage.setItem('mc_quality_memory', JSON.stringify(entries));
+  } catch (_) {}
+}
+
+function languageMatches(language, preferred) {
+  const value = String(language || '').toLowerCase();
+  return preferred === 'zh' ? /^(zh|zho|chi|cmn|yue)/.test(value)
+    : preferred === 'en' ? /^(en|eng)/.test(value) : value === preferred;
+}
+
+function playbackMediaUrl(url) {
+  if (/^https?:\/\//i.test(url)) return url;
+  return API.baseUrl + (String(url).startsWith('/api/') ? url : '/api/v1' + (String(url).startsWith('/') ? url : '/' + url));
+}
+
+function mpvTrackMap(tracks, subtitlePlans, subtitleUrls, originalFile, nativeSources = []) {
+  const result = { audio: [], subtitles: [] };
+  for (const [type, output] of [['audio', result.audio], ['sub', result.subtitles]]) {
+    const internal = tracks.filter(t => t.type === type && !t.external)
+      .sort((a, b) => (a['ff-index'] ?? a.id) - (b['ff-index'] ?? b.id));
+    if (originalFile) internal.forEach((track, ordinal) => output.push({ ...track, ref: 'embedded:' + ordinal }));
+    else if (type === 'audio') internal.forEach(track => output.push({ ...track, ref: null }));
+  }
+  const key = url => { try { return decodeURIComponent(new URL(playbackMediaUrl(url)).href); } catch (_) { return String(url || ''); } };
+  tracks.filter(t => t.type === 'sub' && t.external).forEach(track => {
+    let index = subtitleUrls.findIndex(url => key(url) === key(track['external-filename']));
+    if (index < 0) {
+      const sourceOrdinal = nativeSources.indexOf(track['external-filename']);
+      const delivered = subtitlePlans.map((plan, i) => ({ plan, i })).filter(({ plan }) => !originalFile || !plan.track_ref.startsWith('embedded:'));
+      index = sourceOrdinal >= 0 ? delivered[sourceOrdinal]?.i ?? -1 : -1;
+    }
+    if (index >= 0 && subtitlePlans[index]) result.subtitles.push({ ...track, ref: subtitlePlans[index].track_ref });
+  });
+  return result;
+}
+
+function trickplayTile(index, fileMs) {
+  if (!index?.ready || !(index.interval_ms > 0 && index.columns > 0 && index.rows > 0 && index.count > 0)) return null;
+  const tile = Math.max(0, Math.min(index.count - 1, Math.floor(fileMs / index.interval_ms)));
+  const capacity = index.columns * index.rows;
+  const sheet = index.sheets?.[Math.floor(tile / capacity)];
+  return sheet ? { sheet, x: (tile % index.columns) * index.tile_width,
+    y: Math.floor(tile % capacity / index.columns) * index.tile_height,
+    width: index.tile_width, height: index.tile_height } : null;
+}
+
 // ===== 解码能力探测（移植自 web 客户端 lib/player/capability.ts，字段与服务端 ClientCapabilityIn 对应）=====
 // 不用 canPlayType（分不清「能解」和「能流畅解」），走 mediaCapabilities.decodingInfo：
 // 探测喂 RFC 6381 全串，上报归一到家族名（服务端与 ffprobe 落库的 codec_name 比对）。
 // video/audio 报空数组 = 告诉服务端「浏览器什么都不支持」→ 所有影片全量转码，起播慢。
-// v2：hdr_passthrough 改为恒 true（Chromium 自行 tone-map），v1 缓存里
-// matchMedia 判出的 false 会让服务端拒绝 HDR 影片，必须作废
-const CAPABILITY_SCHEMA_VERSION = 2;
+// Browser codec decoding support does not prove HDR rendering or display output.
+// Until the whole HDR path is measured, request server SDR output for HTML5.
+const CAPABILITY_SCHEMA_VERSION = 3;
 const CAPABILITY_CACHE_KEY = 'movieclaw.desktop.capability';
 // 4K 一档特意用 Main 10 / 高 profile：真实 4K 片源几乎都是 10bit/高码率，用 1080p 串探出来的结论对不上
 const CAPABILITY_VIDEO_MATRIX = {
@@ -189,9 +290,8 @@ async function getCapabilitySnapshot() {
     if (mseAvailable || nativeHls) containers.push('hls-fmp4');
     const snapshot = {
       video, audio, containers,
-      // 恒报 true：Chromium 自己会把 HDR tone-map 到 SDR 屏（与 macOS 自研引擎
-      // 同策略）。报 false 会让服务端接管 tone-map——服务器无 GPU 时直接拒绝播放
-      hdr_passthrough: true,
+      // false asks the server to tone-map HDR into SDR; codec probes above remain independent.
+      hdr_passthrough: false,
       mse, is_mobile: false, native_hls: nativeHls,
     };
     try {
@@ -218,9 +318,11 @@ function getUniversalCapabilitySnapshot() {
     audio: ['aac', 'ac3', 'eac3', 'dts', 'flac', 'alac', 'opus', 'mp3']
       .map(codec => ({ codec, max_channels: 8 })),
     containers: ['mp4', 'hls-fmp4', 'mkv', 'webm', 'ts', 'm2ts', 'avi'],
+    // This protocol flag permits HDR source bytes. mpv gpu-next maps them to its target;
+    // it does not claim the attached monitor is HDR. Actual target is observed below.
     hdr_passthrough: true,
     mse: 'full', is_mobile: false, native_hls: false,
-    universal: true,
+    universal: true, disc_image: false, disc_folder: false,
   };
 }
 window.getUniversalCapabilitySnapshot = getUniversalCapabilitySnapshot;
@@ -405,6 +507,18 @@ const Player = {
   progressTimer: null,
   pingTimer: null,
   lastProgressReport: 0,
+  context: null,
+  originMs: 0,
+  durationMs: 0,
+  activeEngine: null,
+  generation: 0,
+  _reportedStart: false,
+  _ended: false,
+  _closePromise: null,
+  _reportQueue: [],
+  _reportRunning: false,
+  mpvTracks: { audio: [], subtitles: [] },
+  subtitleFontScale: 1,
   // JASSUB 字幕渲染
   jassub: null,
   jassubTracks: [],
@@ -418,8 +532,16 @@ const Player = {
     // 播放/暂停
     document.getElementById('btnPlayPause')?.addEventListener('click', () => this.togglePlay());
     document.getElementById('playerCenterBtn')?.addEventListener('click', () => this.togglePlay());
-    this.video.addEventListener('click', () => this.togglePlay());
+    this.video.addEventListener('click', () => { this.showControls(); this.autoHideControls(); });
     this.video.addEventListener('dblclick', () => this.toggleFullscreen());
+    window.__TAURI__?.event?.listen('movieclaw:player-input', event => {
+      const input = event.payload;
+      if (!this.isMpv() || input.instanceId !== this.mpvInstanceId) return;
+      this.handleNativeInput(input.args?.slice(1) || []);
+    }).then(unlisten => { this._nativeInputUnlisten = unlisten; }).catch(() => {});
+    const cueStyle = document.createElement('style');
+    cueStyle.textContent = '#playerVideo::cue { font-size: var(--mc-sub-size, 24px); }';
+    document.head?.appendChild(cueStyle);
 
     // 进度条：按下/拖动走 scrubFollow 让画面跟手，松手精确跳到落点
     // （同 macOS MacScrubber 的 DragGesture：onChanged → scrubFollow，onEnded → seek）
@@ -459,10 +581,10 @@ const Player = {
       // Trickplay: 悬停显示缩略图预览
       let trickplayPreview = null;
       seek.addEventListener('mousemove', (e) => {
-        if (!this.video?.duration) return;
+        if (!this.engDuration()) return;
         const rect = seek.getBoundingClientRect();
         const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-        const hoverTime = pct * this.video.duration;
+        const hoverTime = pct * this.engDuration();
 
         if (!trickplayPreview) {
           trickplayPreview = document.createElement('div');
@@ -470,19 +592,14 @@ const Player = {
           seek.parentElement.appendChild(trickplayPreview);
         }
         const timeStr = this.formatTime(hoverTime);
-        // 尝试获取 trickplay 缩略图
-        if (this.sessionData?.trickplay_url) {
-          const thumbUrl = this.sessionData.trickplay_url + '?t=' + Math.floor(hoverTime);
-          trickplayPreview.innerHTML = `<img src="${thumbUrl}" onerror="this.style.display='none'"><div class="trickplay-time">${timeStr}</div>`;
-        } else {
-          trickplayPreview.innerHTML = `<div class="trickplay-time">${timeStr}</div>`;
-        }
+        this.renderTrickplayPreview(trickplayPreview, Math.floor(hoverTime * 1000), timeStr);
+        trickplayPreview.hidden = false;
         trickplayPreview.style.display = 'block';
         trickplayPreview.style.left = (pct * 100) + '%';
       });
 
       seek.addEventListener('mouseleave', () => {
-        if (trickplayPreview) trickplayPreview.style.display = 'none';
+        if (trickplayPreview) { trickplayPreview.hidden = true; trickplayPreview.style.display = 'none'; }
       });
     }
 
@@ -518,10 +635,12 @@ const Player = {
 
     // 视频事件
     this.video.addEventListener('timeupdate', () => {
+      if (this.activeEngine !== 'html5') return;
       this.updateProgress();
       this.checkSegments();
     });
     this.video.addEventListener('loadedmetadata', () => {
+      if (this.activeEngine !== 'html5') return;
       this.renderChapters(this.sessionData?.chapters);
       // 片长在这里才定下来，下行两端要立刻跟上；只等 timeupdate 的话，起播慢时
       // 右侧会一直挂着占位（mpv 那条链靠轮询的首个 tick 补上，HTML5 得在这补）
@@ -540,27 +659,39 @@ const Player = {
       this.showControls();
     });
     this.video.addEventListener('ended', () => {
+      if (this.activeEngine !== 'html5') return;
       this.showIcon('play');
       this.showCenterBtn();
       this.showControls();
       this.reportPlaybackEnd();
     });
     this.video.addEventListener('waiting', () => {
+      if (this.activeEngine !== 'html5') return;
       this._buffering = true;
       const loading = document.getElementById('playerLoading');
       if (loading) loading.hidden = false;
     });
     this.video.addEventListener('playing', () => {
+      if (this.activeEngine !== 'html5') return;
       this._everPlayed = true;
       this._buffering = false;
       const loading = document.getElementById('playerLoading');
       if (loading) loading.hidden = true;
+      this.measure('playing');
+      if (!this._reportedStart && !this._frameRequestId && this.video.requestVideoFrameCallback) {
+        const generation = this.generation;
+        this._frameRequestId = this.video.requestVideoFrameCallback(() => {
+          this._frameRequestId = null;
+          if (generation === this.generation && this.activeEngine === 'html5') this.startProgressReporting();
+        });
+      } else if (!this.video.requestVideoFrameCallback) this.startProgressReporting();
     });
     this.video.addEventListener('error', () => {
+      if (this.activeEngine !== 'html5') return;
       const text = document.getElementById('playerLoadingText');
       const loading = document.getElementById('playerLoading');
       // 首帧前解不了（浏览器不认该格式/编码）→ 走 failed_tiers 降档回路换转码
-      if (!this._everPlayed && typeof App !== 'undefined' && App.onPlaybackContentFailed) {
+      if (typeof App !== 'undefined' && App.onPlaybackContentFailed) {
         App.onPlaybackContentFailed('无法解码该视频格式');
         return;
       }
@@ -578,6 +709,7 @@ const Player = {
     // 键盘快捷键（对齐 macOS MacPlayerScreen.handleKey：⌘ 在 Windows 取 Ctrl）
     document.addEventListener('keydown', (e) => {
       if (document.getElementById('playerView')?.hidden) return;
+      if (e.target?.matches?.('input:not([type="range"]),textarea,select,[contenteditable="true"]')) return;
       // 长按连发：跳转/音量要跟手，换集/开关只认第一次按下（同 macOS phase .down 而非 .repeat）
       const once = !e.repeat;
       const mod = e.ctrlKey || e.metaKey;
@@ -586,17 +718,23 @@ const Player = {
         case 'ArrowLeft':
           e.preventDefault();
           if (mod) { if (once) this.playEpisode(this.prevEpisode()); }
-          else this.engSeekBy(-10);
+          else this.engSeekBy(e.shiftKey ? -1 : -10);
           break;
         case 'ArrowRight':
           e.preventDefault();
           if (mod) { if (once) this.playEpisode(this.nextEpisode()); }
-          else this.engSeekBy(10);
+          else this.engSeekBy(e.shiftKey ? 1 : 10);
           break;
         case 'ArrowUp': e.preventDefault(); this.engSetVolume(this.engVolume() + 0.1); break;
         case 'ArrowDown': e.preventDefault(); this.engSetVolume(this.engVolume() - 0.1); break;
         case 'm': if (once) this.toggleMute(); break;
         case 'f': if (once) this.toggleFullscreen(); break;
+        case 'Home': e.preventDefault(); if (once) this.engSeekTo(0); break;
+        case 'PageUp': e.preventDefault(); if (once) this.seekChapter(-1); break;
+        case 'PageDown': e.preventDefault(); if (once) this.seekChapter(1); break;
+        case '[': if (once) this.setSpeed(Math.max(0.5, this.engRate() - 0.25)); break;
+        case ']': if (once) this.setSpeed(Math.min(2, this.engRate() + 0.25)); break;
+        case 's': if (once) this.cycleSubtitle(); break;
         case '.': if (mod && once) { e.preventDefault(); this.close(); } break;
         case 'Enter':
           // 对话框的主按钮（同 SwiftUI .defaultAction）。焦点在框内按钮上时交给按钮自己触发
@@ -615,7 +753,7 @@ const Player = {
           }
           // Esc 阶梯（同 macOS escape()）：收起面板 → 退出全屏 → 关闭播放器
           if (this.closeAnyPanel()) { e.preventDefault(); break; }
-          if (document.fullscreenElement) { e.preventDefault(); this.toggleFullscreen(); break; }
+          if (this.isFullscreen()) { e.preventDefault(); this.toggleFullscreen(); break; }
           this.close();
           break;
       }
@@ -658,21 +796,18 @@ const Player = {
     document.querySelectorAll('.player-speed-option').forEach(opt => {
       opt.addEventListener('click', () => {
         const speed = parseFloat(opt.dataset.speed);
-        if (this.video) this.video.playbackRate = speed;
-        document.querySelectorAll('.player-speed-option').forEach(o => o.classList.remove('active'));
-        opt.classList.add('active');
-        const label = document.getElementById('speedLabel');
-        if (label) label.textContent = speed + 'x';
-        this.hideSpeedPanel();
+        this.setSpeed(speed);
       });
     });
 
     // 点击外部关闭面板
     document.getElementById('playerView')?.addEventListener('click', (e) => {
-      if (!e.target.closest('.player-settings-panel') && !e.target.closest('#btnSettings')) {
+      const path = e.composedPath?.() || [e.target];
+      const inside = selector => path.some(node => node.matches?.(selector));
+      if (!inside('.player-settings-panel') && !inside('#btnSettings')) {
         this.hideSettings();
       }
-      if (!e.target.closest('.player-speed-panel') && !e.target.closest('#btnSpeed')) {
+      if (!inside('.player-speed-panel') && !inside('#btnSpeed')) {
         this.hideSpeedPanel();
       }
     });
@@ -778,7 +913,7 @@ const Player = {
       const n = this._net;
       const st = data && data.frag && data.frag.stats;
       if (!n || !st || !st.loaded) return;
-      n.bytes += st.loaded;
+      if (!st._metered) n.bytes += st.loaded;
       const dur = st.loading && st.loading.end > st.loading.start ? st.loading.end - st.loading.start : 0;
       if (dur > 0) {
         n.frags.push({ at: performance.now(), bps: (st.loaded * 8 * 1000) / dur });
@@ -849,7 +984,8 @@ const Player = {
     const s = this.sessionData || {};
     const d = s.decision || {};
     const src = s.source || {};
-    const v = this.video;
+    const v = this.isMpv() ? null : this.video;
+    const native = this.mpvState?.properties || {};
     const n = this._net || {};
     const mbps = (bps) => (bps ? (bps / 1e6).toFixed(bps >= 1e7 ? 0 : 1) + ' Mbps' : null);
     const TIER = { 0: '原文件直出', 1: '换壳直通', 2: '换壳 + 转音轨', 3: '硬件转码', 4: '软件转码' };
@@ -857,8 +993,8 @@ const Player = {
     const READY = ['无媒体', '元数据', '可播放', '可播放且有数据', '可持续播放'];
     const NETST = ['空闲', '加载中', '已加载', '无资源'];
     const sec = (title, lines) => `<div class="player-info-sec"><div class="sec-title">${title}</div>${lines.filter(Boolean).join('')}</div>`;
-    const srcLine = (t) => (t ? `<div class="src">${t}</div>` : '');
-    const actLine = (t, alert) => (t ? `<div class="act${alert ? ' alert' : ''}">${t}</div>` : '');
+    const srcLine = (t) => (t ? `<div class="src">${playerText(t)}</div>` : '');
+    const actLine = (t, alert) => (t ? `<div class="act${alert ? ' alert' : ''}">${playerText(t)}</div>` : '');
 
     // —— 流媒体：源容器 → 处理方式 ——
     const container = (src.container || d.container || '未知').toUpperCase();
@@ -888,8 +1024,20 @@ const Player = {
       perfLine = bits.join(' · ');
     }
 
+    if (this.isMpv()) {
+      const out = native['video-out-params'] || {};
+      const hw = native['hwdec-current'] || 'no';
+      perfLine = [out.w && out.h ? `输出 ${out.w}×${out.h}` : null,
+        `实际解码 ${hw === 'no' ? '软件' : hw}`, `掉帧 ${(Number(native['frame-drop-count']) || 0) + (Number(native['decoder-frame-drop-count']) || 0)}`,
+        this.context?.__hardwareDecode !== false && hw === 'no' ? '硬解未启用或已回退' : null,
+        `渲染目标 ${[native['video-target-params']?.primaries, native['video-target-params']?.gamma].filter(Boolean).join(' / ') || '未知'}`,
+        this.sessionData?.source?.hdr && native['video-target-params']?.gamma && !['pq', 'hlg'].includes(native['video-target-params'].gamma) ? 'HDR 转 SDR' : null,
+        '显示器最终输出需实测'].filter(Boolean).join(' · ');
+      dropAlert = this.context?.__hardwareDecode !== false && hw === 'no';
+    }
+
     // —— 音频：这次放的那条轨 → 处理 ——
-    const activeTrack = (d.audio_tracks || []).find((t) => t.ref === (d.audio && d.audio.track_ref));
+    const activeTrack = (d.audio_tracks || []).find((t) => t.ref === (this.currentAudioRef || d.audio?.track_ref));
     const audioSrc = activeTrack
       ? [activeTrack.language, activeTrack.codec && activeTrack.codec.toUpperCase(), activeTrack.channels ? `${activeTrack.channels} 声道` : null]
           .filter(Boolean).join(' ') + (activeTrack.is_default ? '（默认）' : '')
@@ -929,15 +1077,16 @@ const Player = {
       }
       if (lv.details) trans.push(`播放列表 ${lv.details.live ? '直播流（边播边给）' : '点播（VOD）'}`);
     }
+    if (this.isMpv()) trans.push(`IPC ${native.ipc_connected ? '已连接' : '连接中'} · ${this.engPaused() ? '已暂停' : this._buffering ? '缓冲中' : '播放中'}`);
     if (v) trans.push(`${READY[v.readyState] ?? `readyState ${v.readyState}`} · ${NETST[v.networkState] ?? `networkState ${v.networkState}`} · ${v.paused ? '已暂停' : v.seeking ? '定位中' : '播放中'}`);
     trans.push(`会话 ${s.session_id || '无（直出）'}`);
 
     body.innerHTML = [
       sec('流媒体', [srcLine([container, mbps(src.bit_rate)].filter(Boolean).join(' · ')), actLine(streamTarget),
         d.degraded_from != null ? actLine('上一档播放失败，自动降档而来', true) : '']),
-      sec('视频', [srcLine(videoSrc), actLine(videoAction), perfLine ? `<div class="act${dropAlert ? ' alert' : ''}">${perfLine}</div>` : '']),
+      sec('视频', [srcLine(videoSrc), actLine(videoAction), perfLine ? `<div class="act${dropAlert ? ' alert' : ''}">${playerText(perfLine)}</div>` : '']),
       sec('音频', [srcLine(audioSrc), actLine(audioAction)]),
-      sec('传输', trans.map((t) => `<div>${t}</div>`)),
+      sec('传输', trans.map((t) => `<div>${playerText(t)}</div>`)),
     ].join('');
 
     const reasonEl = document.getElementById('playerInfoReason');
@@ -1033,11 +1182,12 @@ const Player = {
     const options = [], unavailable = [];
     plans.forEach((p, index) => {
       const label = this.subtitleTrackLabel(p);
-      if (index >= urls.length) {
+      const native = this.isMpv() && this.mpvTracks.subtitles.find(t => t.ref === p.track_ref);
+      if (index >= urls.length && !native) {
         unavailable.push({ index, ref: p.track_ref, label, reason: '服务端没有给出这条轨的地址' });
         return;
       }
-      if (!['vtt', 'ass', 'pgs'].includes(p.kind)) {
+      if (!['vtt', 'ass', 'pgs'].includes(p.kind) && !native) {
         unavailable.push({ index, ref: p.track_ref, label, reason: '暂不支持的字幕格式：' + p.kind });
         return;
       }
@@ -1046,6 +1196,10 @@ const Player = {
         displayTitle: this.subtitleDisplayTitle(p), detail: this.subtitleDetail(p),
       });
     });
+    const sourceCodecs = this.sessionData?.source?.subtitle_codecs || [];
+    if (sourceCodecs.some(codec => ['dvd_subtitle', 'vobsub'].includes(String(codec).toLowerCase()))) {
+      unavailable.push({ index: null, ref: null, label: 'DVD 位图字幕', reason: '此播放路径暂不支持 DVD 位图字幕，可使用外挂文本字幕' });
+    }
     return { options, unavailable };
   },
 
@@ -1057,9 +1211,10 @@ const Player = {
     const anyRecognized = tracks.some((t) => !unrec(t.codec));
     return tracks.map((t) => ({
       ref: t.ref,
+      language: t.language,
       label: this.audioLabel(t),
       is_default: !!t.is_default,
-      unavailableReason: anyRecognized && unrec(t.codec)
+      unavailableReason: this.isMpv() && this.playsOriginalFile && this._nativeTrackInit && !this.mpvTracks.audio.some(native => native.ref === t.ref) ? '播放器没有载入这条音轨' : anyRecognized && unrec(t.codec)
         ? '音频编码无法识别（常见于菁彩声 Audio Vivid），没有可用的解码器' : null,
     }));
   },
@@ -1074,6 +1229,7 @@ const Player = {
   },
 
   renderSettingsTab(tabName) {
+    this._settingsTab = tabName;
     const content = document.getElementById('playerSettingsContent');
     if (!content) return;
 
@@ -1087,7 +1243,7 @@ const Player = {
       const currentOffset = this.subtitleOffset || 0;
       const sel = this.selectedSubtitle;
       let html = `
-        <div class="player-settings-item ${sel === null ? 'active' : ''}" data-sub-index="-1" onclick="Player.selectSubtitle(-1)">
+        <div class="player-settings-item ${sel === null ? 'active' : ''}" data-sub-index="-1" data-player-action="subtitle">
           <span class="item-label">关闭字幕</span>
           ${check}
         </div>
@@ -1095,10 +1251,10 @@ const Player = {
       for (const g of this.subtitleGroups(options)) {
         html += `<div class="player-settings-group">${g.title}</div>`;
         html += g.options.map((o) => `
-          <div class="player-settings-item stacked ${sel === o.index ? 'active' : ''}" data-sub-index="${o.index}" onclick="Player.selectSubtitle(${o.index})">
+          <div class="player-settings-item stacked ${sel === o.index ? 'active' : ''}" data-sub-index="${o.index}" data-player-action="subtitle">
             <div class="item-text">
-              <span class="item-label">${o.displayTitle}</span>
-              <span class="item-info">${o.detail}</span>
+              <span class="item-label">${playerText(o.displayTitle)}</span>
+              <span class="item-info">${playerText(o.detail)}</span>
             </div>
             ${check}
           </div>
@@ -1109,8 +1265,8 @@ const Player = {
         html += unavailable.map((u) => `
           <div class="player-settings-item stacked disabled" data-sub-index="${u.index}">
             <div class="item-text">
-              <span class="item-label">${u.label}</span>
-              <span class="item-info">${u.reason}</span>
+              <span class="item-label">${playerText(u.label)}</span>
+              <span class="item-info">${playerText(u.reason)}</span>
             </div>
             ${check}
           </div>
@@ -1124,27 +1280,32 @@ const Player = {
         <div class="player-settings-item" style="cursor:default">
           <span class="item-label">字幕延迟</span>
           <div class="subtitle-offset-controls">
-            <button class="offset-btn" onclick="Player.adjustSubtitleOffset(-0.5)">-0.5s</button>
+            <button class="offset-btn" ${decision.video?.burn_subtitle ? 'disabled' : ''} data-player-action="offset" data-offset="-0.5">-0.5s</button>
             <span class="offset-value" id="subOffsetValue">${currentOffset > 0 ? '+' : ''}${currentOffset.toFixed(1)}s</span>
-            <button class="offset-btn" onclick="Player.adjustSubtitleOffset(0.5)">+0.5s</button>
+            <button class="offset-btn" ${decision.video?.burn_subtitle ? 'disabled' : ''} data-player-action="offset" data-offset="0.5">+0.5s</button>
           </div>
         </div>
       `;
+      html += `<div class="player-settings-item"><span class="item-label">字幕大小</span><div class="subtitle-offset-controls">
+        <button class="offset-btn" ${decision.video?.burn_subtitle ? 'disabled' : ''} data-player-action="scale" data-scale="-0.1">−</button>
+        <span>${Math.round(this.subtitleFontScale * 100)}%</span>
+        <button class="offset-btn" ${decision.video?.burn_subtitle ? 'disabled' : ''} data-player-action="scale" data-scale="0.1">+</button></div></div>`;
+      if (decision.video?.burn_subtitle) html += '<div class="player-settings-group">字幕已压制进画面；大小与延迟不可在播放端调整。</div>';
       content.innerHTML = html;
     }
 
     else if (tabName === 'audio') {
       const tracks = this.audioTracks();
-      const currentRef = decision.audio?.track_ref ?? null;
+      const currentRef = this.currentAudioRef ?? decision.audio?.track_ref ?? null;
       let html = tracks.map(t => {
         const parts = this.trackTextSplit(t.label);
         const detail = [parts.detail, t.is_default ? '默认' : null, t.unavailableReason].filter(Boolean).join(' · ');
         const active = t.ref === currentRef || (currentRef == null && t.is_default);
         return `
-          <div class="player-settings-item stacked ${active ? 'active' : ''}${t.unavailableReason ? ' disabled' : ''}"${t.unavailableReason ? '' : ` onclick="Player.selectAudio('${t.ref}')"`}>
+          <div class="player-settings-item stacked ${active ? 'active' : ''}${t.unavailableReason ? ' disabled' : ''}"${t.unavailableReason ? '' : ` data-player-action="audio" data-audio-ref="${playerText(t.ref)}"`}>
             <div class="item-text">
-              <span class="item-label">${parts.title}</span>
-              ${detail ? `<span class="item-info">${detail}</span>` : ''}
+              <span class="item-label">${playerText(parts.title)}</span>
+              ${detail ? `<span class="item-info">${playerText(detail)}</span>` : ''}
             </div>
             ${check}
           </div>
@@ -1160,31 +1321,31 @@ const Player = {
       const tier = decision.tier;
       const currentQuality = this.currentQuality || 0; // 0=原画
       const html = `
-        <div class="player-settings-item ${currentQuality === 0 ? 'active' : ''}" onclick="Player.selectQuality(0)">
+        <div class="player-settings-item ${currentQuality === 0 ? 'active' : ''}" data-player-action="quality" data-quality="0">
           <span class="item-label">原画</span>
           <span class="item-info">不压缩</span>
           <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
         </div>
-        <div class="player-settings-item ${currentQuality === 1080 ? 'active' : ''}" onclick="Player.selectQuality(1080)">
+        <div class="player-settings-item ${currentQuality === 1080 ? 'active' : ''}" data-player-action="quality" data-quality="1080">
           <span class="item-label">1080p</span>
           <span class="item-info">~6 Mbps</span>
           <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
         </div>
-        <div class="player-settings-item ${currentQuality === 720 ? 'active' : ''}" onclick="Player.selectQuality(720)">
+        <div class="player-settings-item ${currentQuality === 720 ? 'active' : ''}" data-player-action="quality" data-quality="720">
           <span class="item-label">720p</span>
           <span class="item-info">~3 Mbps</span>
           <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
         </div>
-        <div class="player-settings-item ${currentQuality === 480 ? 'active' : ''}" onclick="Player.selectQuality(480)">
+        <div class="player-settings-item ${currentQuality === 480 ? 'active' : ''}" data-player-action="quality" data-quality="480">
           <span class="item-label">480p</span>
           <span class="item-info">~1.5 Mbps</span>
           <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
         </div>
         <div style="padding:12px 16px;border-top:1px solid rgba(255,255,255,0.06)">
           <div style="font-size:11px;color:rgba(255,255,255,0.35);margin-bottom:8px">当前画质信息</div>
-          ${source.resolution ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:4px">源：${source.resolution} · ${source.video_codec || ''} · ${source.hdr || ''}</div>` : ''}
-          ${video.height ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:4px">输出：${video.height}p${video.action === 'copy' ? ' (直通)' : ' (转码)'}</div>` : ''}
-          ${tier != null ? `<div style="font-size:12px;color:rgba(255,255,255,0.6)">档位：${tier}</div>` : ''}
+          ${source.resolution ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:4px">源：${playerText(source.resolution)} · ${playerText(source.video_codec || '')} · ${playerText(source.hdr || '')}</div>` : ''}
+          ${video.height ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:4px">输出：${playerText(video.height)}p${video.action === 'copy' ? ' (直通)' : ' (转码)'}</div>` : ''}
+          ${tier != null ? `<div style="font-size:12px;color:rgba(255,255,255,0.6)">档位：${playerText(tier)}</div>` : ''}
           ${source.bit_rate ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);margin-top:4px">码率：${(source.bit_rate / 1000000).toFixed(1)} Mbps</div>` : ''}
         </div>
       `;
@@ -1193,213 +1354,332 @@ const Player = {
 
     else if (tabName === 'speed') {
       const speeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
-      const current = this.video?.playbackRate || 1;
+      const current = this.engRate();
       content.innerHTML = speeds.map(s => `
-        <div class="player-settings-item ${s === current ? 'active' : ''}" onclick="Player.setSpeed(${s})">
+        <div class="player-settings-item ${s === current ? 'active' : ''}" data-player-action="speed" data-speed="${s}">
           <span class="item-label">${s}x${s === 1 ? ' (正常)' : ''}</span>
           <svg class="item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 12 11 14 15 10"/></svg>
         </div>
       `).join('');
     }
+    // Server metadata is text/data only. Do not embed track refs in executable attributes.
+    for (const row of content.querySelectorAll('[data-player-action]')) {
+      row.addEventListener('click', () => {
+        if (row.disabled || row.classList.contains('disabled')) return;
+        const data = row.dataset;
+        if (data.playerAction === 'audio') this.selectAudio(data.audioRef);
+        else if (data.playerAction === 'subtitle') this.selectSubtitle(Number(data.subIndex));
+        else if (data.playerAction === 'offset') this.adjustSubtitleOffset(Number(data.offset));
+        else if (data.playerAction === 'scale') this.adjustSubtitleScale(Number(data.scale));
+        else if (data.playerAction === 'quality') this.selectQuality(Number(data.quality));
+        else if (data.playerAction === 'speed') this.setSpeed(Number(data.speed));
+      });
+    }
   },
 
-  selectSubtitle(index) {
-    if (!this.video) return;
-    // 禁用所有 HTML5 字幕轨
-    for (let i = 0; i < this.video.textTracks.length; i++) {
-      this.video.textTracks[i].mode = 'disabled';
-    }
-
-    // 如果有 JASSUB，用它处理 ASS 字幕
-    if (this.jassub) {
-      if (index < 0) {
-        // 关闭字幕
-        this.jassub.setTrack?.(null);
-        this.jassub.freeTrack?.();
-      } else {
-        // 判断选中的是否是 ASS 字幕
-        const decision = this.sessionData?.decision || {};
-        const subs = decision.subtitles || [];
-        const sub = subs[index];
-        if (sub && (sub.kind === 'ass' || sub.kind === 'ssa')) {
-          const assIdx = this.jassubTracks.findIndex((_, i) => {
-            const s = subs.filter((s2, j) => s2 && (s2.kind === 'ass' || s2.kind === 'ssa'))[i];
-            return true;
-          });
-          // 直接加载对应的 ASS URL
-          const assUrls = (this.sessionData?.subtitle_urls || []).filter((_, i) => {
-            const s = subs[i];
-            return s && (s.kind === 'ass' || s.kind === 'ssa');
-          });
-          const assSubIdx = subs.slice(0, index + 1).filter(s => s && (s.kind === 'ass' || s.kind === 'ssa')).length - 1;
-          if (assSubIdx >= 0 && assUrls[assSubIdx]) {
-            this.jassub.setTrack?.(assUrls[assSubIdx]);
-          }
-        } else {
-          // 非 ASS 字幕：关闭 JASSUB，用 HTML5 textTracks
-          this.jassub.freeTrack?.();
-          if (index < this.video.textTracks.length) {
-            this.video.textTracks[index].mode = 'showing';
-          }
-        }
-      }
+  async selectSubtitle(index, { remember = true } = {}) {
+    const plans = this.sessionData?.decision?.subtitles || [];
+    const plan = index >= 0 ? plans[index] : null;
+    if (index >= 0 && !plan) return false;
+    const selection = this._subtitleSelectionSeq = (this._subtitleSelectionSeq || 0) + 1;
+    const ref = plan?.track_ref || 'off';
+    const generation = this.generation;
+    if (this.isMpv()) {
+      const track = plan ? this.mpvTracks.subtitles.find(t => t.ref === ref) : null;
+      if (plan && !track) { this.controlError('这条字幕尚未被播放器载入'); return false; }
+      const result = await this.mpvCmd(['set_property', 'sid', track?.id ?? 'no']);
+      if (generation !== this.generation || selection !== this._subtitleSelectionSeq) return false;
+      if (!result) { this.controlError('字幕切换失败，请重试'); return false; }
+      if (this.mpvState) this.mpvState.sid = track?.id ?? 'no';
+      await this.mpvCmd(['set_property', 'sub-delay', this.subtitleOffset - (track?.external ? this.originMs / 1000 : 0)]);
+      if (generation !== this.generation) return false;
     } else {
-      // 无 JASSUB：纯 HTML5 textTracks
-      if (index >= 0 && index < this.video.textTracks.length) {
-        this.video.textTracks[index].mode = 'showing';
+      const burned = this.sessionData?.decision?.video?.burn_subtitle;
+      if ((plan?.kind === 'pgs' && burned !== ref) || burned && burned !== ref) {
+        this.context.subtitle_track = ref;
+        if (remember) this.context.__subtitleTouched = true;
+        return App.restartPlaybackAt(Math.floor(this.engPos() * 1000));
+      }
+      for (const track of this.video?.textTracks || []) track.mode = 'disabled';
+      this.jassub?.freeTrack?.();
+      if (plan?.kind === 'ass') {
+        await this.initJassub(this.sessionData?.subtitle_urls, this.sessionData, index, selection);
+        if (generation !== this.generation || selection !== this._subtitleSelectionSeq) return false;
+        if (!this.jassub) { this.controlError('ASS 字幕渲染器未能启动'); return false; }
+      } else if (plan?.kind === 'vtt') {
+        const track = this._subtitleElements?.get(ref)?.track || this.video?.textTracks[index];
+        if (track) { this.applyCueStyle(track); track.mode = 'showing'; }
       }
     }
-
-    // 更新选中态
-    this.selectedSubtitle = index < 0 ? null : index;
-    document.querySelectorAll('#playerSettingsContent .player-settings-item').forEach(el => {
-      el.classList.toggle('active', parseInt(el.dataset.subIndex) === index);
-    });
+    this.selectedSubtitle = plan ? index : null;
+    if (this.context) {
+      this.context.subtitle_track = ref;
+      if (remember) this.context.__subtitleTouched = true;
+    }
+    this.measure('subtitle-change', { selected: ref });
+    this.renderSettingsTab('subtitles');
+    if (remember && this._reportedStart) this.sendSnapshot('progress', this.snapshot()).catch(() => {});
+    return true;
   },
 
-  subtitleOffset: 0, // 字幕延迟（秒）
-  // 当前字幕：null=关，数字=decision.subtitles 下标，undefined=还没定（mpv 那条链不跟选中态）
+  subtitleOffset: 0,
   selectedSubtitle: undefined,
 
-  adjustSubtitleOffset(delta) {
-    this.subtitleOffset = Math.max(-30, Math.min(30, this.subtitleOffset + delta));
-    const el = document.getElementById('subOffsetValue');
-    if (el) el.textContent = (this.subtitleOffset > 0 ? '+' : '') + this.subtitleOffset.toFixed(1) + 's';
-    // 应用字幕偏移（通过 track.cues 调整在 Chromium 中不直接支持，使用 CSS transform 或 video.currentTime 的替代方案）
-    // Chromium WebView2 中可用 textTracks 的 mode 切换 + track offset hack
-    // 这里先记录 offset 值，实际渲染偏移需要在 CSS 或 cue 调整中应用
-  },
-
-  selectAudio(ref) {
-    // HLS.js 音轨切换
-    if (this.hls && this.hls.audioTracks) {
-      const idx = this.hls.audioTracks.findIndex(t => t.id === ref || t.name === ref);
-      if (idx >= 0) this.hls.audioTrack = idx;
+  async adjustSubtitleOffset(delta) {
+    if (this.sessionData?.decision?.video?.burn_subtitle) return;
+    const value = Math.max(-30, Math.min(30, this.subtitleOffset + delta));
+    const generation = this.generation;
+    if (this.isMpv()) {
+      // External subtitle files keep file timestamps; native embedded tracks use stream time.
+      const plan = this.sessionData?.decision?.subtitles?.[this.selectedSubtitle];
+      const external = this.mpvTracks.subtitles.find(t => t.ref === plan?.track_ref)?.external;
+      const result = await this.mpvCmd(['set_property', 'sub-delay', value - (external ? this.originMs / 1000 : 0)]);
+      if (!result || generation !== this.generation) return;
     }
-    // 更新选中态
-    document.querySelectorAll('#playerSettingsContent .player-settings-item').forEach(el => {
-      el.classList.toggle('active', el.getAttribute('onclick')?.includes(`'${ref}'`));
-    });
-    this.hideSettings();
+    this.subtitleOffset = value;
+    if (this.context) this.context.subtitleOffset = value;
+    for (const track of this.video?.textTracks || []) this.applyCueStyle(track);
+    if (this.jassub) this.jassub.timeOffset = this.originMs / 1000 - value;
+    this.renderSettingsTab('subtitles');
   },
 
-  setSpeed(rate) {
-    if (this.video) this.video.playbackRate = rate;
+  async adjustSubtitleScale(delta) {
+    if (this.sessionData?.decision?.video?.burn_subtitle) return;
+    const value = Math.max(0.5, Math.min(2, this.subtitleFontScale + delta));
+    const generation = this.generation;
+    if (this.isMpv() && !await this.mpvCmd(['set_property', 'sub-scale', value])) return;
+    if (generation !== this.generation) return;
+    this.subtitleFontScale = value;
+    if (this.context) this.context.subtitleFontScale = value;
+    this.applySubtitleStyle();
+    this.renderSettingsTab('subtitles');
+  },
+
+  applyCueStyle(track) {
+    if (!track?.cues) return;
+    this._cueOriginal ||= new WeakMap();
+    const offset = this.subtitleOffset - this.originMs / 1000;
+    for (const cue of track.cues) {
+      if (!this._cueOriginal.has(cue)) this._cueOriginal.set(cue, { start: cue.startTime, end: cue.endTime, line: cue.line });
+      const original = this._cueOriginal.get(cue);
+      cue.startTime = original.start + offset;
+      cue.endTime = original.end + offset;
+      if (original.line === 'auto' || original.line == null) { cue.snapToLines = false; cue.line = this.controlsVisible ? 78 : 92; }
+    }
+  },
+
+  applySubtitleStyle() {
+    if (this.video?.style?.setProperty) this.video.style.setProperty('--mc-sub-size', (24 * this.subtitleFontScale) + 'px');
+    for (const track of this.video?.textTracks || []) this.applyCueStyle(track);
+    if (this.jassub?.getStyles) {
+      const renderer = this.jassub;
+      renderer.getStyles((error, styles) => {
+        if (error || renderer !== this.jassub) return;
+        this._assOriginal ||= new Map();
+        styles.forEach((style, index) => {
+          if (!this._assOriginal.has(index)) this._assOriginal.set(index, { size: style.FontSize, margin: style.MarginV });
+          const original = this._assOriginal.get(index);
+          renderer.setStyle({ ...style, FontSize: original.size * this.subtitleFontScale,
+            MarginV: Math.max(original.margin || 0, this.controlsVisible ? 90 : 20) }, index);
+        });
+      });
+    }
+    if (this.isMpv()) {
+      const signature = [this.generation, this.controlsVisible, this.subtitleFontScale].join(':');
+      if (signature === this._nativeSubtitleStyle) return;
+      this._nativeSubtitleStyle = signature;
+      this.mpvCmd(['set_property', 'sub-pos', this.controlsVisible ? 82 : 95]);
+      this.mpvCmd(['set_property', 'sub-scale', this.subtitleFontScale]);
+    }
+  },
+
+  async selectAudio(ref, { remember = true } = {}) {
+    if (!this.context || !this.audioTracks().some(t => t.ref === ref && !t.unavailableReason)) return false;
+    const generation = this.generation;
+    if (this.isMpv() && this.playsOriginalFile) {
+      const track = this.mpvTracks.audio.find(t => t.ref === ref);
+      if (!track || !await this.mpvCmd(['set_property', 'aid', track.id])) { this.controlError('音轨切换失败，请重试'); return false; }
+      if (generation !== this.generation) return false;
+      this.mpvState.aid = track.id;
+      this.currentAudioRef = ref;
+      this.context.audio_track = ref;
+      if (remember) this.context.__audioTouched = true;
+      if (remember && this._reportedStart) this.sendSnapshot('progress', this.snapshot()).catch(() => {});
+      this.renderSettingsTab('audio');
+      this.measure('audio-change', { selected: ref });
+      return true;
+    }
+    // A remux/transcode stream has only its negotiated source audio. IDs in its
+    // HLS rendition list are not the source's embedded:N references.
+    return App.restartPlaybackAt(Math.floor(this.engPos() * 1000), { audio_track: ref, __audioTouched: remember || this.context.__audioTouched });
+  },
+
+  engRate() { return this.isMpv() ? (this.mpvState?.speed ?? this.context?.playbackRate ?? 1) : (this.video?.playbackRate || 1); },
+
+  async setSpeed(rate) {
+    if (!(rate >= 0.5 && rate <= 2)) return;
+    const generation = this.generation;
+    if (this.isMpv()) {
+      if (!await this.mpvCmd(['set_property', 'speed', rate]) || generation !== this.generation) return;
+      if (this.mpvState) this.mpvState.speed = rate;
+    } else if (this.video) this.video.playbackRate = rate;
+    if (this.context) this.context.playbackRate = rate;
     const label = document.getElementById('speedLabel');
     if (label) label.textContent = rate + 'x';
-    document.querySelectorAll('.player-speed-option').forEach(o => {
-      o.classList.toggle('active', parseFloat(o.dataset.speed) === rate);
-    });
+    document.querySelectorAll('.player-speed-option').forEach(o => o.classList.toggle('active', parseFloat(o.dataset.speed) === rate));
     this.hideSettings();
     this.hideSpeedPanel();
+  },
+
+  controlError(message) {
+    const content = document.getElementById('playerSettingsContent');
+    if (!content) return;
+    const notice = document.createElement('div');
+    notice.className = 'player-dialog-error';
+    notice.textContent = message;
+    content.appendChild(notice);
+  },
+
+  cycleSubtitle() {
+    const options = this.buildSubtitleTracks().options;
+    const next = options.findIndex(o => o.index === this.selectedSubtitle) + 1;
+    this.selectSubtitle(next < options.length ? options[next].index : -1);
   },
 
   currentQuality: 0, // 0=原画, 否则 maxHeight
 
   async selectQuality(maxHeight) {
-    // mpv 会话不走下面那条 HTML5 重协商链：带着 max_height 重开起播链，由它按
-    // 「限了画质就别报 universal」重谈会话（decide.py 的 universal 分支不受 max_height
-    // 影响，报了还是原文件直出，上限整个失效）。这一开是新协商，failed_tiers 一并清掉
-    // （对齐 macOS switchQuality）
-    if (window.__MOVIECLAW_MPV_ACTIVE) {
-      this.hideSettings();
-      // 上限记下来：画质菜单要亮对档，下一张建议卡的 currentHeight 也按它夹
-      this.currentQuality = maxHeight;
-      const sd = this.sessionData;
-      if (sd && typeof App !== 'undefined') {
-        App.startPlayback({
-          media_item_id: sd.media_item_id,
-          title: this.currentTitle,
-          library_id: sd.library_id,
-          seasonNumber: sd.season_number,
-          episodeNumber: sd.episode_number,
-          startMs: Math.floor(this.engPos() * 1000),
-          __maxHeight: maxHeight,
-        });
-      }
-      return;
-    }
-    this.currentQuality = maxHeight;
-    // 如果 session data 存在，重新请求播放会话
-    if (this.sessionData?.media_item_id && typeof App !== 'undefined') {
-      const currentTime = this.video ? this.video.currentTime : 0;
-      this.video?.pause();
-      const loading = document.getElementById('playerLoading');
-      const loadingText = document.getElementById('playerLoadingText');
-      if (loading) loading.hidden = false;
-      if (loadingText) loadingText.textContent = '正在切换画质...';
-
-      // 重新协商 session：能力按当前引擎如实申报，画质上限放请求顶层 max_height。
-      // 原来把 universal:true 和 video:[{max_height}] 塞进 capability 是两处错位：
-      // universal 分支直接给档 0 原文件（上限整个失效），video[] 里的 max_height
-      // 服务端也不读（读的是请求顶层，decide.py 的 max_height 参数）
-      const mediaId = this.sessionData.media_item_id;
-      try {
-        const capability = await getCapabilitySnapshot();
-        const body = {
-          media_item_id: mediaId,
-          capability,
-          client: 'web',
-          start_ms: Math.floor(currentTime * 1000),
-          attempt_id: Date.now().toString(36) + Math.random().toString(36).slice(2),
-        };
-        if (maxHeight > 0) body.max_height = maxHeight;
-        const resp = await API.request('/playback/sessions', { method: 'POST', body });
-        const session = resp?.data || resp;
-        if (!session?.stream_url) throw new Error('切换画质失败');
-        const origin = API.baseUrl;
-        const streamUrl = session.stream_url.startsWith('http')
-          ? session.stream_url
-          : origin + (session.stream_url.startsWith('/api/') ? session.stream_url : '/api/v1' + (session.stream_url.startsWith('/') ? session.stream_url : '/' + session.stream_url));
-        this.sessionData = session;
-        if (!session.media_item_id) session.media_item_id = mediaId;
-
-        // 重新加载流
-        if (this.hls) { this.hls.destroy(); this.hls = null; }
-        const isHls = streamUrl.includes('.m3u8') || streamUrl.includes('/hls');
-        if (isHls && window.Hls && Hls.isSupported()) {
-          this.hls = new Hls({
-            maxBufferLength: 60,
-            maxMaxBufferLength: 60,
-            // 与主路径一致：TTFB 盖过服务端 ensure_segment 30s 等待
-            fragLoadPolicy: {
-              default: {
-                maxTimeToFirstByteMs: 45000,
-                maxLoadTimeMs: 120000,
-                timeoutRetry: { maxNumRetry: 4, retryDelayMs: 0, maxRetryDelayMs: 0 },
-                errorRetry: { maxNumRetry: 6, retryDelayMs: 1000, maxRetryDelayMs: 8000 },
-              },
-            },
-            loader: window.__TAURI__ ? ProxyHlsLoader : undefined,
-          });
-          this.hls.loadSource(streamUrl);
-          this.hls.attachMedia(this.video);
-          this.attachNetHooks(this.hls);
-          this.startNetMeter();
-          this.hls.on(Hls.Events.MANIFEST_PARSED, () => {
-            this.video.currentTime = currentTime;
-            this.video.play().catch(() => {});
-            if (loading) loading.hidden = true;
-          });
-        } else {
-          this.video.src = streamUrl;
-          this.video.addEventListener('loadedmetadata', () => {
-            this.video.currentTime = currentTime;
-            this.video.play().catch(() => {});
-            if (loading) loading.hidden = true;
-          }, { once: true });
-        }
-      } catch (e) {
-        console.error('Quality switch failed:', e);
-        if (loadingText) loadingText.textContent = '切换画质失败: ' + (e.message || e);
-        setTimeout(() => { if (loading) loading.hidden = true; }, 2000);
-      }
-    }
-    // 更新 UI
-    document.querySelectorAll('#playerSettingsContent .player-settings-item').forEach(el => {
-      el.classList.remove('active');
-    });
     this.hideSettings();
+    if (!this.context || typeof App === 'undefined') return;
+    rememberQuality(this.mediaItemId, maxHeight);
+    this.measure('quality_switch');
+    return App.startPlayback({ ...this.context, startMs: Math.floor(this.engPos() * 1000),
+      __maxHeight: maxHeight, __resetFailures: true }, true);
+  },
+
+  // 两个引擎共用的播放上下文；所有外部时间均为文件时间，只有引擎边界换算。
+  adoptSession(title, session, context, engine) {
+    this.generation += 1;
+    this.context = { ...(context || {}), title };
+    if (this.context.file_id == null && session.decision?.file_id != null) this.context.file_id = session.decision.file_id;
+    this.sessionData = session;
+    this.sessionId = session.session_id || null;
+    this.mediaItemId = session.media_item_id ?? this.context.media_item_id;
+    this.seasonNumber = session.season_number ?? this.context.seasonNumber ?? 0;
+    this.episodeNumber = session.episode_number ?? this.context.episodeNumber ?? 0;
+    this.originMs = session.session_id && session.timeline === 'session' ? (session.start_ms ?? 0) : 0;
+    const file = (this.context.files || []).find(f => Number(f.id) === Number(session.decision?.file_id));
+    this.durationMs = [session.source?.duration_ms, session.watch?.duration_ms,
+      file?.duration_seconds != null ? file.duration_seconds * 1000 : null, this.context.durationMs]
+      .map(Number).find(ms => Number.isFinite(ms) && ms > 0) || 0;
+    this.currentTitle = title || 'MovieClaw';
+    this.currentQuality = this.context.__maxHeight ?? 0;
+    this.episodes = Array.isArray(this.context.episodes) ? this.context.episodes : [];
+    this.activeEngine = engine;
+    if (!this._qoe || this._qoe.attempt_id !== this.context.attemptId) this.beginAttempt(this.context);
+    this._openedAt = this._qoe.at;
+    this._nativeSubtitleStyle = null;
+    this._measuredBuffering = null;
+    this._qoe.tier = session.decision?.tier ?? -1;
+    this._qoe.engine = engine;
+    this._qoe.library_file_id = session.decision?.file_id ?? null;
+    this._qoe.hw_backend = session.hw_backend || '';
+    this._seekMeasurement = null;
+    this._nativeTrackInit = false;
+    this.mpvTracks = { audio: [], subtitles: [] };
+    this.selectedSubtitle = null;
+    this.currentAudioRef = session.decision?.audio?.track_ref || null;
+    this.subtitleOffset = this.context.subtitleOffset || 0;
+    this.subtitleFontScale = this.context.subtitleFontScale || 1;
+    this._subtitleElements = new Map();
+    this._cueOriginal = new WeakMap();
+    this._assOriginal = null;
+    this._trickplayAbort?.abort();
+    this._trickplayAbort = new AbortController();
+    this.trickplayIndex = null;
+    this._spriteImages = new Map();
+    this._outroOffered = false;
+    this.controlsVisible = true;
+    const pip = document.getElementById('btnPip');
+    if (pip) pip.hidden = engine === 'mpv' || !document.pictureInPictureEnabled;
+    this._reportedStart = false;
+    this._ended = false;
+    this._everPlayed = false;
+    this._buffering = true;
+    this.lastProgressReport = 0;
+    this._reportIdentity = { server: API.baseUrl, account: App.session?.username || '', epoch: API.contextEpoch };
+    this.initSegments(session.segments);
+    this.syncEpisodeNav();
+    this.startSessionPing();
+    this.loadTrickplayIndex();
+    clearInterval(this._mediaLeaseTimer);
+    const generation = this.generation;
+    this._mediaLeaseTimer = setInterval(() => {
+      if (generation !== this.generation) return;
+      for (const streamId of this._mediaGrants || []) window.__TAURI__?.core?.invoke('renew_media_stream', { streamId }).catch(() => {});
+    }, 60000);
+  },
+
+  snapshot() {
+    return {
+      mediaItemId: this.mediaItemId, libraryId: this.context?.library_id,
+      seasonNumber: this.seasonNumber, episodeNumber: this.episodeNumber,
+      sessionId: this.sessionId, positionMs: Math.floor(this.engPos() * 1000),
+      durationMs: Math.floor(this.engDuration() * 1000), started: this._reportedStart,
+      extras: { paused: this.engPaused(), file_id: this.sessionData?.decision?.file_id,
+        ...(this.context?.__audioTouched ? { audio_track: this.currentAudioRef } : {}),
+        ...(this.context?.__subtitleTouched ? { subtitle_track: this.context.subtitle_track || 'off' } : {}) },
+      identity: this._reportIdentity,
+    };
+  },
+
+  sendSnapshot(event, snapshot) {
+    if (!snapshot.mediaItemId) return Promise.resolve();
+    const queue = this._reportQueue;
+    // 断网时只留每个单元最近一次的周期进度；开始和结束仍按顺序发送。
+    const matching = event === 'progress' ? queue.find(job => job.event === 'progress' &&
+      job.snapshot.mediaItemId === snapshot.mediaItemId && job.snapshot.seasonNumber === snapshot.seasonNumber &&
+      job.snapshot.episodeNumber === snapshot.episodeNumber && job.snapshot.identity === snapshot.identity) : null;
+    if (matching) { matching.snapshot = snapshot; return matching.promise; }
+    if (queue.length + (this._reportRunning ? 1 : 0) >= 8) {
+      if (event === 'progress') return Promise.resolve(false);
+      const index = queue.findIndex(job => job.event === 'progress');
+      const discarded = queue.splice(index >= 0 ? index : 0, 1)[0];
+      discarded?.reject(new Error('进度队列已满，旧上报已丢弃'));
+    }
+    const job = { event, snapshot };
+    job.promise = new Promise((resolve, reject) => { job.resolve = resolve; job.reject = reject; });
+    queue.push(job);
+    this.drainReports();
+    return job.promise;
+  },
+
+  async drainReports() {
+    if (this._reportRunning) return;
+    this._reportRunning = true;
+    try {
+      while (this._reportQueue.length) {
+        const job = this._reportQueue.shift();
+        try {
+          for (let attempt = 0; ; attempt++) {
+            const s = job.snapshot;
+            const identity = s.identity;
+            if (identity && (identity.server !== API.baseUrl || identity.account !== (App.session?.username || '') ||
+              identity.epoch !== API.contextEpoch)) throw new Error('播放上下文已更换，取消旧进度上报');
+            try {
+              await API.reportProgress(s.mediaItemId, job.event, s.positionMs, s.durationMs,
+                s.seasonNumber, s.episodeNumber, s.extras, { timeoutMs: 3000, cancelable: true });
+              break;
+            } catch (error) {
+              const retryable = error.name !== 'AbortError' && (!error.status || error.status >= 500);
+              if (!retryable || attempt >= 2) throw error;
+              await new Promise(resolve => setTimeout(resolve, 200 * (attempt + 1)));
+            }
+          }
+          job.resolve(true);
+        } catch (error) { job.reject(error); }
+      }
+    } finally { this._reportRunning = false; }
   },
 
   // ===== 跳过片头/片尾 =====
@@ -1414,43 +1694,54 @@ const Player = {
   },
 
   checkSegments() {
-    if (!this.video || !this.currentSegments.length) return;
-    const curMs = this.video.currentTime * 1000;
+    if (!this.activeEngine) return;
+    const curMs = this.engPos() * 1000;
     const btn = document.getElementById('playerSkipBtn');
-    if (!btn) return;
-
-    let showBtn = false;
-    for (let i = 0; i < this.currentSegments.length; i++) {
-      const seg = this.currentSegments[i];
-      if (curMs >= seg.start_ms && curMs < seg.end_ms) {
-        showBtn = true;
-        this.currentSkipIndex = i;
-        btn.textContent = seg.type === 'intro' ? '跳过片头' : seg.type === 'outro' ? '跳过片尾' : '跳过此段';
-        break;
-      }
+    const index = this.currentSegments.findIndex(seg => !(seg.type === 'outro' && seg.to_end) &&
+      curMs >= seg.start_ms && curMs < seg.end_ms - 3000);
+    this.currentSkipIndex = index;
+    if (btn) {
+      btn.hidden = index < 0;
+      if (index >= 0) btn.textContent = ({ intro: '跳过片头', outro: '跳过片尾', ad: '跳过广告',
+        preview: '跳过预告', other: '跳过此段' })[this.currentSegments[index].type] || '跳过此段';
     }
-    btn.hidden = !showBtn;
+    if (!this._outroOffered && this.currentSegments.some(seg => seg.type === 'outro' && seg.to_end && curMs >= seg.start_ms)) {
+      this._outroOffered = true;
+      App.onPlaybackEnded();
+    }
   },
 
   skipSegment() {
-    if (this.currentSkipIndex < 0 || !this.video) return;
     const seg = this.currentSegments[this.currentSkipIndex];
-    if (seg) {
-      this.video.currentTime = seg.end_ms / 1000 + 0.5;
-    }
+    if (seg && this.activeEngine && !(seg.type === 'outro' && seg.to_end)) this.engSeekTo(seg.end_ms / 1000);
     const btn = document.getElementById('playerSkipBtn');
     if (btn) btn.hidden = true;
     this.currentSkipIndex = -1;
   },
 
+  chapterList() {
+    if (this.sessionData?.chapters?.length) return this.sessionData.chapters;
+    return (this.mpvState?.properties?.['chapter-list'] || []).map(ch => ({
+      start_ms: this.originMs + (Number(ch.time) || 0) * 1000, title: ch.title || '',
+    }));
+  },
+
+  seekChapter(direction) {
+    const chapters = this.chapterList().slice().sort((a, b) => a.start_ms - b.start_ms);
+    const now = this.engPos() * 1000;
+    const chapter = direction > 0 ? chapters.find(ch => ch.start_ms > now + 1000)
+      : chapters.reverse().find(ch => ch.start_ms < now - 3000);
+    if (chapter) this.engSeekTo(chapter.start_ms / 1000);
+  },
+
   // ===== 章节标记 =====
   renderChapters(chapters) {
     const seek = document.getElementById('playerSeek');
-    if (!seek || !chapters?.length) return;
+    if (!seek) return;
     // 清除旧的章节标记
     seek.querySelectorAll('.player-chapter-mark').forEach(el => el.remove());
-    const dur = this.video?.duration;
-    if (!dur) return;
+    const dur = this.engDuration();
+    if (!dur || !chapters?.length) return;
     chapters.forEach(ch => {
       const pct = (ch.start_ms / 1000 / dur) * 100;
       if (pct < 0 || pct > 100) return;
@@ -1491,15 +1782,19 @@ const Player = {
     const title = season == null
       ? ep.name || seriesTitle
       : `${seriesTitle} S${season}E${ep.episode_number}`;
-    this.episodes = this.episodes.slice();
-    this.close();
+    const context = { ...this.context };
+    delete context.attemptId;
+    delete context.file_id;
     App.startPlayback({
+      ...context,
       media_item_id: mediaId,
+      __autoNext: false,
       title,
-      library_id: this.sessionData?.library_id,
+      library_id: context.library_id,
       seasonNumber: season,
       episodeNumber: ep.episode_number,
       episodes: this.episodes,
+      startMs: null,
     });
   },
 
@@ -1516,7 +1811,7 @@ const Player = {
   },
 
   // 打开播放器并加载流
-  open(title, streamUrl, subtitles, startMs, sessionData) {
+  open(title, streamUrl, subtitles, startMs, sessionData, context) {
     const view = document.getElementById('playerView');
     const titleEl = document.getElementById('playerTitle');
     const loading = document.getElementById('playerLoading');
@@ -1528,19 +1823,9 @@ const Player = {
     if (loadingText) loadingText.textContent = '正在加载...';
 
     view.hidden = false;
-    this.sessionData = sessionData || null;
-    this.sessionId = sessionData?.session_id || sessionData?.id || null;
-    this.mediaItemId = sessionData?.media_item_id || sessionData?.mediaItemId || null;
-    this.seasonNumber = sessionData?.season_number ?? null;
-    this.episodeNumber = sessionData?.episode_number ?? null;
-    this.lastProgressReport = 0;
-
-    // 上一集 / 下一集：只在剧集里出现，缺集那一侧禁用（同 macOS MacPlayerTransport）
-    this.syncEpisodeNav();
-
-    // 启动进度上报定时器
-    this.startProgressReporting();
-    this.startSessionPing();
+    this.adoptSession(title, sessionData || {}, context, 'html5');
+    const generation = this.generation;
+    const alive = () => generation === this.generation && this.activeEngine === 'html5';
 
     // 初始化片段/章节
     this.initSegments(sessionData?.segments);
@@ -1591,27 +1876,34 @@ const Player = {
       this.attachNetHooks(this.hls);
       this.startNetMeter();
       this.hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (!alive()) return;
         if (startMs) this.video.currentTime = startMs / 1000;
         this.video.play().catch(() => {});
       });
       this.hls.on(Hls.Events.ERROR, (_, data) => {
+        if (!alive()) return;
         if (data.fatal) {
           const details = String(data.details || '');
           // 首帧前的 buffer* 错误 = 视频初始化数据本身解不了（如直通重封装的
           // hvcC 缺参数集）→ 交给 App 走 failed_tiers 降档回路换转码重来
-          if (!this._everPlayed && details.startsWith('buffer') &&
+          if (details.startsWith('buffer') &&
               typeof App !== 'undefined' && App.onPlaybackContentFailed) {
-            setTimeout(() => App.onPlaybackContentFailed(details), 0);
+            setTimeout(() => { if (alive()) App.onPlaybackContentFailed(details); }, 0);
             return;
           }
-          if (loadingText) loadingText.textContent = '播放失败: ' + (details || 'HLS 流加载错误');
-          if (loading) loading.hidden = false;
+          if (data.type === Hls.ErrorTypes?.NETWORK_ERROR && typeof App !== 'undefined') {
+            App.onPlaybackNetworkDead(details || '视频连接中断', { kind: 'network', status: data.response?.code || data.networkDetails?.status });
+          } else if (typeof App !== 'undefined') {
+            App.onPlaybackContentFailed(details || 'HLS 流加载错误', { kind: 'decode', status: data.response?.code || data.networkDetails?.status });
+          }
         }
       });
     } else {
       // MP4 / WebM 等原生格式
-      this.video.src = streamUrl;
+      this.mediaCapability(streamUrl, generation).then(url => { if (alive()) this.video.src = url; })
+        .catch(error => { if (alive()) App.onPlaybackNetworkDead(error.message || '视频取流失败'); });
       this.video.addEventListener('loadedmetadata', () => {
+        if (!alive()) return;
         if (startMs) this.video.currentTime = startMs / 1000;
         this.video.play().catch(() => {});
       }, { once: true });
@@ -1621,6 +1913,7 @@ const Player = {
     // 35 秒后明确报错/降档，而不是无限停在「正在加载...」。
     // readyState>=2 = 数据其实到了（如自动播放被浏览器拦下），不算内容失败
     this._stuckTimer = setTimeout(() => {
+      if (!alive()) return;
       if (this._everPlayed || (this.video && this.video.readyState >= 2)) return;
       const lt = loadingText ? loadingText.textContent : '';
       if (lt && lt.startsWith('播放失败')) return; // 已有明确错误，不覆盖
@@ -1632,74 +1925,102 @@ const Player = {
       }
     }, 35000);
 
-    // 字幕
-    if (subtitles && subtitles.length) {
-      subtitles.forEach((sub, i) => {
-        const track = document.createElement('track');
-        track.kind = 'subtitles';
-        track.src = sub;
-        track.srclang = 'zh';
-        track.label = '字幕 ' + (i + 1);
-        if (i === 0) track.default = true;
-        this.video.appendChild(track);
+    // VTT uses text tracks; ASS/PGS must never be attached as invalid VTT.
+    (sessionData?.decision?.subtitles || []).forEach((plan, i) => {
+      if (plan.kind !== 'vtt' || !subtitles?.[i]) return;
+      const track = document.createElement('track');
+      track.kind = 'subtitles'; track.srclang = plan.language || 'und';
+      track.label = plan.title || '字幕 ' + (i + 1);
+      this._subtitleElements.set(plan.track_ref, track);
+      track.addEventListener('load', () => {
+        if (!alive()) return;
+        this.applyCueStyle(track.track);
+        track.track.mode = this.selectedSubtitle === i ? 'showing' : 'disabled';
       });
-    }
-    // 菜单里的勾要指对：上面把第 0 条设成了 default，起播就算它在放
-    this.selectedSubtitle = (subtitles && subtitles.length) ? 0 : null;
-
-    // JASSUB: 初始化 ASS 字幕渲染（如果有 ASS 类型字幕）
-    this.initJassub(subtitles, sessionData);
+      this.video.appendChild(track);
+      this.mediaCapability(subtitles[i], generation).then(url => {
+        if (alive()) track.src = url;
+      }).catch(() => { if (alive()) this.controlError('字幕加载失败，可重新选择字幕轨'); });
+    });
+    this.initializeTracks().catch(error => { if (alive()) this.controlError(error.message || '字幕初始化失败'); });
 
     this.showControls();
     this.autoHideControls();
   },
 
-  // 关闭播放器
-  close() {
-    // 作废仍在途的 startPlayback：否则请求回来晚一步会把新界面覆盖成旧影片
-    if (typeof App !== 'undefined') App._playbackSeq = (App._playbackSeq || 0) + 1;
-    // mpv 会话结束（含切回 HTML5 的场景）：标志不清会让 selectQuality 一直拒接画质切换；
-    // 顺手收掉 mpv，否则 startPlayback 开新片时旧 mpv 还压在画面上
-    if (window.__MOVIECLAW_MPV_ACTIVE) {
-      window.__MOVIECLAW_MPV_ACTIVE = false;
-      this.stopMpvPoll();
-      if (window.__TAURI__?.core?.invoke) {
-        window.__TAURI__.core.invoke('set_embedded_player_visible', { visible: false }).catch(() => {});
-        window.__TAURI__.core.invoke('stop_embedded_player').catch(() => {});
+  // 先快照再撤引擎；异步收尾有上限，调用者可等 mpv 停完再装下一部。
+  close(options = {}) {
+    if (options.invalidate !== false && typeof App !== 'undefined') App._playbackSeq = (App._playbackSeq || 0) + 1;
+    if (typeof App !== 'undefined') { App.cancelAutoNext(); clearTimeout(App._networkRetryTimer); App._networkRetryTimer = null; }
+    const nativeFullscreenRestore = options.hide !== false ? this.restoreNativeFullscreen() : Promise.resolve();
+    if (!this.activeEngine && this._closePromise) {
+      if (options.hide !== false) {
+        const view = document.getElementById('playerView');
+        if (view) view.hidden = true;
+        this.hidePlayerDialog();
       }
+      return boundedPlaybackWait(Promise.allSettled([this._closePromise, nativeFullscreenRestore]), 1200);
     }
-    // 上报最终进度
-    this.reportPlaybackStop();
+    const snapshot = this.snapshot();
+    const metrics = options.final !== false ? this.finishAttempt() : Promise.resolve();
+    if (this.activeEngine) this.measure('closed');
+    const wasMpv = this.isMpv();
+    const instanceId = this.mpvInstanceId;
+    const started = this._reportedStart;
+    const stopReport = started ? this.sendSnapshot('stop', snapshot).then(() => {
+      window.dispatchEvent(new CustomEvent('movieclaw:playback-stopped', { detail: snapshot }));
+    }).catch(() => {}) : Promise.resolve();
+    const sessionStop = snapshot.sessionId ? API.sessionStop(snapshot.sessionId).catch(() => {}) : Promise.resolve();
+    this.activeEngine = null;
+    this.generation += 1;
+    this._reportedStart = false;
+    this.sessionId = null;
+    this.mediaItemId = null;
+    this.sessionData = null;
+    this.context = null;
+    window.__MOVIECLAW_MPV_ACTIVE = false;
+    this.stopMpvPoll();
     this.stopProgressReporting();
     this.stopSessionPing();
     clearTimeout(this._stuckTimer);
-    // 拖动跟随排到一半的那次别在关播后落地
-    if (this._scrubFollowTask) { clearTimeout(this._scrubFollowTask); this._scrubFollowTask = null; }
+    this._trickplayAbort?.abort();
+    this._trickplayAbort = null;
+    clearInterval(this._mediaLeaseTimer);
+    this._mediaLeaseTimer = null;
+    this._spriteImages = null;
+    this.trickplayIndex = null;
+    for (const streamId of this._mediaGrants || []) window.__TAURI__?.core?.invoke('release_media_stream', { streamId }).catch(() => {});
+    this._mediaGrants = new Set();
+    if (this._scrubFollowTask) clearTimeout(this._scrubFollowTask);
+    this._scrubFollowTask = null;
     this._scrubPct = null;
+    this.isSeeking = false;
     this.stopNetMeter();
     this.stopWatchdogs();
     this.hideInfoPanel();
-    // 错误/同意对话框压在播放器上：关播放器就得一起走，否则黑屏上留个框
     this.hidePlayerDialog();
-    // 通知服务端结束会话，立即释放直通/转码槽位（否则要等 180s 空闲回收，
-    // 连播几部就把 4/4 槽位占满 → 后续播放全 503）
-    if (this.sessionId) {
-      API.sessionStop(this.sessionId).catch(() => {});
-      this.sessionId = null;
-    }
     this.destroyJassub();
-
     const view = document.getElementById('playerView');
-    if (view) view.hidden = true;
+    if (view && options.hide !== false) view.hidden = true;
     if (this.hls) { this.hls.destroy(); this.hls = null; }
     if (this.video) {
+      if (this._frameRequestId) this.video.cancelVideoFrameCallback?.(this._frameRequestId);
+      this._frameRequestId = null;
+      this.video.style.display = '';
       this.video.pause();
       this.video.removeAttribute('src');
       this.video.innerHTML = '';
       this.video.load();
     }
-    if (document.fullscreenElement) document.exitFullscreen();
+    if (document.fullscreenElement && options.hide !== false) document.exitFullscreen().catch(() => {});
     clearTimeout(this.hideTimer);
+    const nativeStop = wasMpv && window.__TAURI__?.core?.invoke
+      ? window.__TAURI__.core.invoke('stop_embedded_player', { instanceId }).catch(() => {}) : Promise.resolve();
+    this._nativeStop = nativeStop;
+    const task = boundedPlaybackWait(Promise.allSettled([stopReport, sessionStop, nativeStop, metrics, nativeFullscreenRestore]), 1200);
+    this._closePromise = task;
+    task.finally(() => { if (this._closePromise === task) this._closePromise = null; });
+    return task;
   },
 
   // ===== 播放引擎读写 =====
@@ -1715,16 +2036,21 @@ const Player = {
   // 发一条 mpv JSON IPC 命令。失败只记日志：mpv 退了由 stop 收尾，不该把 UI 打断
   mpvCmd(command) {
     if (!window.__TAURI__?.core?.invoke) return Promise.resolve(null);
-    return window.__TAURI__.core.invoke('send_mpv_command_embedded', { command })
+    return window.__TAURI__.core.invoke('send_mpv_command_embedded', { command, instanceId: this.mpvInstanceId })
       .catch(e => { console.warn('[mpv]', command && command[0], (e && e.message) || e); return null; });
   },
 
   engPos() {
-    return this.isMpv() ? (this.mpvState ? this.mpvState.time : 0) : (this.video ? this.video.currentTime : 0);
+    const streamTime = this.isMpv() ? (this.mpvState?.time ?? 0) : (this.video?.currentTime ?? 0);
+    return this.originMs / 1000 + (Number.isFinite(streamTime) ? streamTime : 0);
   },
 
   engDuration() {
-    return this.isMpv() ? (this.mpvState ? this.mpvState.duration : 0) : (this.video ? this.video.duration || 0 : 0);
+    if (this.durationMs > 0) return this.durationMs / 1000;
+    // EVENT 会话的 duration 只是目前已产出的尾，不可当成整部片长。
+    if (this.usesSessionTimeline) return 0;
+    const duration = this.isMpv() ? this.mpvState?.duration : this.video?.duration;
+    return Number.isFinite(duration) && duration > 0 ? this.originMs / 1000 + duration : 0;
   },
 
   engPaused() {
@@ -1748,10 +2074,23 @@ const Player = {
     this._frameDrops?.reset();
     this._qualitySuggestion?.restartGrace();
     const dur = this.engDuration();
-    const t = Math.max(0, dur ? Math.min(dur, sec) : sec);
+    this.measure('seek_start');
+    const target = Math.max(0, dur ? Math.min(Math.max(0, dur - 0.1), sec) : sec);
+    if (this.usesSessionTimeline) {
+      if (target < this.originMs / 1000 || target > this.engBufferedEndSec()) {
+        if (typeof App !== 'undefined') App.restartPlaybackAt(Math.floor(target * 1000));
+        return;
+      }
+    }
+    if (this._ended && typeof App !== 'undefined') {
+      App.restartPlaybackAt(Math.floor(target * 1000));
+      return;
+    }
+    this._seekMeasurement = { at: performance.now(), target };
+    const t = Math.max(0, target - this.originMs / 1000);
     if (this.isMpv()) {
       if (this.mpvState) this.mpvState.time = t;
-      this.mpvCmd(['seek', t, 'absolute']);
+      this.mpvCmd(['seek', t, 'absolute', 'exact']);
     } else if (this.video) {
       this.video.currentTime = t;
     }
@@ -1765,7 +2104,9 @@ const Player = {
   // 次数，松手那次才算，同 macOS scrubFollow），mpv 用关键帧 seek——扫动途中要的是快
   engFollowTo(sec) {
     const dur = this.engDuration();
-    const t = Math.max(0, dur ? Math.min(dur, sec) : sec);
+    const target = Math.max(0, dur ? Math.min(dur, sec) : sec);
+    if (target < this.originMs / 1000) return;
+    const t = Math.max(0, target - this.originMs / 1000);
     if (this.isMpv()) {
       if (this.mpvState) this.mpvState.time = t;
       this.mpvCmd(['seek', t, 'absolute', 'keyframe']);
@@ -1778,18 +2119,22 @@ const Player = {
   engBufferedEndSec() {
     if (this.isMpv()) {
       const t = this.mpvState ? this.mpvState.time : 0;
-      return t + (this.mpvState && this.mpvState.bufferedAhead ? this.mpvState.bufferedAhead : 0);
+      return this.originMs / 1000 + t + (this.mpvState && this.mpvState.bufferedAhead ? this.mpvState.bufferedAhead : 0);
     }
     const v = this.video;
     if (!v || !v.buffered || !v.buffered.length) return 0;
     for (let i = 0; i < v.buffered.length; i++) {
-      if (v.buffered.start(i) <= v.currentTime && v.currentTime <= v.buffered.end(i)) return v.buffered.end(i);
+      if (v.buffered.start(i) <= v.currentTime && v.currentTime <= v.buffered.end(i)) return this.originMs / 1000 + v.buffered.end(i);
     }
-    return v.buffered.end(v.buffered.length - 1);
+    return this.originMs / 1000 + v.buffered.end(v.buffered.length - 1);
   },
 
   // 原文件直出（档 0）= 每次 seek 都是一条新的 Range 请求，扫动途中跟只会一路抽
   // （同 macOS playsOriginalFile，PlaybackController.swift:764）
+  get usesSessionTimeline() {
+    return !!this.sessionData?.session_id && this.sessionData.timeline === 'session';
+  },
+
   get playsOriginalFile() {
     return this.sessionData?.decision?.tier === 0;
   },
@@ -1812,7 +2157,7 @@ const Player = {
       Date.now(), this._lastScrubFollowAt,
       // cheap：落点在当前位置前 1 秒~已缓冲尾之间（同 macOS）
       targetSec >= this.engPos() - 1 && targetSec <= this.engBufferedEndSec(),
-      targetSec >= 0,          // reachable：文件时间轴上 originMs=0
+      targetSec >= this.originMs / 1000,
       this.playsOriginalFile,  // settleOnly
     );
     if (this._scrubFollowTask) { clearTimeout(this._scrubFollowTask); this._scrubFollowTask = null; }
@@ -1852,35 +2197,74 @@ const Player = {
     this.updateVolumeIcon();
   },
 
-  // mpv 不推属性事件，进度条/时间/暂停态靠轮询喂成和 HTML5 一样
-  startMpvPoll() {
+  // One Rust actor observes properties; JS reads its last complete snapshot.
+  startMpvPoll(startMs = 0) {
     this.stopMpvPoll();
-    this.mpvState = { time: 0, duration: 0, paused: true, volume: 1, muted: false };
+    const generation = this.generation;
+    const instanceId = this.mpvInstanceId;
+    const alive = () => generation === this.generation && this.isMpv() && this.mpvState;
+    this.mpvState = { time: (startMs ?? 0) / 1000, duration: 0, paused: true, volume: 1, muted: false, properties: {} };
     this._mpvRectSig = null;
-    // 浮层（加载层/面板）显隐会改变挖洞范围，跟着它们重算
     this.mpvRectTimer = setInterval(() => this.syncEmbeddedPlayerRect(), 200);
+    let pending = false;
     const tick = async () => {
-      if (!this.isMpv() || !this.mpvState) return;
-      const [t, d, p, c] = await Promise.all([
-        this.mpvCmd(['get_property', 'time-pos']),
-        this.mpvCmd(['get_property', 'duration']),
-        this.mpvCmd(['get_property', 'pause']),
-        // 前向缓存秒数：拖动跟随判「落点在不在缓冲里」用（engBufferedEndSec）
-        this.mpvCmd(['get_property', 'demuxer-cache-duration']),
-      ]);
-      if (!this.isMpv() || !this.mpvState) return;
-      if (t && typeof t.data === 'number') this.mpvState.time = t.data;
-      if (d && typeof d.data === 'number') this.mpvState.duration = d.data;
-      this.mpvState.bufferedAhead = (c && typeof c.data === 'number') ? c.data : 0;
-      if (p && typeof p.data === 'boolean') {
-        this.mpvState.paused = p.data;
-        // HTML5 的 play/pause 事件在这里不会来，图标随轮询走
-        this.showIcon(p.data ? 'play' : 'pause');
-      }
-      this.updateProgress();
+      if (!alive() || pending) return;
+      pending = true;
+      try {
+        const result = await window.__TAURI__.core.invoke('get_embedded_player_state', { instanceId }).catch(() => null);
+        if (!alive() || !result) return;
+        const v = result.properties || {}, status = result.status;
+        if (v.ipc_error && !this._ended) { App.onPlaybackContentFailed('本机播放器控制连接失败', { kind: 'decode' }); return; }
+        this.mpvState.properties = v;
+        if (typeof v['time-pos'] === 'number') this.mpvState.time = v['time-pos'];
+        if (typeof v.duration === 'number') this.mpvState.duration = v.duration;
+        if (typeof v.pause === 'boolean') this.mpvState.paused = v.pause;
+        if (typeof v.volume === 'number') this.mpvState.volume = v.volume / 100;
+        if (typeof v.mute === 'boolean') this.mpvState.muted = v.mute;
+        if (typeof v.speed === 'number') this.mpvState.speed = v.speed;
+        this.mpvState.aid = v.aid; this.mpvState.sid = v.sid;
+        this.mpvState.bufferedAhead = Number(v['demuxer-cache-duration']) || 0;
+        this._buffering = !!v['paused-for-cache'] || !this._everPlayed;
+        if (Array.isArray(v['track-list'])) {
+          this.mpvTracks = mpvTrackMap(v['track-list'], this.sessionData?.decision?.subtitles || [],
+            this.sessionData?.subtitle_urls || [], this.playsOriginalFile, v['subtitle-source-order'] || []);
+          const audio = this.mpvTracks.audio.find(t => t.id === v.aid);
+          if (audio?.ref) this.currentAudioRef = audio.ref;
+          const sub = this.mpvTracks.subtitles.find(t => t.id === v.sid);
+          this.selectedSubtitle = sub ? this.sessionData?.decision?.subtitles?.findIndex(p => p.track_ref === sub.ref) : null;
+          if (!this._nativeTrackInit && v['track-list'].length && typeof v['time-pos'] === 'number') {
+            this._nativeTrackInit = true;
+            await this.initializeTracks();
+            if (!alive()) return;
+          }
+        }
+        if (typeof v['time-pos'] === 'number' && v['video-out-params'] && !this._everPlayed) {
+          this._everPlayed = true; this._buffering = !!v['paused-for-cache'];
+          this.measure('first_frame', { elapsedMs: performance.now() - this._openedAt });
+          this.startProgressReporting();
+          const loading = document.getElementById('playerLoading');
+          if (loading) loading.hidden = true;
+        }
+        if (this._seekMeasurement && Math.abs(this.engPos() - this._seekMeasurement.target) < 1 && !v.seeking) {
+          this.measure('seek_end', { elapsedMs: performance.now() - this._seekMeasurement.at });
+          this._seekMeasurement = null;
+        }
+        this.showIcon(this.mpvState.paused ? 'play' : 'pause');
+        this.updateProgress(); this.checkSegments(); this.renderChapters(this.chapterList());
+        if (!document.getElementById('playerInfoPanel')?.hidden) this._renderInfoPanel();
+        if (document.getElementById('playerSettingsPanel') && !document.getElementById('playerSettingsPanel').hidden) this.renderSettingsTab(this._settingsTab || 'subtitles');
+        if (v['eof-reached'] === true || v.end_file?.reason === 'eof' || status?.running === false && this._everPlayed && status.exit_code === 0) {
+          this.reportPlaybackEnd();
+        } else if ((status?.running === false || v.end_file?.reason === 'error') && !this._ended) {
+          App.onPlaybackContentFailed('本机播放器意外退出', { kind: 'decode' });
+        }
+      } finally { pending = false; }
     };
     tick();
     this.mpvPollTimer = setInterval(tick, 500);
+    this._stuckTimer = setTimeout(() => {
+      if (alive() && !this._everPlayed) App.onPlaybackContentFailed('本机播放器加载超时', { kind: 'decode' });
+    }, 35000);
     this.startWatchdogs();
   },
 
@@ -1900,7 +2284,14 @@ const Player = {
     this._watchedSeconds = 0;
     this._lastWatchTime = null;
     this._lastNetBytes = null;
-    this._watchdogTick = setInterval(() => this._tickWatchdogs(), 1000);
+    const generation = this.generation;
+    let pending = false;
+    this._watchdogTick = setInterval(async () => {
+      if (pending) return;
+      pending = true;
+      try { await this._tickWatchdogs(generation); }
+      finally { pending = false; }
+    }, 1000);
   },
 
   stopWatchdogs() {
@@ -1912,19 +2303,11 @@ const Player = {
   // 采一帧当前引擎的真实状态。mpv 那边要走 IPC，所以只在 1 Hz 采（UI 轮询 500ms 不掺这个）
   async _sampleEngine() {
     if (this.isMpv()) {
-      const props = ['time-pos', 'pause', 'eof-reached', 'seeking', 'paused-for-cache',
-        'demuxer-cache-duration', 'cache-speed', 'frame-drop-count', 'decoder-frame-drop-count', 'container-fps'];
-      const res = await Promise.all(props.map(p => this.mpvCmd(['get_property', p])));
-      if (!this.isMpv() || !this.mpvState) return null;
-      const v = {};
-      res.forEach((r, i) => { v[props[i]] = r && r.data !== undefined ? r.data : null; });
+      if (!this.mpvState) return null;
+      const v = this.mpvState.properties || {};
       const time = typeof v['time-pos'] === 'number' ? v['time-pos'] : this.mpvState.time;
-      // mpv 这条链没有 <video> 的 playing 事件：time-pos 走起来过就等于出过帧
-      // （起播前是 0/null）。不置位的话下面 !this._everPlayed 恒真，「缓冲」会在
-      // 正常播放时一直成立，画质卡的「连续等待 ≥8s」被 8 秒普通播放误触发
-      if (time > 0) this._everPlayed = true;
       return {
-        time,
+        time: this.originMs / 1000 + time,
         paused: !!v.pause,
         ended: !!v['eof-reached'],
         seeking: !!v.seeking,
@@ -1969,7 +2352,7 @@ const Player = {
       this._lastNetBytes = bytes;
     }
     return {
-      time: v.currentTime,
+      time: this.engPos(),
       paused: !!v.paused,
       ended: !!v.ended,
       seeking: !!v.seeking,
@@ -1980,12 +2363,20 @@ const Player = {
     };
   },
 
-  async _tickWatchdogs() {
+  async _tickWatchdogs(generation = this.generation) {
     if (!this._frameDrops || !this.sessionData) return;
     const view = document.getElementById('playerView');
     if (view && view.hidden) return;
     const s = await this._sampleEngine();
-    if (!s || !this._frameDrops || !this.sessionData) return;
+    if (generation !== this.generation || !s || !this._frameDrops || !this.sessionData || this._ended) return;
+    this.sampleQoe(s);
+    if (s.ended) { this.reportPlaybackEnd(); return; }
+    if (s.buffering !== this._measuredBuffering) {
+      this._measuredBuffering = s.buffering;
+      this.measure(s.buffering ? 'buffer_start' : 'buffer_end');
+      if (s.buffering) App._recoveryAt = null;
+      else this.measure('playing');
+    }
     // 真播起来了就清网络重开预算（同 macOS reachedPlaying()）
     if (!s.buffering && !s.paused && !s.ended && s.time > 0 && typeof App !== 'undefined' && App.onPlaybackRecovered) {
       App.onPlaybackRecovered();
@@ -2025,7 +2416,7 @@ const Player = {
     if (verdict === 'nudge') {
       // 有数据却不动：推一把踢活解码管线（起播预滚阶段 tracker 不会推）。
       // 故意不走 engSeekTo —— 那条路会清 StallWatch，把「最多推 2 把」清成无限推
-      const t = s.time + this._stallWatch.NUDGE_STEP;
+      const t = Math.max(0, s.time + this._stallWatch.NUDGE_STEP - this.originMs / 1000);
       if (this.isMpv()) {
         if (this.mpvState) this.mpvState.time = t;
         this.mpvCmd(['seek', t, 'absolute']);
@@ -2267,6 +2658,10 @@ const Player = {
   },
 
   togglePlay() {
+    if (this._ended && this.context && typeof App !== 'undefined') {
+      App.restartPlaybackAt(0);
+      return;
+    }
     const wasPaused = this.engPaused();
     if (this.isMpv()) {
       if (this.mpvState) this.mpvState.paused = !wasPaused;
@@ -2275,6 +2670,7 @@ const Player = {
       this.showIcon(wasPaused ? 'pause' : 'play');
       if (wasPaused) { this.hideCenterBtn(); this.autoHideControls(); }
       else { this.showCenterBtn(); this.showControls(); }
+      window.MovieClawPlatform?.update();
     } else if (this.video) {
       if (this.video.paused) this.video.play().catch(() => {});
       else this.video.pause();
@@ -2288,15 +2684,48 @@ const Player = {
     if (slider) slider.value = next ? 0 : this.engVolume();
   },
 
+  isFullscreen() {
+    return !!document.fullscreenElement || !!this._nativeFullscreen;
+  },
+
   toggleFullscreen() {
     const view = document.getElementById('playerView');
-    if (!view) return;
-    if (document.fullscreenElement) document.exitFullscreen();
-    else view.requestFullscreen().catch(() => {});
+    if (!view) return Promise.resolve();
+    if (this.isMpv() && window.__TAURI__?.window?.getCurrentWindow) {
+      const generation = this.generation;
+      const state = this._nativeFullscreenState ||= { before: undefined, active: false };
+      const task = (this._nativeFullscreenTask || Promise.resolve()).catch(() => {}).then(async () => {
+        const nativeWindow = window.__TAURI__.window.getCurrentWindow();
+        const current = await nativeWindow.isFullscreen();
+        if (state.before === undefined) state.before = current;
+        if (generation !== this.generation || this._nativeFullscreenState !== state) return;
+        const next = !current;
+        await nativeWindow.setFullscreen(next);
+        state.active = next;
+        if (this._nativeFullscreenState === state) this._nativeFullscreen = next;
+        requestAnimationFrame(() => this.syncEmbeddedPlayerRect());
+      });
+      this._nativeFullscreenTask = task;
+      return task.catch(() => { if (generation === this.generation) this.controlError('无法切换窗口全屏'); });
+    }
+    if (document.fullscreenElement) return document.exitFullscreen().catch(() => {});
+    return view.requestFullscreen().catch(() => {});
+  },
+
+  restoreNativeFullscreen() {
+    const state = this._nativeFullscreenState;
+    this._nativeFullscreenState = null;
+    this._nativeFullscreen = false;
+    if (!state || !window.__TAURI__?.window?.getCurrentWindow) return Promise.resolve();
+    const task = (this._nativeFullscreenTask || Promise.resolve()).catch(() => {}).then(async () => {
+      if (state.before !== undefined) await window.__TAURI__.window.getCurrentWindow().setFullscreen(state.before);
+    });
+    this._nativeFullscreenTask = task;
+    return task.catch(() => {});
   },
 
   togglePip() {
-    if (!this.video) return;
+    if (!this.video || this.isMpv() || !document.pictureInPictureEnabled) return;
     if (document.pictureInPictureElement) document.exitPictureInPicture();
     else this.video.requestPictureInPicture().catch(() => {});
   },
@@ -2325,6 +2754,11 @@ const Player = {
   },
 
   showControls() {
+    const changed = !this.controlsVisible;
+    this.controlsVisible = true;
+    const view = document.getElementById('playerView');
+    if (view) view.style.cursor = '';
+    if (changed) this.applySubtitleStyle();
     const topbar = document.getElementById('playerTopbar');
     const controls = document.getElementById('playerControls');
     if (topbar) topbar.style.opacity = '1';
@@ -2332,6 +2766,11 @@ const Player = {
   },
 
   hideControls() {
+    if (['playerSettingsPanel', 'playerSpeedPanel', 'playerInfoPanel', 'playerDialogOverlay', 'autoNextCard'].some(id => { const el = document.getElementById(id); return el && !el.hidden; }) || this.isSeeking) return;
+    this.controlsVisible = false;
+    const view = document.getElementById('playerView');
+    if (view) view.style.cursor = 'none';
+    this.applySubtitleStyle();
     const topbar = document.getElementById('playerTopbar');
     const controls = document.getElementById('playerControls');
     if (topbar) topbar.style.opacity = '0';
@@ -2362,6 +2801,10 @@ const Player = {
   },
 
   updateProgress() {
+    if (!this.isMpv() && this._seekMeasurement && !this.video?.seeking && Math.abs(this.engPos() - this._seekMeasurement.target) < 1) {
+      this.measure('seek_end', { elapsedMs: performance.now() - this._seekMeasurement.at });
+      this._seekMeasurement = null;
+    }
     if (this.isSeeking) return;
     if (!this.isMpv() && !this.video) return;
     const cur = this.engPos();
@@ -2384,8 +2827,8 @@ const Player = {
 
   updateBuffer() {
     if (!this.video || !this.video.buffered.length) return;
-    const dur = this.video.duration || 0;
-    const buf = this.video.buffered.end(this.video.buffered.length - 1);
+    const dur = this.engDuration();
+    const buf = this.originMs / 1000 + this.video.buffered.end(this.video.buffered.length - 1);
     const pct = dur ? (buf / dur) * 100 : 0;
     const bufEl = document.getElementById('playerSeekBuffer');
     if (bufEl) bufEl.style.width = pct + '%';
@@ -2401,43 +2844,219 @@ const Player = {
     if (mute) mute.style.display = isMuted ? '' : 'none';
   },
 
-  // ===== JASSUB ASS 字幕渲染 =====
-  initJassub(subtitles, sessionData) {
-    // 清理旧的 JASSUB 实例
-    this.destroyJassub();
+  beginAttempt(context) {
+    this._qoe = { at: performance.now(), attempt_id: context.attemptId || null, origin: context.__autoNext ? 'auto_next' : 'tap',
+      media_item_id: Number(context.media_item_id) || null, season_number: context.seasonNumber ?? null,
+      episode_number: context.episodeNumber ?? null, tier: -1, engine: '', hw_backend: '', first_frame_ms: null,
+      playing_ms: null, rebuffer_ms: 0, rebuffer_count: 0, seek_count: 0, watched_ms: 0, timeline: [], outcome: '',
+      identity: { server: API.baseUrl, account: App.session?.username || '', epoch: API.contextEpoch } };
+  },
 
-    if (!subtitles || !subtitles.length) return;
-    if (typeof JASSUB === 'undefined') {
-      console.warn('[JASSUB] Library not loaded');
-      return;
+  sampleQoe(sample) {
+    const q = this._qoe;
+    if (!q || !sample) return;
+    const now = performance.now();
+    if (!sample.paused && !sample.buffering && !sample.seeking && !sample.ended && q.lastAt != null) {
+      q.watched_ms += Math.max(0, Math.min(5000, now - q.lastAt));
     }
+    q.lastAt = now;
+  },
 
-    // 查找 ASS/SSA 字幕轨
-    const decision = sessionData?.decision || {};
-    const assSubs = decision.subtitles || [];
-    const assUrls = subtitles.filter((_, i) => {
-      const sub = assSubs[i];
-      return sub && (sub.kind === 'ass' || sub.kind === 'ssa' || sub.format === 'ass' || sub.format === 'ssa');
-    });
+  finishAttempt() {
+    const q = this._qoe;
+    if (!q) return Promise.resolve();
+    this._qoe = null;
+    if (!q.attempt_id || q.identity.server !== API.baseUrl || q.identity.epoch !== API.contextEpoch ||
+      q.identity.account !== (App.session?.username || '')) return Promise.resolve();
+    if (q.bufferAt != null) q.rebuffer_ms += performance.now() - q.bufferAt;
+    const v = this.mpvState?.properties || {};
+    const body = { attempt_id: q.attempt_id, client: 'windows', origin: q.origin,
+      media_item_id: q.media_item_id, season_number: q.season_number, episode_number: q.episode_number,
+      library_file_id: q.library_file_id, tier: q.tier, engine: q.engine, hw_backend: q.hw_backend,
+      first_frame_ms: q.first_frame_ms, playing_ms: q.playing_ms, rebuffer_ms: Math.floor(q.rebuffer_ms),
+      rebuffer_count: q.rebuffer_count, seek_count: q.seek_count, watched_ms: Math.floor(q.watched_ms),
+      dropped_frames: this.isMpv() ? (Number(v['frame-drop-count']) || 0) + (Number(v['decoder-frame-drop-count']) || 0)
+        : this.video?.getVideoPlaybackQuality?.().droppedVideoFrames ?? null,
+      network_class: 'unknown', route: q.tier === 0 ? 'remote_bypass' : 'server_transcode',
+      error_category: q.error_category || '', error_kind: q.error_kind || '', error_stage: q.error_stage || '',
+      outcome: q.outcome || (q.first_frame_ms != null ? 'exited' : 'exit_before_start'),
+      detail: { timeline: q.timeline, context: { hwdec: String(v['hwdec-current'] || 'unknown'),
+        target_primaries: String(v['video-target-params']?.primaries || 'unknown'),
+        target_gamma: String(v['video-target-params']?.gamma || 'unknown') } } };
+    if (body.outcome === 'failed') API.request('/playback/client-log', { method: 'POST', timeoutMs: 1200, cancelable: true,
+      body: { event: 'playback_failure', detail: { attempt_id: q.attempt_id, client: 'windows', engine: q.engine,
+        category: body.error_category, kind: body.error_kind, stage: body.error_stage, tier: q.tier } } }).catch(() => {});
+    return API.request('/playback/metrics', { method: 'POST', body, timeoutMs: 1200, cancelable: true }).catch(() => {});
+  },
 
-    if (!assUrls.length) return;
+  measure(event, extra = {}) {
+    const v = this.mpvState?.properties || {}, output = v['video-out-params'] || {};
+    const qoe = this._qoe;
+    if (qoe) {
+      const now = performance.now();
+      if (event === 'first_frame' && qoe.first_frame_ms == null) qoe.first_frame_ms = Math.floor(now - qoe.at);
+      if (event === 'playing' && qoe.playing_ms == null) qoe.playing_ms = Math.floor(now - qoe.at);
+      if (event === 'seek_start') qoe.seek_count++;
+      if (event === 'buffer_start' && this._everPlayed && qoe.bufferAt == null) { qoe.bufferAt = now; qoe.rebuffer_count++; }
+      if (event === 'buffer_end' && qoe.bufferAt != null) { qoe.rebuffer_ms += now - qoe.bufferAt; qoe.bufferAt = null; }
+      if (event === 'error') qoe.outcome = 'failed';
+      if (event === 'retry' || event === 'playing') qoe.outcome = '';
+      if (event === 'ended') qoe.outcome = 'watched';
+      qoe.timeline.push({ event, at_ms: Math.max(0, Math.floor(now - qoe.at)), ...(Number.isFinite(extra.elapsedMs) ? { duration_ms: Math.floor(extra.elapsedMs) } : {}) });
+      if (qoe.timeline.length > 64) qoe.timeline.shift();
+    }
+    const detail = { event, engine: this.activeEngine, generation: this.generation,
+      positionMs: Math.floor(this.engPos() * 1000), tier: this.sessionData?.decision?.tier ?? null,
+      hwdec: this.isMpv() ? String(v['hwdec-current'] || 'no') : 'browser',
+      outputWidth: output.w ?? this.video?.videoWidth ?? 0, outputHeight: output.h ?? this.video?.videoHeight ?? 0,
+      dropped: (Number(v['frame-drop-count']) || 0) + (Number(v['decoder-frame-drop-count']) || 0),
+      buffering: !!this._buffering, rate: this.engRate() };
+    if (Number.isFinite(extra.elapsedMs)) detail.elapsedMs = Math.max(0, extra.elapsedMs);
+    window.dispatchEvent(new CustomEvent('movieclaw:playback-measurement', { detail }));
+  },
 
+  handleNativeInput(args) {
+    const [action, number] = args;
+    if (action === 'move' || action === 'click') { this.showControls(); this.autoHideControls(); }
+    else if (action === 'double-click' || action === 'fullscreen') this.toggleFullscreen();
+    else if (action === 'play') this.togglePlay();
+    else if (action === 'seek') this.engSeekBy(Number(number) || 0);
+    else if (action === 'volume') this.engSetVolume(this.engVolume() + (Number(number) || 0));
+    else if (action === 'mute') this.toggleMute();
+    else if (action === 'home') this.engSeekTo(0);
+    else if (action === 'chapter') this.seekChapter(Number(number));
+    else if (action === 'speed') this.setSpeed(Math.max(0.5, Math.min(2, this.engRate() + (Number(number) || 0))));
+    else if (action === 'subtitle-cycle') this.cycleSubtitle();
+    else if (action === 'close') this.close();
+    else if (action === 'enter') this._dialog?.primary?.();
+    else if (action === 'previous') this.playEpisode(this.prevEpisode());
+    else if (action === 'next') this.playEpisode(this.nextEpisode());
+    else if (action === 'escape') { if (this._dialog) { this._dialog.secondary?.(); return; } if (this.closeAnyPanel()) return; if (this.isFullscreen()) this.toggleFullscreen(); else this.close(); }
+  },
+
+  initialSubtitle() {
+    const plans = this.sessionData?.decision?.subtitles || [];
+    const options = this.buildSubtitleTracks().options;
+    const remembered = this.context?.subtitle_track ?? this.sessionData?.watch?.subtitle_track;
+    if (remembered === 'off') return -1;
+    const explicit = options.find(o => plans[o.index]?.track_ref === remembered);
+    if (explicit) return explicit.index;
+    const preferred = localStorage.getItem('mc_subLang');
+    if (preferred === '') return -1;
+    const language = options.find(o => languageMatches(o.language, preferred));
+    if (language) return language.index;
+    return options.find(o => plans[o.index]?.is_default)?.index ?? -1;
+  },
+
+  async initializeTracks() {
+    const generation = this.generation;
+    const audioRef = this.context?.audio_track ?? this.sessionData?.watch?.audio_track;
+    const tracks = this.audioTracks();
+    const audio = tracks.find(t => t.ref === audioRef) || tracks.find(t => languageMatches(t.language, localStorage.getItem('mc_audioLang')));
+    if (audio && audio.ref !== this.currentAudioRef) await this.selectAudio(audio.ref, { remember: false });
+    if (generation !== this.generation) return;
+    await this.selectSubtitle(this.initialSubtitle(), { remember: false });
+    if (generation !== this.generation) return;
+    await this.setSpeed(this.context?.playbackRate || 1);
+    if (this.subtitleOffset) await this.adjustSubtitleOffset(0);
+    this.applySubtitleStyle();
+  },
+
+  playbackToken() {
+    try { const token = new URL(playbackMediaUrl(this.sessionData?.stream_url || '')).searchParams.get('token');
+      return token ? '?token=' + encodeURIComponent(token) : ''; } catch (_) { return ''; }
+  },
+
+  async mediaCapability(url, generation = this.generation) {
+    if (!window.__TAURI__) return playbackMediaUrl(url);
+    const grant = await window.__TAURI__.core.invoke('grant_media_stream', { url: playbackMediaUrl(url) });
+    if (generation !== this.generation) {
+      await window.__TAURI__.core.invoke('release_media_stream', { streamId: grant.streamId }).catch(() => {});
+      throw new DOMException('播放已更换', 'AbortError');
+    }
+    if (!grant.url || !grant.streamId) throw new Error('媒体代理未返回有效地址');
+    (this._mediaGrants ||= new Set()).add(grant.streamId);
+    return grant.url;
+  },
+
+  async loadTrickplayIndex() {
+    const fileId = this.sessionData?.decision?.file_id;
+    if (!fileId) return;
+    const generation = this.generation;
+    const signal = this._trickplayAbort.signal;
     try {
-      // 创建 JASSUB 渲染器
-      this.jassub = new JASSUB({
-        video: this.video,
-        subContent: null, // 从 URL 加载
-        subUrl: assUrls[0],
-        availableFonts: { 'default': 'jassub-default.woff2' },
-        workerUrl: 'jassub-worker.js',
-        wasmUrl: 'jassub-worker.wasm',
-        fallbackFont: 'jassub-default.woff2',
-        debug: false,
-      });
-      this.jassubTracks = assUrls;
-      console.log('[JASSUB] Initialized with', assUrls.length, 'ASS track(s)');
-    } catch (e) {
-      console.warn('[JASSUB] Init failed:', e);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const response = await API.request('/playback/files/' + fileId + '/trickplay' + this.playbackToken(), { signal });
+        if (generation !== this.generation) return;
+        const index = response?.data || response;
+        if (index?.ready) { this.trickplayIndex = index; return; }
+        if (attempt < 2) await new Promise(resolve => {
+          const timer = setTimeout(resolve, 3000);
+          signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+        });
+        if (signal.aborted) return;
+      }
+    } catch (_) { /* Preview is optional; time labels still work. */ }
+  },
+
+  renderTrickplayPreview(preview, fileMs, time) {
+    const ticket = preview._ticket = (preview._ticket || 0) + 1;
+    preview.innerHTML = '<div class="time">' + playerText(time) + '</div>';
+    const tile = trickplayTile(this.trickplayIndex, fileMs);
+    if (!tile) return;
+    const generation = this.generation;
+    const images = this._spriteImages;
+    if (!images) return;
+    if (!images.has(tile.sheet)) images.set(tile.sheet, this.mediaCapability(tile.sheet, generation).catch(() => ''));
+    images.get(tile.sheet).then(url => {
+      if (!url || generation !== this.generation || preview.hidden || ticket !== preview._ticket) return;
+      const image = document.createElement('div'); image.className = 'img';
+      image.style.width = tile.width + 'px'; image.style.height = tile.height + 'px';
+      image.style.backgroundImage = 'url(' + JSON.stringify(url) + ')';
+      image.style.backgroundPosition = '-' + tile.x + 'px -' + tile.y + 'px';
+      preview.innerHTML = ''; preview.appendChild(image);
+      const label = document.createElement('div'); label.className = 'time'; label.textContent = time; preview.appendChild(label);
+    });
+  },
+
+  // ===== JASSUB ASS 字幕渲染 =====
+  async initJassub(subtitles, sessionData, index, selection) {
+    if (!subtitles?.[index] || typeof JASSUB === 'undefined') throw new Error('ASS 字幕渲染器不可用');
+    const generation = this.generation;
+    const response = await API.rawFetch('/__stream__?url=' + encodeURIComponent(playbackMediaUrl(subtitles[index])),
+      { signal: this._trickplayAbort?.signal });
+    if (!response.ok) throw new Error('ASS 字幕读取失败（HTTP ' + response.status + '）');
+    const content = await response.text();
+    if (generation !== this.generation || selection !== this._subtitleSelectionSeq) return;
+    if (this.jassub) this.jassub.setTrack(content);
+    else this.jassub = new JASSUB({ video: this.video, subContent: content,
+      availableFonts: { default: 'jassub-default.woff2' }, workerUrl: 'jassub-worker.js',
+      wasmUrl: 'jassub-worker.wasm', fallbackFont: 'jassub-default.woff2',
+      timeOffset: this.originMs / 1000 - this.subtitleOffset, debug: false });
+    this.jassub.timeOffset = this.originMs / 1000 - this.subtitleOffset;
+    this._assOriginal = null;
+    this.applySubtitleStyle();
+    // Lazy font extraction can take time. It never delays the video or subtitle
+    // selection; libass updates existing glyphs once attachment fonts arrive.
+    this.loadAssFonts(generation).catch(() => {});
+  },
+
+  async loadAssFonts(generation) {
+    const fileId = this.sessionData?.decision?.file_id;
+    if (!fileId || this._fontGeneration === generation) return;
+    this._fontGeneration = generation;
+    const token = this.playbackToken();
+    const response = await API.request('/playback/files/' + fileId + '/fonts' + token,
+      { signal: this._trickplayAbort?.signal, timeoutMs: 30000 });
+    if (generation !== this.generation || !this.jassub) return;
+    for (const font of (response?.data || response)?.fonts || []) {
+      const url = await this.mediaCapability(font, generation);
+      if (generation !== this.generation) return;
+      const result = await fetch(url, { signal: this._trickplayAbort?.signal });
+      if (!result.ok) continue;
+      const bytes = new Uint8Array(await result.arrayBuffer());
+      if (generation !== this.generation || !this.jassub) return;
+      this.jassub.addFont(bytes);
     }
   },
 
@@ -2447,69 +3066,83 @@ const Player = {
       this.jassub = null;
     }
     this.jassubTracks = [];
+    this._assOriginal = null;
+    this._fontGeneration = null;
   },
 
   // ===== 进度上报 & 会话保活 =====
   startProgressReporting() {
-    this.stopProgressReporting();
-    // 发送初始 start 事件
-    if (this.mediaItemId) {
-      const posMs = Math.floor(this.engPos() * 1000);
-      const durMs = Math.floor(this.engDuration() * 1000);
-      API.reportProgress(this.mediaItemId, 'start', posMs, durMs, this.seasonNumber, this.episodeNumber).catch(() => {});
-      this.lastProgressReport = Date.now();
-    }
+    if (!this.activeEngine || this._reportedStart) return;
+    this._reportedStart = true;
+    if (!this.isMpv()) this.measure('first_frame', { elapsedMs: performance.now() - this._openedAt });
+    this.lastProgressReport = Date.now();
+    this.sendSnapshot('start', this.snapshot()).catch(() => {});
+    const generation = this.generation;
     this.progressTimer = setInterval(() => {
-      if (!this.mediaItemId) return;
-      const now = Date.now();
-      if (now - this.lastProgressReport < 10000) return;
-      this.lastProgressReport = now;
-      const posMs = Math.floor(this.engPos() * 1000);
-      const durMs = Math.floor(this.engDuration() * 1000);
-      API.reportProgress(this.mediaItemId, 'progress', posMs, durMs, this.seasonNumber, this.episodeNumber).catch(() => {});
-    }, 5000);
+      if (generation !== this.generation || !this.activeEngine || this._ended) return;
+      this.lastProgressReport = Date.now();
+      this.sendSnapshot('progress', this.snapshot()).catch(() => {});
+    }, 10000);
   },
 
   stopProgressReporting() {
-    if (this.progressTimer) { clearInterval(this.progressTimer); this.progressTimer = null; }
+    if (this.progressTimer) clearInterval(this.progressTimer);
+    this.progressTimer = null;
   },
 
   startSessionPing() {
     this.stopSessionPing();
-    if (!this.sessionId) return;
+    const sid = this.sessionId;
+    if (!sid) return;
     this.pingTimer = setInterval(() => {
-      if (!this.sessionId) return;
-      API.sessionPing(this.sessionId).catch(() => {});
+      if (this.sessionId !== sid) return;
+      API.sessionPing(sid).catch((error) => {
+        if (this.sessionId === sid && error.status === 404 && typeof App !== 'undefined') {
+          App.onPlaybackNetworkDead('播放会话已失效，正在重连');
+        }
+      });
     }, 30000);
   },
 
   stopSessionPing() {
-    if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.pingTimer = null;
   },
 
   reportPlaybackEnd() {
-    if (!this.mediaItemId) return;
-    const posMs = Math.floor(this.engPos() * 1000);
-    const durMs = Math.floor(this.engDuration() * 1000);
-    API.reportProgress(this.mediaItemId, 'stop', posMs, durMs, this.seasonNumber, this.episodeNumber).catch(() => {});
+    if (!this.activeEngine || this._ended) return;
+    const position = this.engPos();
+    const duration = this.engDuration();
+    if (duration > 0 && duration - position > 5) {
+      if (typeof App !== 'undefined') App.onPlaybackNetworkDead('视频提前结束，正在恢复播放');
+      return;
+    }
+    this._ended = true;
+    this.measure('ended');
+    this._buffering = false;
     this.stopProgressReporting();
     this.stopSessionPing();
-    if (this.sessionId) {
-      API.sessionStop(this.sessionId).catch(() => {});
-      this.sessionId = null;
+    if (duration > 0) {
+      if (this.isMpv() && this.mpvState) this.mpvState.time = Math.max(0, duration - this.originMs / 1000);
+      else if (this.video && Number.isFinite(this.video.duration)) this.video.currentTime = Math.max(0, duration - this.originMs / 1000);
     }
-    if (durMs > 0 && posMs / durMs >= 0.9) {
-      if (typeof App !== 'undefined' && App.onPlaybackEnded) {
-        App.onPlaybackEnded(this.sessionData);
-      }
+    const snapshot = this.snapshot();
+    if (this._reportedStart) {
+      this.sendSnapshot('stop', snapshot).then(() => {
+        window.dispatchEvent(new CustomEvent('movieclaw:playback-stopped', { detail: snapshot }));
+      }).catch(() => {});
+      this._reportedStart = false;
     }
+    if (this.sessionId) API.sessionStop(this.sessionId).catch(() => {});
+    this.sessionId = null;
+    this.showIcon('play');
+    this.showControls();
+    if (typeof App !== 'undefined') App.onPlaybackEnded();
   },
 
   reportPlaybackStop() {
-    if (!this.mediaItemId) return;
-    const posMs = Math.floor(this.engPos() * 1000);
-    const durMs = Math.floor(this.engDuration() * 1000);
-    API.reportProgress(this.mediaItemId, 'stop', posMs, durMs, this.seasonNumber, this.episodeNumber).catch(() => {});
+    if (!this._reportedStart) return Promise.resolve();
+    return this.sendSnapshot('stop', this.snapshot());
   },
 
   formatTime(secs) {
@@ -2524,3 +3157,7 @@ const Player = {
 
 // DOM 加载后初始化
 document.addEventListener('DOMContentLoaded', () => Player.init());
+window.__MOVIECLAW_SHUTDOWN__ = async () => {
+  try { await Player.close(); }
+  finally { await window.__TAURI__?.core?.invoke('complete_shutdown'); }
+};

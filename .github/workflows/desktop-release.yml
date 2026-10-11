@@ -2,106 +2,70 @@ name: Desktop Release
 
 on:
   push:
-    tags:
-      - 'v*'
-      - 'desktop-v*'
+    tags: ['desktop-v*']
 
 permissions:
-  contents: write
-
-env:
-  CARGO_TERM_COLOR: always
+  contents: read
 
 jobs:
-  build:
-    name: Build
-    runs-on: windows-latest
-
+  version:
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust (GNU target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-gnu
-
-      - name: Setup MinGW
-        run: |
-          $gcc = Get-Command gcc -ErrorAction SilentlyContinue
-          if (-not $gcc) {
-            choco install mingw -y --no-progress
-            echo "C:\ProgramData\mingw64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-          }
-          gcc --version
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            apps/desktop/src-tauri/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Build release
-        working-directory: apps/desktop/src-tauri
-        run: cargo build --release
+      - uses: actions/checkout@v4
+      - name: Require tag to match Cargo version
         env:
-          CC_x86_64_pc_windows_gnu: gcc
-          CXX_x86_64_pc_windows_gnu: g++
-
-      - name: Assemble portable
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          $dist = "apps/desktop/dist"
-          $portable = "$dist/portable"
-          New-Item -ItemType Directory -Force -Path $portable
-          Copy-Item apps/desktop/src-tauri/target/release/movieclaw-desktop.exe $portable/
-          Copy-Item apps/desktop/ui/connect.html $portable/
-          Copy-Item apps/desktop/ui/inject.js $portable/
-          $dll = Get-ChildItem -Path apps/desktop/src-tauri/target -Recurse -Filter WebView2Loader.dll | Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1
-          if ($dll) { Copy-Item $dll.FullName $portable/ }
-          New-Item -ItemType Directory -Force -Path "$portable/mpv"
-          if (Test-Path apps/desktop/scripts/mpv) {
-            Copy-Item apps/desktop/scripts/mpv/* "$portable/mpv/" -Recurse -ErrorAction SilentlyContinue
-          }
-          @"
-          MovieClaw Desktop (Portable)
-          1. Run movieclaw-desktop.exe
-          2. Enter your MovieClaw server URL
-          3. Browse and play
-          Requires: Windows 10/11 x64, WebView2 Runtime, mpv
-          "@ | Set-Content "$portable/README.txt"
-
-      - name: Create portable zip
+          python3 - <<'PY'
+          import os, pathlib, tomllib
+          version = tomllib.loads(pathlib.Path('apps/desktop/src-tauri/Cargo.toml').read_text())['package']['version']
+          assert os.environ['RELEASE_TAG'] == f'desktop-v{version}', 'Desktop release tag must match Cargo.toml'
+          PY
+  verify:
+    needs: version
+    uses: ./.github/workflows/desktop-ci.yml
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require a successful CI run for the exact physically tested source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ACCEPTANCE_RUN_ID: ${{ vars.DESKTOP_ACCEPTANCE_RUN_ID }}
         run: |
-          Compress-Archive -Path 'apps/desktop/dist/portable/*' -DestinationPath 'apps/desktop/dist/MovieClaw-Desktop-portable-x64.zip' -Force
-
-      - name: Install NSIS
-        run: choco install nsis -y --no-progress
-
-      - name: Build NSIS installer
-        run: |
-          & "C:\Program Files (x86)\NSIS\makensis.exe" apps/desktop/scripts/movieclaw-setup.nsi
-
-      - name: Generate checksums
-        run: |
-          Get-ChildItem apps/desktop/dist -Include *.exe,*.zip -Recurse | ForEach-Object {
-            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
-            "$hash  $($_.Name)" | Out-File -Append apps/desktop/dist/SHA256SUMS.txt
-          }
-          Get-Content apps/desktop/dist/SHA256SUMS.txt
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+          test -n "$ACCEPTANCE_RUN_ID" || { echo 'Stable release requires DESKTOP_ACCEPTANCE_RUN_ID for the physically tested packages'; exit 1; }
+          gh api "repos/$GH_REPO/actions/runs/$ACCEPTANCE_RUN_ID" > acceptance-run.json
+          python3 - <<'PY'
+          import json, os
+          run = json.load(open('acceptance-run.json'))
+          assert run['conclusion'] == 'success' and run['head_sha'] == os.environ['GITHUB_SHA'], 'Acceptance CI must pass for the exact release commit'
+          assert run['path'] == '.github/workflows/desktop-ci.yml', 'Acceptance must come from Desktop CI'
+          assert run['event'] == 'push', 'Acceptance artifacts must be built from the exact pushed commit, not a PR merge tree'
+          assert run['head_repository']['full_name'] == os.environ['GH_REPO'], 'Fork artifacts are not release inputs'
+          PY
+      - uses: actions/download-artifact@v4
         with:
-          name: MovieClaw Desktop ${{ github.ref_name }}
-          draft: false
-          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
-          generate_release_notes: true
-          files: |
-            apps/desktop/dist/MovieClaw-Desktop-*.exe
-            apps/desktop/dist/MovieClaw-Desktop-*.zip
-            apps/desktop/dist/SHA256SUMS.txt
+          name: desktop-packages-${{ github.sha }}
+          path: dist
+          github-token: ${{ github.token }}
+          run-id: ${{ vars.DESKTOP_ACCEPTANCE_RUN_ID }}
+      - name: Physical acceptance and signature gate
+        env:
+          DESKTOP_HARDWARE_ACCEPTANCE_JSON: ${{ vars.DESKTOP_HARDWARE_ACCEPTANCE_JSON }}
+        run: |
+          VERSION=$(python3 -c "import pathlib,tomllib; print(tomllib.loads(pathlib.Path('apps/desktop/src-tauri/Cargo.toml').read_text())['package']['version'])")
+          python3 apps/desktop/scripts/check-release-evidence.py --directory dist --revision "$GITHUB_SHA" --version "$VERSION"
+      - name: Verify and publish the tested packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cd dist
+          sha256sum --check SHA256SUMS.txt
+          gh release create "$RELEASE_TAG" MovieClaw-Desktop-*-Setup-x64.exe MovieClaw-Desktop-*-portable-x64.zip SHA256SUMS.txt release-manifest.json --verify-tag --title "MovieClaw Desktop $RELEASE_TAG" --generate-notes

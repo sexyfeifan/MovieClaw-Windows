@@ -44,6 +44,8 @@ concurrency:
 # NER 模型的 Release tag；模型发新版时同步改这里（发版流程见 .claude/skills/release）
 env:
   NER_MODEL_TAG: torrent-ner-v3
+  # The Windows fork has no model Release; use the official immutable v3 assets.
+  NER_MODEL_REPO: movieclaw/MovieClaw
 
 jobs:
   # 按改动路径决定下面各作业跑不跑。pull_request 事件下 paths-filter 通过
@@ -150,7 +152,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: data/models/torrent-ner
-          key: ner-model-${{ env.NER_MODEL_TAG }}
+          key: ner-model-official-v3-f59764e2021d0c8d
 
       - name: 下载 NER 模型（缓存未命中时）
         if: steps.ner-cache.outputs.cache-hit != 'true'
@@ -158,8 +160,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release download "$NER_MODEL_TAG" \
-            --repo "${{ github.repository }}" \
+            --repo "$NER_MODEL_REPO" \
             --dir data/models/torrent-ner
+
+      - name: 校验官方固定模型（含缓存命中）
+        working-directory: data/models/torrent-ner
+        run: |
+          sha256sum --check <<'CHECKSUMS'
+          86451093d5112802bc19a34675115cf417fb70749df8c2059df98923b605f2ab  labels.json
+          fae0c51cb3fa6cf8f8351f9bf62198d912aa44006aa39fa761e7b0e69aebd5b5  manifest.json
+          f59764e2021d0c8dbb84f580916d478a587d44e3f8d7778cbaca31a71a3734a3  model.int8.onnx
+          a34543f1ac37c19b829db3674d5af635d1d72a5b4b3801d0ba208911df5860a2  tokenizer.json
+          CHECKSUMS
 
       # 全仓库一次就够，放在第一片
       - name: ruff

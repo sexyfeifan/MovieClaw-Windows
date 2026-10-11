@@ -29,6 +29,17 @@ const DAY = 24 * 60 * MINUTE;
 const NOW = Date.parse("2026-08-29T12:00:00Z");
 const ago = (ms) => new Date(NOW - ms).toISOString();
 
+test("Windows 配对显示电脑与真实登录身份", () => {
+  assert.equal(clientTypeLabel("windows"), "Windows");
+  assert.equal(deviceGroupKey("windows"), "app");
+  assert.equal(deviceGlyph("windows", "full"), "computer");
+  assert.ok(grantSummary("windows", "member").title.includes("Windows 电脑"));
+  assert.ok(grantSummary("windows", "member").title.includes("以你的身份登录"));
+  assert.ok(grantSummary("windows", "admin").title.includes("超级管理员"));
+  assert.ok(grantSummary("windows", "member").body.includes("你面前"));
+  assert.ok(!grantSummary("windows", "member").title.includes("超级管理员"));
+});
+
 test("权限说明说人话，不出现内部权限名", () => {
   for (const type of ["worker", "cli", "manual", "什么鬼"]) {
     for (const role of ["admin", "member"]) {

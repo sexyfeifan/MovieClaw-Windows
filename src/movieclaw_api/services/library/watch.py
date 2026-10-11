@@ -230,13 +230,21 @@ class LibraryWatcher:
 
     async def stop(self) -> None:
         self._closed = True
-        for task in (self._consumer, self._startup, *self._rescan_tasks.values()):
-            if task is not None:
-                task.cancel()
+        tasks = [
+            task
+            for task in (self._consumer, self._startup, *self._rescan_tasks.values())
+            if task is not None
+        ]
+        for task in tasks:
+            task.cancel()
         self._consumer = None
         self._startup = None
         self._rescan_tasks.clear()
         self._rescan_pending.clear()
+        # cancel() only requests cancellation. Drain async scan/DB cleanup before
+        # callers dispose the database or event loop; otherwise connections and
+        # the queue consumer can survive shutdown (and hang test teardown).
+        await asyncio.gather(*tasks, return_exceptions=True)
         # 与后台重建互斥：重建正在工作线程里装配观察者时直接停引用会漏掉
         # 刚装好的 watch（关停竞态）；拿到锁再停则必停到最终状态
         async with self._refresh_lock:
@@ -421,18 +429,18 @@ class LibraryWatcher:
         self, library_id: int, scope: str | None, modified_path: str | None
     ) -> None:
         loop = self._loop
-        if loop is None or loop.is_closed():
+        if self._closed or loop is None or loop.is_closed():
             return
         loop.call_soon_threadsafe(self._queue.put_nowait, (library_id, scope, modified_path))
 
     async def _consume(self) -> None:
         """去抖消费：首事件后等安静窗口，汇总本批涉及的库做范围/整库扫描。"""
-        while True:
+        while not self._closed:
             library_id, scope, modified_path = await self._queue.get()
             pending: dict[int, _PendingScan] = {}
             pending.setdefault(library_id, _PendingScan()).add(scope, modified_path)
             deadline = asyncio.get_running_loop().time() + _MAX_WAIT_SECONDS
-            while True:
+            while not self._closed:
                 remaining = deadline - asyncio.get_running_loop().time()
                 timeout = min(_QUIET_SECONDS, max(remaining, 0))
                 try:
@@ -444,6 +452,8 @@ class LibraryWatcher:
                 pending.setdefault(library_id, _PendingScan()).add(scope, modified_path)
                 if asyncio.get_running_loop().time() >= deadline:
                     break  # 兜底：持续有事件也要触发
+            if self._closed:
+                return
             for library_id in sorted(pending):
                 await self._dispatch_scan(library_id, pending[library_id])
 
