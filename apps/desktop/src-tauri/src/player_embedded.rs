@@ -125,7 +125,7 @@ static MPV_IPC: Mutex<Option<crate::mpv_ipc::Session>> = Mutex::new(None);
 static MPV_MEDIA_GRANTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static MPV_SUBTITLE_SOURCES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static MPV_INPUT_FILE: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
-static HOST_INPUT: Mutex<Option<(tauri::AppHandle, u64)>> = Mutex::new(None);
+static HOST_INPUT: Mutex<Option<(tauri::AppHandle, u64, Option<isize>)>> = Mutex::new(None);
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -224,22 +224,26 @@ unsafe extern "system" fn host_wnd_proc(
     lparam: isize,
 ) -> isize {
     // mpv disables its --wid child on Windows. Mouse events arrive at this host.
-    if let Some(action) = host_mouse_action(msg) {
+    let context = HOST_INPUT.try_lock().ok().and_then(|mut guard| {
+        let (app, instance, last_position) = guard.as_mut()?;
+        let action = host_mouse_action(msg, lparam, last_position)?;
+        Some((app.clone(), *instance, action))
+    });
+    if let Some((app, instance, action)) = context {
         use tauri::Emitter;
-        let context = HOST_INPUT.try_lock().ok().and_then(|guard| guard.clone());
-        if let Some((app, instance)) = context {
-            let _ = app.emit("movieclaw:player-input", serde_json::json!({
-                "instanceId": instance, "args": ["movieclaw-input", action]
-            }));
-        }
+        let _ = app.emit("movieclaw:player-input", serde_json::json!({
+            "instanceId": instance, "args": ["movieclaw-input", action]
+        }));
         return 0;
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
-fn host_mouse_action(message: u32) -> Option<&'static str> {
+fn host_mouse_action(message: u32, position: isize, last_position: &mut Option<isize>) -> Option<&'static str> {
     match message {
-        0x0200 => Some("move"),
+        // Win32 also sends WM_MOUSEMOVE after region/layout changes with a stationary cursor.
+        0x0200 if *last_position == Some(position) => None,
+        0x0200 => { *last_position = Some(position); Some("move") },
         0x0202 => Some("click"),
         0x0203 => Some("double-click"),
         0x0205 => Some("info"),
@@ -251,12 +255,15 @@ fn host_mouse_action(message: u32) -> Option<&'static str> {
 mod host_input_tests {
     #[test]
     fn disabled_mpv_child_mouse_messages_are_handled_by_the_host() {
-        assert_eq!(super::host_mouse_action(0x0200), Some("move"));
-        assert_eq!(super::host_mouse_action(0x0202), Some("click"));
-        assert_eq!(super::host_mouse_action(0x0203), Some("double-click"));
-        assert_eq!(super::host_mouse_action(0x0205), Some("info"));
-        assert_eq!(super::host_mouse_action(0x0201), None);
-        assert_eq!(super::host_mouse_action(0x0005), None);
+        let mut last = None;
+        assert_eq!(super::host_mouse_action(0x0200, 100, &mut last), Some("move"));
+        assert_eq!(super::host_mouse_action(0x0200, 100, &mut last), None);
+        assert_eq!(super::host_mouse_action(0x0200, 101, &mut last), Some("move"));
+        assert_eq!(super::host_mouse_action(0x0202, 101, &mut last), Some("click"));
+        assert_eq!(super::host_mouse_action(0x0203, 101, &mut last), Some("double-click"));
+        assert_eq!(super::host_mouse_action(0x0205, 101, &mut last), Some("info"));
+        assert_eq!(super::host_mouse_action(0x0201, 101, &mut last), None);
+        assert_eq!(super::host_mouse_action(0x0005, 101, &mut last), None);
     }
 }
 
@@ -368,7 +375,7 @@ pub fn launch_embedded_player(
     // 先关闭已有实例
     stop_embedded_player_inner(None).ok();
     MPV_INSTANCE_ID.store(instance_id.unwrap_or(0), Ordering::SeqCst);
-    *HOST_INPUT.lock().unwrap() = Some((app.clone(), instance_id.unwrap_or(0)));
+    *HOST_INPUT.lock().unwrap() = Some((app.clone(), instance_id.unwrap_or(0), None));
     PARENT_HWND.store(parent_hwnd, Ordering::SeqCst);
 
     let mpv = find_mpv().ok_or("未找到 mpv")?;
