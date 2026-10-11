@@ -2992,20 +2992,29 @@ const App = {
     const loading = document.getElementById('playerLoading');
     if (view) view.hidden = false;
     if (loading) loading.hidden = true;
+    const originalAvailable = this._mpvReady === true && this._retryItem?.__maxHeight > 0
+      && !this._retryItem.__forceServerDisc;
     Player.showPlayerDialog({
       title: reason,
-      message: suggestion || null,
+      message: originalAvailable
+        ? `当前 ${this._retryItem.__maxHeight}p 播放依赖服务器处理。可改用原画，由本机播放器解码；流量会增加。`
+        : suggestion || null,
       primary: ['重试', () => this.retryPlayback()],
       secondary: ['关闭', () => Player.close()],
+      alternative: originalAvailable ? ['原画播放', () => this.retryPlayback(true)] : null,
     });
   },
 
   // 对话框「重试」：上一次播放以失败收尾，这是一次新的（同 macOS retry()）。
   // 起播链里的 Player.close() 会顺手把对话框收掉
-  retryPlayback() {
+  retryPlayback(useOriginal = false) {
     const item = this._retryItem;
     if (!item) { Player.close(); return; }
     const next = Object.assign({}, item);
+    if (useOriginal === true) {
+      next.__maxHeight = 0;
+      rememberQuality(next.media_item_id, 0);
+    }
     // Manual retry starts with the native capability again, rather than retaining
     // an automatic browser fallback from the failed attempt.
     delete next.__forceHtml5;

@@ -2,6 +2,31 @@ const { test, expect } = require('@playwright/test');
 
 const { openDesktop, state, browseLibrary } = require('./helpers.cjs');
 
+test('rejected HDR quality cap recovers through the original playback button at the same position', async ({page,request}) => {
+  await openDesktop(page,request);await browseLibrary(page);
+  await page.locator('#posterGrid .poster-card[data-item-id="3"]').click();await page.locator('#btnPlay').click();
+  await expect.poll(()=>page.evaluate(()=>Player.activeEngine)).toBe('mpv');
+  await page.route('**/api/v1/playback/sessions',async route=>{
+    if (route.request().method()==='POST' && route.request().postDataJSON().max_height > 0) {
+      return route.fulfill({json:{code:0,data:{decision:{outcome:'rejected',reason:'HDR10 需要色调映射，但服务器无可用硬件设备',suggestion:'使用第三方播放器'}}}});
+    }
+    await route.continue();
+  });
+  await page.locator('#btnSettings').click();await page.getByRole('button',{name:'画质',exact:true}).click();
+  await page.locator('[data-player-action="quality"][data-quality="1080"]').click();
+  await expect(page.locator('#playerDialog')).toContainText('1080p 播放依赖服务器');
+  await page.setViewportSize({width:360,height:640});
+  const recovery=page.locator('#playerDialog').getByRole('button',{name:'原画播放',exact:true});
+  const box=await recovery.boundingBox();expect(box.x).toBeGreaterThanOrEqual(0);expect(box.x+box.width).toBeLessThanOrEqual(360);
+  await recovery.click();
+  await expect.poll(()=>page.evaluate(()=>Player.activeEngine)).toBe('mpv');
+  await expect(page.locator('#playerDialog')).toHaveCount(0);
+  const body=(await state(request)).requests.filter(row=>row.path==='/playback/sessions').at(-1).body;
+  expect(body.max_height).toBeUndefined();expect(body.capability.universal).toBe(true);expect(body.capability.hdr_passthrough).toBe(true);
+  expect(body.start_ms).toBe(321000);
+  expect(await page.evaluate(()=>rememberedQuality(3))).toBe(0);
+});
+
 test('manual playback retry reclaims native capability after an automatic browser fallback', async ({page,request}) => {
   await openDesktop(page,request);await browseLibrary(page);await page.locator('#posterGrid .poster-card[data-item-id="3"]').click();await page.locator('#btnPlay').click();
   await expect.poll(()=>page.evaluate(()=>Player.activeEngine)).toBe('mpv');

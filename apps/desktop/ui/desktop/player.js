@@ -2563,7 +2563,7 @@ const Player = {
   },
 
   // 错误对话框：标题 + 一行建议 +「重试 / 关闭」（macOS MacPlayerDialog 的 .error 用法）
-  showPlayerDialog({ title, message, primary, secondary }) {
+  showPlayerDialog({ title, message, primary, secondary, alternative }) {
     this.hidePlayerDialog();
     const card = document.createElement('div');
     card.className = 'player-dialog';
@@ -2587,6 +2587,7 @@ const Player = {
     actions.className = 'player-dialog-actions';
     // 主次顺序同 macOS：次按钮在左、主按钮在右
     if (secondary) actions.appendChild(this._dialogButton(secondary[0], false, secondary[1]));
+    if (alternative) actions.appendChild(this._dialogButton(alternative[0], false, alternative[1]));
     actions.appendChild(this._dialogButton(primary[0], true, primary[1]));
     card.appendChild(actions);
     this._mountDialog(card, primary[1], secondary ? secondary[1] : null);

@@ -2775,6 +2775,7 @@ button.player-settings-item:focus-visible { outline-offset: -3px; }
 }
 .player-dialog-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   justify-content: flex-end;
   margin-top: 6px;
