@@ -20,7 +20,7 @@
 
 下载 `MovieClaw-Desktop-1.0.0-Setup-x64.exe` 安装，或解压 portable ZIP。安装器在缺少 WebView2 时提供安装；便携包需要系统已有 WebView2。
 
-Windows 扫码登录需要服务端 `/api/v1/auth/bootstrap` 宣告 `windows` 配对能力。旧服务端仍可用密码登录；本仓库提供兼容检查脚本和 [NAS 升级说明](../deployment/windows-pairing.md)。Windows 客户端 1.0.0 与服务端版本独立。
+Windows 扫码登录需要服务端 `/api/v1/auth/bootstrap` 宣告 `windows` 配对能力。旧服务端仍可用密码登录；本仓库提供兼容检查脚本和 [NAS 配置说明](https://github.com/sexyfeifan/MovieClaw-Windows/blob/feat/windows-native/docs/deployment/windows-pairing.md)。Windows 客户端 1.0.0 与服务端版本独立；当前 NAS 为 0.34.0，不能用本分支自报 0.32.0 的整个服务端直接替换，需要兼容升级或审核移植 Windows 配对增量。
 
 ## 验证范围与已知限制
 

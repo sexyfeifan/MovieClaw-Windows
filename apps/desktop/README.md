@@ -68,7 +68,7 @@ For the 1.0.0 cleanup, previous release binaries are intentionally removed after
 - `release/`: physical acceptance template; it is not a completed acceptance report.
 - `dist/`, `src-tauri/target/`, `test-results/`: ignored generated files, outside the source tree on GitHub.
 
-QR login requires a server advertising Windows pairing; see [NAS configuration](../../docs/deployment/windows-pairing.md). Search excludes homepage-hidden/adult libraries. Fullscreen supports original ratio or cropped fill, and the native player supports a compact always-on-top window restored with Esc.
+QR login requires a server advertising Windows pairing; see [NAS configuration](../../docs/deployment/windows-pairing.md). The server source in this branch reports 0.32.0 while the current NAS reports 0.34.0: review and port the Windows pairing changes onto the NAS-compatible source instead of replacing the server with an older version. Search excludes homepage-hidden/adult libraries. Fullscreen supports original ratio or cropped fill, and the native player supports a compact always-on-top window restored with Esc.
 
 ## Upstream maintenance
 
