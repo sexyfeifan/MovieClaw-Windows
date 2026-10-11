@@ -28,6 +28,7 @@ pub struct PlatformStatus {
     on_top: bool,
     fitted: bool,
     aspect_locked: bool,
+    picture_in_picture: bool,
     sequence: u64,
 }
 
@@ -44,10 +45,20 @@ struct Session {
     last_fullscreen: bool,
     last_scale: f64,
     status: PlatformStatus,
+    pip_before: Option<PipWindow>,
     #[cfg(windows)]
     controls: Option<MediaControls>,
     #[cfg(windows)]
     placement_before: WINDOWPLACEMENT,
+}
+struct PipWindow {
+    size: LogicalSize<f64>,
+    position: PhysicalPosition<i32>,
+    maximized: bool,
+    fullscreen: bool,
+    on_top: bool,
+    #[cfg(windows)]
+    placement: WINDOWPLACEMENT,
 }
 #[derive(Default)]
 struct State {
@@ -133,6 +144,7 @@ pub async fn begin_native_playback(
                 on_top: on_top_before,
                 ..Default::default()
             },
+            pip_before: None,
             #[cfg(windows)]
             controls: make_controls(&window, &app, &instance_id, sequence, &title).ok(),
             #[cfg(windows)]
@@ -169,7 +181,7 @@ pub async fn update_native_playback(
             })
             .ok_or("播放请求已失效")?;
         let fullscreen = window.is_fullscreen().unwrap_or(false);
-        let on_top = update.always_on_top && !fullscreen;
+        let on_top = session.status.picture_in_picture || (update.always_on_top && !fullscreen);
         if on_top != session.status.on_top {
             window
                 .set_always_on_top(on_top)
@@ -179,6 +191,7 @@ pub async fn update_native_playback(
         let dimensions = (update.width, update.height);
         let settings = (update.always_on_top, update.fit_window);
         if update.fit_window
+            && !session.status.picture_in_picture
             && !fullscreen
             && dimensions.0 > 0
             && dimensions.1 > 0
@@ -194,7 +207,9 @@ pub async fn update_native_playback(
         {
             session.status.aspect_locked = set_aspect_lock(
                 &window,
-                if update.fit_window && !fullscreen && session.status.fitted {
+                if session.status.picture_in_picture && update.width > 0 && update.height > 0 {
+                    f64::from(update.width) / f64::from(update.height)
+                } else if update.fit_window && !fullscreen && session.status.fitted {
                     f64::from(update.width) / f64::from(update.height)
                 } else {
                     0.0
@@ -215,6 +230,86 @@ pub async fn update_native_playback(
         Ok(session.status.clone())
     })
     .await
+}
+
+fn restore_pip(window: &WebviewWindow, before: PipWindow) {
+    #[cfg(windows)]
+    PIP_SMALL_WINDOW.store(false, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(windows)]
+    set_aspect_lock(window, 0.0);
+    let _ = window.set_min_size(Some(LogicalSize::new(960.0, 600.0)));
+    let _ = window.set_fullscreen(false);
+    let _ = window.set_always_on_top(before.on_top);
+    #[cfg(windows)]
+    let restored = window.hwnd().is_ok_and(|hwnd| unsafe {
+        SetWindowPlacement(HWND(hwnd.0), &before.placement).is_ok()
+    });
+    #[cfg(not(windows))]
+    let restored = false;
+    if !restored {
+        let _ = window.unmaximize();
+        let _ = window.set_size(before.size);
+        let _ = window.set_position(before.position);
+    }
+    if before.maximized { let _ = window.maximize(); }
+    let _ = window.set_fullscreen(before.fullscreen);
+}
+
+#[tauri::command]
+pub async fn set_native_picture_in_picture(
+    window: WebviewWindow,
+    app: tauri::AppHandle,
+    instance_id: String,
+    sequence: u64,
+    enabled: bool,
+) -> Result<PlatformStatus, String> {
+    on_ui(app, move || {
+        let mut state = STATE.lock().unwrap();
+        let session = state.session.as_mut()
+            .filter(|s| s.instance_id == instance_id && s.sequence == sequence)
+            .ok_or("播放请求已失效")?;
+        if enabled == session.status.picture_in_picture { return Ok(session.status.clone()); }
+        if enabled {
+            let scale = window.scale_factor().map_err(|_| "无法读取窗口缩放")?;
+            let before = PipWindow {
+                size: window.inner_size().map_err(|_| "无法读取窗口大小")?.to_logical(scale),
+                position: window.outer_position().map_err(|_| "无法读取窗口位置")?,
+                maximized: window.is_maximized().unwrap_or(false),
+                fullscreen: window.is_fullscreen().unwrap_or(false),
+                on_top: window.is_always_on_top().unwrap_or(false),
+                #[cfg(windows)]
+                placement: window_placement(&window)?,
+            };
+            let aspect = if session.video_size.0 > 0 && session.video_size.1 > 0 {
+                f64::from(session.video_size.0) / f64::from(session.video_size.1)
+            } else { 16.0 / 9.0 };
+            let height = (480.0 / aspect).clamp(180.0, 480.0);
+            #[cfg(windows)]
+            PIP_SMALL_WINDOW.store(true, std::sync::atomic::Ordering::SeqCst);
+            let result = (|| {
+                window.set_fullscreen(false).map_err(|_| "无法退出全屏")?;
+                window.unmaximize().map_err(|_| "无法恢复窗口")?;
+                window.set_min_size(Some(LogicalSize::new(320.0, 180.0))).map_err(|_| "无法设置小窗尺寸")?;
+                window.set_size(LogicalSize::new(480.0, height)).map_err(|_| "无法调整小窗")?;
+                window.set_always_on_top(true).map_err(|_| "无法置顶小窗")?;
+                if let Ok(Some(monitor)) = window.current_monitor() {
+                    let area = monitor.work_area();
+                    let x = area.position.x + (area.size.width as i32 - (480.0 * scale) as i32 - 24).max(0);
+                    let y = area.position.y + (area.size.height as i32 - (height * scale) as i32 - 24).max(0);
+                    window.set_position(PhysicalPosition::new(x, y)).map_err(|_| "无法定位小窗")?;
+                }
+                Ok::<_, &str>(())
+            })();
+            if let Err(error) = result { restore_pip(&window, before); return Err(error.into()); }
+            session.pip_before = Some(before);
+        } else if let Some(before) = session.pip_before.take() {
+            restore_pip(&window, before);
+        }
+        session.status.picture_in_picture = enabled;
+        session.status.on_top = window.is_always_on_top().unwrap_or(false);
+        session.status.fitted = false;
+        Ok(session.status.clone())
+    }).await
 }
 
 #[tauri::command]
@@ -285,6 +380,11 @@ fn fit(window: &WebviewWindow, dimensions: (u32, u32)) -> bool {
 
 fn restore(window: &WebviewWindow, session: Session) {
     #[cfg(windows)]
+    PIP_SMALL_WINDOW.store(false, std::sync::atomic::Ordering::SeqCst);
+    if session.pip_before.is_some() {
+        let _ = window.set_min_size(Some(LogicalSize::new(960.0, 600.0)));
+    }
+    #[cfg(windows)]
     {
         set_aspect_lock(window, 0.0);
         set_sleep(false);
@@ -351,8 +451,16 @@ pub fn diagnostic_probe(app: tauri::AppHandle) {
             let playing_size = window.inner_size().map_err(|_| "无法读取播放窗口")?;
             let playing_top = window.is_always_on_top().map_err(|_| "无法读取播放置顶")?;
             let fit_ok = playing.fitted && (f64::from(playing_size.width) / f64::from(playing_size.height) - target_aspect).abs() < 0.01;
+            let compact = set_native_picture_in_picture(window.clone(), app.clone(), "ci-platform-probe".into(), 1, true).await?;
+            let compact_size = window.inner_size().map_err(|_| "无法读取小窗大小")?;
+            let pip_ok = compact.picture_in_picture && window.is_always_on_top().unwrap_or(false)
+                && (f64::from(compact_size.width) / scale - 480.0).abs() < 2.0;
+            let normal = set_native_picture_in_picture(window.clone(), app.clone(), "ci-platform-probe".into(), 1, false).await?;
+            let pip_restored = !normal.picture_in_picture && playing_size == window.inner_size().map_err(|_| "无法读取小窗恢复大小")?;
+            set_native_picture_in_picture(window.clone(), app.clone(), "ci-platform-probe".into(), 1, true).await?;
             let paused = update_native_playback(window.clone(), app.clone(), PlaybackUpdate { paused: true, ..update.clone() }).await?;
             end_native_playback(window.clone(), app.clone(), "ci-platform-probe".into(), 1).await?;
+            let stale_pip_rejected = set_native_picture_in_picture(window.clone(), app.clone(), "ci-platform-probe".into(), 1, true).await.is_err();
             let after = window.inner_size().map_err(|_| "无法读取还原窗口")?;
             let position_restored = before_position == window.outer_position().map_err(|_| "无法读取还原窗口位置")?;
             let restored = before == after && position_restored
@@ -397,7 +505,8 @@ pub fn diagnostic_probe(app: tauri::AppHandle) {
             let power_ok = true;
             #[cfg(not(windows))]
             let aspect_ok = true;
-            Ok::<_, String>(serde_json::json!({ "passed": restored && maximized_restored && normal_geometry_restored && normal_placement_restored && released && retired_rejected && power_ok && fit_ok && aspect_ok && playing_top,
+            Ok::<_, String>(serde_json::json!({ "passed": restored && maximized_restored && normal_geometry_restored && normal_placement_restored && released && retired_rejected && power_ok && fit_ok && aspect_ok && playing_top && pip_ok && pip_restored && stale_pip_rejected,
+                "pictureInPicture": pip_ok, "pictureInPictureRestored": pip_restored, "stalePictureInPictureRejected": stale_pip_rejected,
                 "smtcAvailable": began.smtc_available,
                 "smtcRegistrationStatus": if began.smtc_available { "passed" } else { "unavailable" },
                 "playing": playing, "paused": paused,
@@ -446,6 +555,7 @@ pub fn window_changed(window: &tauri::Window) {
             };
             let mut state = STATE.lock().unwrap();
             if let Some(session) = state.session.as_mut() {
+                if session.status.picture_in_picture { return; }
                 let fullscreen = window.is_fullscreen().unwrap_or(false);
                 let scale = window.scale_factor().unwrap_or(session.last_scale);
                 if fullscreen == session.last_fullscreen && scale == session.last_scale {
@@ -667,6 +777,8 @@ fn set_sleep(playing: bool) -> bool {
 #[cfg(windows)]
 static ASPECT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(windows)]
+static PIP_SMALL_WINDOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(windows)]
 type SubclassProc = unsafe extern "system" fn(isize, u32, usize, isize, usize, usize) -> isize;
 #[cfg(windows)]
 #[link(name = "comctl32")]
@@ -698,17 +810,20 @@ unsafe extern "system" fn aspect_proc(
     if message == 0x0214 && rect != 0 && aspect > 0.0 {
         let rect = &mut *(rect as *mut windows::Win32::Foundation::RECT);
         let scale = f64::from(GetDpiForWindow(hwnd).max(96)) / 96.0;
-        let width = f64::from(rect.right - rect.left).max(960.0 * scale);
-        let height = f64::from(rect.bottom - rect.top).max(600.0 * scale);
+        let compact = PIP_SMALL_WINDOW.load(std::sync::atomic::Ordering::SeqCst);
+        let minimum_width = if compact { 320.0 } else { 960.0 } * scale;
+        let minimum_height = if compact { 180.0 } else { 600.0 } * scale;
+        let width = f64::from(rect.right - rect.left).max(minimum_width);
+        let height = f64::from(rect.bottom - rect.top).max(minimum_height);
         let (width, height) = if edge == 3 || edge == 6 {
             (
-                (height * aspect).max(960.0 * scale),
-                height.max(960.0 * scale / aspect),
+                (height * aspect).max(minimum_width),
+                height.max(minimum_width / aspect),
             )
         } else {
             (
-                width.max(600.0 * scale * aspect),
-                (width / aspect).max(600.0 * scale),
+                width.max(minimum_height * aspect),
+                (width / aspect).max(minimum_height),
             )
         };
         if matches!(edge, 1 | 4 | 7) {

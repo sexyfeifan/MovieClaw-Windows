@@ -60,4 +60,6 @@ class LibrarySearchView(BaseModel):
     people: list[LibrarySearchPerson]
     suggestions: list[LibrarySearchSuggestion]
     next_cursor: str | None = None
+    scope_library_ids: list[int] | None = None
+    exclude_adult: bool = False
     index_pending: bool = Field(description="名称索引尚有待更新实体；查询已合并最新名称")

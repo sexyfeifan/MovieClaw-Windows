@@ -74,9 +74,19 @@ def main():
     parser.add_argument("--revision", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--evidence", type=pathlib.Path)
+    parser.add_argument(
+        "--policy", choices=("signed-hardware", "ci-verified"), default="signed-hardware"
+    )
+    parser.add_argument("--notes", type=pathlib.Path)
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{40}", args.revision):
         raise ValueError("A full release commit SHA is required")
+    if args.policy == "ci-verified":
+        validate_ci_packages(args.directory, args.revision, args.version, args.notes)
+        print(
+            "CI-verified release: exact packages verified; hardware/signature limitations disclosed"
+        )
+        return
     raw = (
         args.evidence.read_text()
         if args.evidence
@@ -92,6 +102,39 @@ def main():
         "Stable release gate passed: exact artifacts, valid signatures "
         "and physical Windows/macOS evidence"
     )
+
+
+def validate_ci_packages(directory, revision, version, notes):
+    if not notes or "<!-- desktop-release-policy: ci-verified -->" not in notes.read_text(
+        encoding="utf-8-sig"
+    ):
+        raise ValueError(
+            "CI-verified publication requires explicit limitations in the release notes"
+        )
+    manifest = json.loads((directory / "release-manifest.json").read_text(encoding="utf-8-sig"))
+    if manifest.get("version") != version or manifest.get("sourceRevision") != revision:
+        raise ValueError("CI packages must match the exact version and revision")
+    if (
+        manifest.get("scope") != "windows-hosted-ci-smoke"
+        or manifest.get("physicalValidated") is not False
+    ):
+        raise ValueError("CI evidence must not claim complete physical hardware acceptance")
+    for name in ("installer", "application"):
+        if manifest.get("signatures", {}).get(name, {}).get("status") not in ("Valid", "NotSigned"):
+            raise ValueError(f"Invalid or unknown {name} signature")
+    files = manifest.get("files", [])
+    expected = {
+        f"MovieClaw-Desktop-{version}-Setup-x64.exe",
+        f"MovieClaw-Desktop-{version}-portable-x64.zip",
+    }
+    if len(files) != 2 or {item.get("name") for item in files} != expected:
+        raise ValueError("Both Windows x64 packages are required")
+    for item in files:
+        path = directory / item["name"]
+        if path.stat().st_size != item.get("size") or hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest() != item.get("sha256"):
+            raise ValueError(f"Release artifact changed: {item['name']}")
 
 
 if __name__ == "__main__":

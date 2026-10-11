@@ -202,7 +202,11 @@ const API = {
 
   // ===== 搜索 =====
   search(query, params = {}) {
-    const qs = new URLSearchParams({ q: query, ...params }).toString();
+    const search = new URLSearchParams({ q: query });
+    for (const [key, value] of Object.entries(params)) {
+      for (const entry of Array.isArray(value) ? value : [value]) search.append(key, entry);
+    }
+    const qs = search.toString();
     return this.request(`/search/library?${qs}`);
   },
 

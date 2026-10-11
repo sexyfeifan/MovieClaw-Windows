@@ -24,6 +24,7 @@ const PROPERTIES: &[&str] = &[
     "volume",
     "mute",
     "speed",
+    "panscan",
     "aid",
     "sid",
     "sub-delay",
@@ -120,6 +121,7 @@ impl Session {
                         "volume",
                         "mute",
                         "speed",
+                        "panscan",
                         "aid",
                         "sid",
                         "sub-delay",
@@ -680,6 +682,13 @@ mod tests {
         })
         .await;
         assert_eq!(state["hwdec-current"], "no");
+        for value in [1, 0] {
+            session
+                .command(vec![json!("set_property"), json!("panscan"), json!(value)])
+                .await
+                .unwrap();
+            wait_state(&session, "fullscreen frame mode", |s| s["panscan"].as_f64() == Some(value as f64)).await;
+        }
         session
             .command(vec![json!("set_property"), json!("pause"), json!(true)])
             .await

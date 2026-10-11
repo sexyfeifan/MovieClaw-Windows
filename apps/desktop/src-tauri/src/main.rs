@@ -308,6 +308,7 @@ fn main() {
             native_playback_platform::begin_native_playback,
             native_playback_platform::update_native_playback,
             native_playback_platform::end_native_playback,
+            native_playback_platform::set_native_picture_in_picture,
             native_ready,
             complete_shutdown,
             get_app_version,

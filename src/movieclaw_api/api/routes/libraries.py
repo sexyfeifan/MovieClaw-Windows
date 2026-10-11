@@ -1019,22 +1019,50 @@ async def search_library(
     person_id: int | None = Query(default=None, ge=1, description="选定人物的库内作品"),
     limit: int = Query(default=24, ge=1, le=100),
     cursor: str | None = Query(default=None, max_length=200),
+    library_ids: list[int] | None = Query(default=None, max_length=200),
+    home_only: bool = Query(default=False, description="排除首页隐藏的库"),
+    exclude_adult: bool = Query(default=False, description="排除成人库及明确成人分级内容"),
     principal: Principal = Depends(require_login),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse[LibrarySearchView]:
+    import re
+
     from movieclaw_api.services.library.search import search_library as ranked_search
     from movieclaw_api.services.library.search_matching import compact
 
     q = q.strip()
     if not compact(q) and person_id is None:
         raise BadRequestException("请输入片名、拼音或人物名称")
+    allowed = await visible_library_ids(session, principal)
+    if library_ids is not None:
+        allowed &= set(library_ids)
+    if home_only or exclude_adult:
+        libraries = (
+            await session.execute(select(Library).where(Library.id.in_(allowed)))
+        ).scalars()
+        allowed = {
+            library.id
+            for library in libraries
+            if not (home_only and library.exclude_from_home)
+            and not (
+                exclude_adult
+                and re.search(r"\b(?:AV|JAV|NSFW|XXX)\b|成人|色情", library.name, re.I | re.ASCII)
+            )
+        }
     result = await ranked_search(
-        session, q, library_ids=await visible_library_ids(session, principal),
+        session,
+        q,
+        library_ids=allowed,
         member_id=principal.member_id or 0,
         content_limit=await content_limit_for(session, principal),
         owner=f"{principal.kind}:{principal.member_id or principal.name}",
-        limit=limit, cursor=cursor, person_id=person_id,
+        limit=limit,
+        cursor=cursor,
+        person_id=person_id,
+        exclude_adult=exclude_adult,
     )
+    result.scope_library_ids = sorted(allowed)
+    result.exclude_adult = exclude_adult
     return ok(result)
 
 

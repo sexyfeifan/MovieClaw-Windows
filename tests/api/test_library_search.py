@@ -865,3 +865,88 @@ async def test_suggestions_explain_why_they_match(db, client) -> None:
     assert ("title", "星际穿越", "首字母匹配") in [
         (s["type"], s["text"], s["label"]) for s in data["suggestions"]
     ]
+
+
+async def test_scoped_search_filters_inventory_people_suggestions_and_cursor(db, client) -> None:
+    from movieclaw_db.models.media_metadata import MediaMetadata
+    from movieclaw_db.models.person import MediaItemPerson, Person
+
+    async with db.session() as session:
+        repo = LibraryRepository(session)
+        normal = await repo.create(name="电影库", kind="movie", root_paths=["/normal"])
+        hidden = await repo.create(
+            name="隐藏库", kind="movie", root_paths=["/hidden"], exclude_from_home=True
+        )
+        adult = await repo.create(name="AV库", kind="movie", root_paths=["/adult"])
+        denied = await repo.create(
+            name="不可访问", kind="movie", root_paths=["/denied"], admin_visible=False
+        )
+        actor = Person(tmdb_person_id=999, name="专属演员")
+        session.add(actor)
+        await session.flush()
+        for index, library in enumerate([normal, normal, hidden, adult, normal, denied]):
+            item = MediaItem(
+                kind="movie",
+                tmdb_id=900 + index,
+                title=f"范围影片{index}",
+                original_title=f"Scope {index}",
+                aliases=[],
+            )
+            session.add(item)
+            await session.flush()
+            session.add(
+                LibraryFile(
+                    library_id=library.id,
+                    media_item_id=item.id,
+                    file_path=f"/{index}.mkv",
+                    size_bytes=1,
+                    source="scanned",
+                )
+            )
+            if index == 4:
+                session.add(MediaMetadata(media_item_id=item.id, content_rating="XXX"))
+            if index in (2, 3, 4):
+                session.add(
+                    MediaItemPerson(
+                        media_item_id=item.id, person_id=actor.id, department="cast", credit_order=0
+                    )
+                )
+        await session.commit()
+        requested = [normal.id, hidden.id, adult.id, denied.id]
+
+    params = [("q", "范围"), ("home_only", "true"), ("exclude_adult", "true")]
+    params.extend(("library_ids", str(id)) for id in requested)
+    response = await client.get("/api/v1/search/library", params=params)
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["scope_library_ids"] == [normal.id]
+    assert data["exclude_adult"] is True
+    assert {hit["item"]["title"] for hit in data["items"]} == {"范围影片0", "范围影片1"}
+    assert all(hit["library_ids"] == [normal.id] for hit in data["items"])
+    assert {suggestion["text"] for suggestion in data["suggestions"]} <= {"范围影片0", "范围影片1"}
+    response = await client.get(
+        "/api/v1/search/library",
+        params=[(key, "专属演员" if key == "q" else value) for key, value in params],
+    )
+    assert response.json()["data"]["people"] == []
+    assert response.json()["data"]["items"] == []
+    response = await client.get("/api/v1/search/library", params=params + [("limit", "1")])
+    cursor = response.json()["data"]["next_cursor"]
+    assert cursor
+    changed = [(key, "false" if key == "exclude_adult" else value) for key, value in params]
+    assert (
+        await client.get("/api/v1/search/library", params=changed + [("cursor", cursor)])
+    ).status_code == 400
+
+
+async def test_explicit_empty_or_denied_search_scope_never_expands_to_all_libraries(
+    db, client
+) -> None:
+    await _seed(db)
+    response = await client.get(
+        "/api/v1/search/library", params={"q": "沙丘", "library_ids": 99999}
+    )
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["items"] == [] and data["people"] == [] and data["suggestions"] == []
+    assert data["scope_library_ids"] == []

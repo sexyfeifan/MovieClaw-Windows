@@ -1,5 +1,113 @@
 const { test, expect } = require('@playwright/test');
-const { openDesktop, browseLibrary } = require('./helpers.cjs');
+const { openDesktop, browseLibrary, state } = require('./helpers.cjs');
+
+test('episode selection preserves decoded authenticated stills and hides pending broken images', async ({page,request}) => {
+  await openDesktop(page,request,{episodeImages:true}); await browseLibrary(page);
+  await page.locator('.poster-card[data-item-id="3"]').click();
+  const first=page.locator('.episode-card[data-episode-number="1"] .episode-art img');
+  await expect(first).toHaveClass(/loaded/); await expect(first).toHaveCSS('opacity','1');
+  await page.evaluate(()=>window.stillBefore=document.querySelector('.episode-card[data-episode-number="1"] img'));
+  const before=(await state(request)).imageRequests.length;
+  await page.locator('.episode-card[data-episode-number="1"]').click();
+  await expect(page.locator('.detail-episode-line')).toContainText('第 1 集');
+  expect(await page.evaluate(()=>window.stillBefore===document.querySelector('.episode-card[data-episode-number="1"] img'))).toBe(true);
+  expect((await state(request)).imageRequests.length).toBe(before);
+  await page.evaluate(()=>{const img=document.createElement('img');img.dataset.raw='/missing';img.src='/api/v1/fixture-images/missing.png';document.querySelector('.episode-art').appendChild(img);});
+  await expect(page.locator('.episode-art img[data-raw="/missing"]')).toHaveCSS('opacity','0');
+});
+
+test('dark dropdowns keep labels separate from icons and support keyboard selection and dismissal', async ({page,request}) => {
+  await openDesktop(page,request); await browseLibrary(page);
+  const sort=page.getByRole('combobox',{name:'排序',exact:true});
+  await sort.click();
+  const menu=page.getByRole('listbox',{name:'排序',exact:true});
+  await expect(menu).toBeVisible(); await expect(sort).toHaveAttribute('aria-expanded','true');
+  const colors=await menu.evaluate(el=>({bg:getComputedStyle(el).backgroundColor,fg:getComputedStyle(el).color}));
+  expect(colors.bg).toMatch(/rgba?\(37, 39, 46/); expect(colors.fg).toBe('rgb(243, 245, 249)');
+  const row=page.getByRole('option',{name:'最近添加',exact:true});
+  const label=await row.locator('span').boundingBox(), icon=await row.locator('svg').boundingBox();
+  expect(icon.x).toBeGreaterThan(label.x+label.width);
+  await page.keyboard.press('Escape'); await expect(menu).toBeHidden(); await expect(sort).toBeFocused();
+  await page.keyboard.press('ArrowDown'); await page.keyboard.press('End'); await page.keyboard.press('Enter');
+  await expect(sort).toHaveText('片名'); await expect(sort).toBeFocused();
+  await sort.click(); await page.locator('.page-title').click(); await expect(menu).toBeHidden();
+  await page.locator('[data-page="settings"]').click();
+  const language=page.getByRole('combobox',{name:'默认字幕语言',exact:true});
+  await language.click(); await page.getByRole('option',{name:'English',exact:true}).click();
+  expect(await page.evaluate(()=>localStorage.getItem('mc_subLang'))).toBe('en');
+});
+
+test('home library covers use authenticated images and hide their type placeholder after decoding', async ({page,request}) => {
+  await openDesktop(page,request,{libraryCovers:'protected'});
+  const cover=page.locator('.library-tile[data-open-library="1"] .library-cover');
+  await cover.scrollIntoViewIfNeeded();
+  await expect(cover.locator('img')).toHaveAttribute('src',/^data:image\/png/);
+  await expect(cover).toHaveClass(/has-img/);
+  await expect(cover.locator('img')).toHaveCSS('opacity','1');
+  expect(await cover.locator('img').evaluate(img=>img.naturalWidth)).toBeGreaterThan(0);
+  await expect(cover.locator('.library-placeholder')).toBeHidden();
+});
+
+test('unavailable movie and TV covers retain visible type icons and library navigation', async ({page,request},info) => {
+  await openDesktop(page,request,{homeRows:[{id:'row:selected',collection_id:8}],libraries:[
+    {id:1,name:'电影库',kind:'movie',stats:{item_count:245}},
+    {id:2,name:'剧集库',kind:'tv',stats:{item_count:0}},
+  ]});
+  for (const id of [1,2]) {
+    const cover=page.locator(`.library-tile[data-open-library="${id}"] .library-cover`);
+    await cover.scrollIntoViewIfNeeded();
+    await expect(cover).toHaveClass(/no-img/);
+    await expect(cover.locator('.library-placeholder')).toBeVisible();
+    await expect(cover.locator('.library-placeholder svg')).toBeVisible();
+    await expect(cover.locator('img')).toBeHidden();
+  }
+  const collection=page.locator('.collection-tile .library-cover');
+  await expect(collection.locator('.library-placeholder svg')).toBeVisible();
+  await expect(collection.locator('img')).toHaveCount(0);
+  await page.locator('[data-home-row="libraries"]').screenshot({path:info.outputPath('library-icons.png')});
+  await page.locator('.library-tile[data-open-library="1"]').click();
+  await expect(page.locator('#posterGrid .poster-card').first()).toBeVisible();
+});
+
+test('library header shows its actual total and keeps sort controls beside the heading', async ({page,request}) => {
+  await openDesktop(page,request,{itemCount:3102});
+  await browseLibrary(page);
+  await expect(page.locator('#wallCount')).toHaveText('3102 个项目');
+  const title=await page.locator('.page-title').boundingBox();
+  const sort=await page.locator('#wallSortTrigger').boundingBox();
+  expect(Math.abs(sort.y-title.y)).toBeLessThan(20);
+});
+
+test('person page opened by keyboard identifies the current movie and returns to its existing detail', async ({page,request}) => {
+  await openDesktop(page,request,{images:true});
+  await browseLibrary(page);
+  await page.locator('#posterGrid [data-item-id="3"]').click();
+  const actor=page.locator('.person-card[data-person-id="9"]');
+  await actor.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.person-name')).toHaveText('测试演员');
+  await expect(page.locator('.person-backdrop img')).toBeVisible();
+  const current=page.locator('.person-works [data-item-id="3"]');
+  await expect(current.locator('.series-badge')).toHaveText('本片');
+  await current.click();
+  await expect(page.locator('#btnPlay')).toBeVisible();
+  await expect(page.locator('.person-name')).toHaveCount(0);
+  expect(await page.evaluate(()=>App.navStack.length)).toBe(1);
+});
+
+test('selecting a TV episode scrolls its shelf without shifting the detail body or page', async ({page,request}) => {
+  await openDesktop(page,request,{images:true});
+  await browseLibrary(page);
+  await page.locator('#posterGrid [data-item-id="3"]').click();
+  await expect(page.locator('#btnPlay')).toBeVisible();
+  await page.locator('.episode-card[data-episode-number="2"]').click();
+  await expect(page.locator('.episode-card.stage')).toHaveAttribute('data-episode-number','2');
+  expect(await page.locator('.detail-body').evaluate(el=>el.scrollLeft)).toBe(0);
+  expect(await page.locator('#content').evaluate(el=>el.scrollLeft)).toBe(0);
+  const content=await page.locator('#content').boundingBox();
+  const cast=await page.locator('.cast-row').boundingBox();
+  expect(cast.x-content.x).toBe(32);
+});
 
 for (const viewport of [{width:1280,height:800},{width:1440,height:900},{width:900,height:650}]) {
   test(`browsing layout, focus and reduced motion at ${viewport.width}x${viewport.height}`, async ({page,request},info) => {
@@ -12,6 +120,10 @@ for (const viewport of [{width:1280,height:800},{width:1440,height:900},{width:9
       await info.attach(name,{path:filename,contentType:'image/png'});
     };
     await expect(page.locator('#heroBanner')).toBeVisible();
+    const hero=await page.locator('#heroBanner').boundingBox();
+    const content=await page.locator('#content').boundingBox();
+    expect(Math.abs(hero.width-content.width)).toBeLessThanOrEqual(1);
+    expect(hero.height).toBeGreaterThanOrEqual(420);
     expect(await page.locator('#content').evaluate(el=>el.scrollWidth<=el.clientWidth+1)).toBe(true);
     await shot('home');
     await page.locator('#accountButton').click(); await expect(page.locator('#accountPanel')).toBeVisible();
@@ -27,6 +139,9 @@ for (const viewport of [{width:1280,height:800},{width:1440,height:900},{width:9
     await shot('library-focus');
     await page.locator('#posterGrid .poster-card').first().hover(); await shot('card-hover');
     await page.locator('#posterGrid .poster-card').first().click(); await expect(page.locator('#btnPlay')).toBeVisible();
+    const detail=await page.locator('.detail-hero').boundingBox();
+    expect(Math.abs(detail.width-content.width)).toBeLessThanOrEqual(1);
+    await expect(page.locator('.detail-body')).toHaveCSS('padding-left','32px');
     await expect(page.locator('.person-card-avatar').first()).toHaveCSS('border-radius','50%');
     expect(await page.locator('.detail-hero-bg img').first().evaluate(el=>getComputedStyle(el).animationName)).toBe('none');
     await shot('detail');

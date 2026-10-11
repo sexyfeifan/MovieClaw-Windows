@@ -246,6 +246,7 @@ test('context invalidation cancels reads but preserves a late session creation r
 
 test('search consumes the real nested hits and sends the cursor for subsequent pages', async () => {
   const h = harness(args => ({ data: { query: '诺兰', items: [{ item: { media_item_id: 42, kind: 'movie', title: '星际穿越' }, library_ids: [9], match: { label: '导演 诺兰' } }], people: [], suggestions: [], next_cursor: args.path.includes('cursor=') ? null : 'page-2', index_pending: false } }));
+  h.A.libraries = [{id:9,name:'电影库',kind:'movie'}];
   let settings;
   h.A.renderPagedWall = async (_, config) => { settings = config; };
   await h.A.renderSearch(h.element(), '诺兰');
@@ -501,6 +502,7 @@ test('recent searches are recorded on selection, bounded and isolated by account
 
 test('person-filter search sends the local person id alongside the stable cursor', async () => {
   const h=harness(()=>({data:{items:[],people:[],suggestions:[],next_cursor:null}})); let config;
+  h.A.libraries = [{id:1,name:'电影库',kind:'movie'}];
   h.A.renderPagedWall=async(_,value)=>config=value;
   await h.A.renderSearch(h.element(),'演员',0,{id:9,name:'演员'});
   await config.fetchPage({limit:60,cursor:'cursor-two'});

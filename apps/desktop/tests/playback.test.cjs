@@ -95,6 +95,40 @@ function item(overrides = {}) {
     seasonNumber: 0, episodeNumber: 0, episodes: [], ...overrides };
 }
 
+test('fullscreen fill preserves aspect ratio and resets HTML5 to contain outside fullscreen', async () => {
+  const h = harness({ storage: { mc_fullscreenFit: 'cover' } });
+  assert.equal(h.P.fullscreenFit, 'cover');
+  await h.P.applyFullscreenFit();
+  assert.equal(h.video.style.objectFit, 'contain');
+  h.context.document.fullscreenElement = h.video;
+  await h.P.applyFullscreenFit();
+  assert.equal(h.video.style.objectFit, 'cover');
+  assert.equal(await h.P.setFullscreenFit('contain'), true);
+  assert.equal(h.video.style.objectFit, 'contain');
+  assert.equal(h.storage.get('mc_fullscreenFit'), 'contain');
+  assert.equal(await h.P.setFullscreenFit('stretch'), false);
+});
+
+test('failed or stale native frame changes cannot overwrite the saved preference', async () => {
+  const pending = deferred();
+  let fail = true;
+  const h = harness({ storage: { mc_fullscreenFit: 'cover' }, invoke: async name => {
+    if (name === 'send_mpv_command_embedded') { if (fail) throw new Error('pipe closed'); return pending.promise; }
+    return {};
+  } });
+  h.win.__MOVIECLAW_MPV_ACTIVE = true;
+  h.P._nativeFullscreen = true;
+  assert.equal(await h.P.setFullscreenFit('contain'), false);
+  assert.equal(h.P.fullscreenFit, 'cover');
+  assert.equal(h.storage.get('mc_fullscreenFit'), 'cover');
+  fail = false;
+  const changing = h.P.setFullscreenFit('contain');
+  h.P.generation++;
+  pending.resolve({ error: 'success' });
+  assert.equal(await changing, false);
+  assert.equal(h.P.fullscreenFit, 'cover');
+});
+
 test('HTML5 reports only after first frame and uses file time for a session-relative stream', async () => {
   const h = harness();
   h.P.open('Title', 'https://server.invalid/a.mp4', [], 0, session({ timeline: 'session', start_ms: 1800000 }), item());

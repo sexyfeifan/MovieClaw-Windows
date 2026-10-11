@@ -56,6 +56,7 @@
     "allow-begin-native-playback",
     "allow-update-native-playback",
     "allow-end-native-playback",
+    "allow-set-native-picture-in-picture",
     "allow-download-update",
     "allow-cancel-update-download",
     "allow-install-downloaded-update",

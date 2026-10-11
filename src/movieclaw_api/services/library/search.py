@@ -37,6 +37,7 @@ from movieclaw_api.services.library.search_matching import (
 )
 from movieclaw_api.services.people_images import avatar_url
 from movieclaw_db.models import LibraryFile, MediaItem
+from movieclaw_db.models.media_metadata import MediaMetadata
 from movieclaw_db.models.person import MediaItemPerson, Person
 
 _DOC = table(
@@ -136,13 +137,29 @@ class BrowseSession:
 _sessions: OrderedDict[str, BrowseSession] = OrderedDict()
 
 
-def _eligible(library_ids: set[int], member_id: int, limit: ContentLimit | None, person_id=None):
+def _eligible(
+    library_ids: set[int],
+    member_id: int,
+    limit: ContentLimit | None,
+    person_id=None,
+    exclude_adult=False,
+):
     conditions = [
         LibraryFile.library_id.in_(library_ids),
         LibraryFile.state == "in_place",
         LibraryFile.unidentified_code.is_(None),
         *_narrow(None, member_id, library_id=frozenset(library_ids), content_limit=limit),
     ]
+    if exclude_adult:
+        conditions.append(
+            ~MediaItem.id.in_(
+                select(MediaMetadata.media_item_id).where(
+                    func.upper(MediaMetadata.content_rating).in_(
+                        ["XXX", "X", "R18", "R18+", "NC-17", "ADULT", "成人"]
+                    )
+                )
+            )
+        )
     if person_id is not None:
         conditions.append(
             MediaItem.id.in_(
@@ -331,8 +348,10 @@ def _match_rows(query, rows):
     return result
 
 
-async def search_candidates(session, query, library_ids, member_id, content_limit, person_id=None):
-    eligible = _eligible(library_ids, member_id, content_limit, person_id)
+async def search_candidates(
+    session, query, library_ids, member_id, content_limit, person_id=None, exclude_adult=False
+):
+    eligible = _eligible(library_ids, member_id, content_limit, person_id, exclude_adult)
     if not compact(query):
         ids = (await session.execute(eligible.order_by(MediaItem.title, MediaItem.id))).scalars()
         return (
@@ -448,6 +467,7 @@ async def search_library(
     limit: int = 24,
     cursor: str | None = None,
     person_id: int | None = None,
+    exclude_adult: bool = False,
 ) -> LibrarySearchView:
     """当前页实时装配；会话有时限、个数和总候选数上限，避免无限增长。"""
     binding = (
@@ -457,6 +477,7 @@ async def search_library(
         person_id,
         tuple(sorted(library_ids)),
         repr(content_limit),
+        exclude_adult,
     )
     now = time.monotonic()
     for key in list(_sessions):
@@ -482,12 +503,13 @@ async def search_library(
             member_id,
             content_limit,
             person_id,
+            exclude_adult,
         )
         if len(candidates) > 100000:
             raise BadRequestException("搜索结果过多，请补充片名或人物名称")
         offset = 0
         token = secrets.token_urlsafe(24)
-    eligible = _eligible(library_ids, member_id, content_limit, person_id)
+    eligible = _eligible(library_ids, member_id, content_limit, person_id, exclude_adult)
     libraries: dict[int, list[int]] = defaultdict(list)
     # 分页期间名称/人物关系也可能改变：核验命中证据，不能继续显示旧名称的假命中。
     page = []

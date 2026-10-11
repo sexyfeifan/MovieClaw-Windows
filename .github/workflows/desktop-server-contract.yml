@@ -12,11 +12,16 @@ on:
       - 'src/movieclaw_api/api/routes/playback.py'
       - 'src/movieclaw_api/schemas/playback.py'
       - 'src/movieclaw_api/services/library/udf.py'
+      - 'src/movieclaw_api/api/routes/libraries.py'
+      - 'src/movieclaw_api/schemas/library_search.py'
+      - 'src/movieclaw_api/services/library/search.py'
+      - 'tests/api/test_library_search.py'
       - 'src/movieclaw_api/services/media_extract.py'
       - 'src/movieclaw_api/services/playback/**'
       - 'tests/api/test_auth.py'
       - 'tests/api/test_device_auth.py'
       - 'tests/api/test_login_devices.py'
+      - 'tests/api/test_library_search.py'
       - 'tests/playback/test_decide.py'
       - 'tests/playback/test_disc_fallback.py'
       - 'tests/playback/test_ffmpeg_args.py'
@@ -85,6 +90,8 @@ jobs:
           src/movieclaw_playback/decide.py tests/playback/test_decide.py
           src/movieclaw_api/api/routes/playback.py src/movieclaw_api/schemas/playback.py
           src/movieclaw_api/services/library/udf.py
+          src/movieclaw_api/api/routes/libraries.py src/movieclaw_api/schemas/library_search.py
+          src/movieclaw_api/services/library/search.py tests/api/test_library_search.py
           src/movieclaw_api/services/media_extract.py
           src/movieclaw_api/services/playback/disc_fallback.py
           src/movieclaw_api/services/playback/disc_source.py
@@ -98,6 +105,7 @@ jobs:
         run: >-
           uv run --no-project python -m pytest
           tests/api/test_auth.py tests/api/test_device_auth.py tests/api/test_login_devices.py
+          tests/api/test_library_search.py
           tests/playback/test_decide.py
           tests/playback/test_disc_fallback.py tests/playback/test_ffmpeg_args.py
           tests/playback/test_media_extract.py tests/playback/test_embedded_subs.py

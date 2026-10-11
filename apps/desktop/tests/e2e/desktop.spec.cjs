@@ -2,6 +2,32 @@ const { test, expect } = require('@playwright/test');
 
 const { openDesktop, state, browseLibrary } = require('./helpers.cjs');
 
+test('search excludes hidden and adult libraries even when an old server ignores the scope', async ({page,request}) => {
+  const hit=(id,title,ids,extra={})=>({item:{media_item_id:id,kind:'movie',title,...extra},library_ids:ids,match:{label:'片名匹配'}});
+  await openDesktop(page,request,{legacySearchScope:true,searchPeople:true,libraries:[
+    {id:1,name:'电影库',kind:'movie'}, {id:2,name:'隐藏库',kind:'tv',exclude_from_home:true},
+    {id:3,name:'AV',kind:'video'}, {id:4,name:'自定义隐藏',kind:'movie'}, {id:5,name:'剧集库',kind:'tv'},
+  ],homeRows:[{id:'lib:4',hidden:true}],searchItems:[
+    hit(100,'正常影片',[1]),hit(101,'隐藏影片',[2]),hit(102,'成人影片',[3]),hit(103,'自定义隐藏影片',[4]),
+    hit(104,'多个库同片',[2,5]),hit(105,'成人分级影片',[1],{content_rating:'XXX'}),
+  ]});
+  await page.locator('#searchInput').fill('影片');
+  await expect(page.locator('#posterGrid .poster-card')).toHaveCount(2);
+  await expect(page.locator('#posterGrid')).toContainText('正常影片');
+  await expect(page.locator('#posterGrid')).toContainText('多个库同片');
+  await expect(page.locator('.people-chips,.suggestions')).toHaveCount(0);
+  const query=(await state(request)).requests.find(r=>r.path==='/search/library');
+  expect(query.libraryIds).toEqual([1,5]); expect(query.query.home_only).toBe('true'); expect(query.query.exclude_adult).toBe('true');
+  expect(await page.locator('[data-item-id="104"]').getAttribute('data-library-id')).toBe('5');
+});
+
+test('search with no eligible libraries does not fall back to an unrestricted request', async ({page,request}) => {
+  await openDesktop(page,request,{libraries:[{id:1,name:'成人库',kind:'movie'}]});
+  await page.locator('#searchInput').fill('任意');
+  await expect(page.locator('#wallStatus')).toContainText('这里还没有内容');
+  expect((await state(request)).requests.some(r=>r.path==='/search/library')).toBe(false);
+});
+
 test('login keeps window controls usable and enters the authenticated library', async ({ page, request }) => {
   await openDesktop(page, request, { authenticated: false });
   await expect(page.locator('#loginForm')).toBeVisible();
@@ -28,11 +54,13 @@ test('library loads beyond 200 and sorts through server pagination', async ({ pa
     await page.waitForTimeout(150);
   }
   await expect(page.locator('#posterGrid .poster-card')).toHaveCount(245);
-  await page.locator('#wallSort').selectOption('title');
+  await page.getByRole('combobox', { name: '排序', exact: true }).click();
+  await page.getByRole('option', { name: '片名', exact: true }).click();
   await expect(page.locator('#posterGrid .poster-card').first()).toHaveAttribute('data-item-id', '245');
   snapshot = await state(request);
   expect(snapshot.requests.some(r => r.path === '/libraries/1/items' && r.query.sort === 'title' && r.query.offset === '0')).toBe(true);
-  await page.locator('#wallOrder').selectOption('asc');
+  await page.getByRole('combobox', { name: '排序方向' }).click();
+  await page.getByRole('option', { name: '升序', exact: true }).click();
   await expect(page.locator('#posterGrid .poster-card').first()).toHaveAttribute('data-item-id', '1');
   await page.locator('[data-page="favorites"]').click();
   await page.locator('#libraryNav [data-library-id="1"]').click();

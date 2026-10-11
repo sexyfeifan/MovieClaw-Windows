@@ -217,6 +217,11 @@ description = "Release current playback platform services and restore window"
 commands.allow = ["end_native_playback"]
 
 [[permission]]
+identifier = "allow-set-native-picture-in-picture"
+description = "Enter or leave the identified native player's compact window"
+commands.allow = ["set_native_picture_in_picture"]
+
+[[permission]]
 identifier = "allow-download-update"
 description = "Download an exact stable MovieClaw release with integrity verification"
 commands.allow = ["download_update"]

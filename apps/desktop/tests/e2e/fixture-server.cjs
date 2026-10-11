@@ -44,7 +44,9 @@ http.createServer(async (req, res) => {
     if (url.pathname === '/__test/image') {
       const imagePath = url.searchParams.get('path');
       state.imageRequests ||= []; state.imageRequests.push(imagePath);
-      if (!state.images || imagePath !== '/api/v1/fixture-images/protected.png') return json(res, {}, 404);
+      const protectedCover = state.libraryCovers === 'protected' && /^\/api\/v1\/libraries\/\d+\/cover(?:\?w=600)?$/.test(imagePath);
+      const episode = state.episodeImages && /^\/api\/v1\/fixture-images\/episode-\d+\.png$/.test(imagePath);
+      if (!episode && !protectedCover && (!state.images || imagePath !== '/api/v1/fixture-images/protected.png')) return json(res, {}, 404);
       res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('data:image/png;base64,' + imageData);
     }
     if (url.pathname.startsWith('/api/v1/fixture-images/')) {
@@ -151,7 +153,7 @@ http.createServer(async (req, res) => {
     const route = url.pathname.slice('/api/v1'.length);
     const body = await bodyOf(req);
     // Avoid recording even fixture passwords, so this stays safe for CI artifacts.
-    state.requests.push({ method: req.method, path: route, query: Object.fromEntries(url.searchParams), body: body && route === '/auth/login' ? { username: body.username } : body });
+    state.requests.push({ method: req.method, path: route, query: Object.fromEntries(url.searchParams), libraryIds: url.searchParams.getAll('library_ids').map(Number), body: body && route === '/auth/login' ? { username: body.username } : body });
     if (route === '/health') return json(res, { status: 'ok', service: 'movieclaw', version: '0.34.0' });
     if (route === '/auth/bootstrap') return json(res, ok({ initialized: state.initialized }));
     if (route === '/auth/login') {
@@ -175,7 +177,13 @@ http.createServer(async (req, res) => {
       state.username = body.username;
       return json(res, ok({ username: state.username, role: 'member' }));
     }
-    if (route === '/libraries') return json(res, ok([{ id: 1, name: '测试媒体库', kind: 'movie', stats: { item_count: state.itemCount || 245 } }]));
+    if (route === '/libraries') return json(res, ok(state.libraries || [{ id: 1, name: '测试媒体库', kind: 'movie', stats: { item_count: state.itemCount || 245 } }]));
+    if (/^\/libraries\/\d+\/cover$/.test(route)) {
+      if (state.libraryCovers === 'available') {
+        res.writeHead(200, { 'Content-Type': 'image/png' }); return res.end(imageBytes);
+      }
+      return json(res, {}, state.libraryCovers === 'protected' ? 401 : 404);
+    }
     if (route === '/ui/preferences') return json(res, ok({ home: { rows: state.homeRows || [] } }));
     if (/^\/libraries\/kinds\/\w+\/genres$/.test(route)) return json(res, ok([{ value: '28', label: '动作', count: 120, cover_url: null }, { value: '18', label: '剧情', count: 125, cover_url: null }]));
     if (route === '/collections') return json(res, ok([{ id: 8, name: '测试合集', library_id: 1, hidden: false, item_count: state.itemCount || 245 }]));
@@ -192,7 +200,7 @@ http.createServer(async (req, res) => {
       const q = url.searchParams.get('q') || '';
       if (q === '慢搜索') await new Promise(resolve => setTimeout(resolve, 900));
       const next = url.searchParams.has('cursor');
-      return json(res, ok({ items: [{ item: { ...item(next ? 202 : 201), title: q }, library_ids: [1], match: { type: 'title', source_field: 'title', matched_name: q, label: url.searchParams.has('person_id') ? '演员：测试演员' : '片名匹配' } }],
+      return json(res, ok({ ...(state.legacySearchScope ? {} : {scope_library_ids:url.searchParams.getAll('library_ids').map(Number),exclude_adult:true}), items: state.searchItems || [{ item: { ...item(next ? 202 : 201), title: q }, library_ids: [1], match: { type: 'title', source_field: 'title', matched_name: q, label: url.searchParams.has('person_id') ? '演员：测试演员' : '片名匹配' } }],
         people: state.searchPeople ? [{ id: 9, tmdb_person_id: 9, name: '测试演员', item_count: 2, profile_path: null, match: { label: '演员：测试演员' } }] : [], suggestions: state.searchPeople ? [{ type: 'title', text: '推荐片名', media_item_id: 201, label: '片名匹配' }] : [], next_cursor: next ? null : 'fixture-next' }));
     }
     if (route === '/playback/up-next') return json(res, ok({ items: [{ ...item(3), season_number: 3, episode_number: state.longSeason ? 1051 : 2, position_ms: 300000, duration_ms: 3600000, progress_percent: 8, episode_title: state.longSeason ? '第1051集' : '第二集' }] }));
@@ -210,7 +218,7 @@ http.createServer(async (req, res) => {
     }
     if (route.endsWith('/episodes')) {
       const season = Number(url.searchParams.get('season_number') || 3);
-      return json(res, ok({ season_number: season, resume_episode: state.longSeason ? 1051 : 2, episodes: Array.from({ length: state.longSeason ? 1101 : 3 }, (_, i) => i + 1).map(n => ({ season_number: season, episode_number: n, name: `第 ${n} 集`, title: `第 ${n} 集`, owned: n !== (state.longSeason ? 1052 : 0), played: state.marks?.[`3:${season}:${n}`]?.played ?? n === 1, files: [file(3)], duration_ms: 3600000 })) }));
+      return json(res, ok({ season_number: season, resume_episode: state.longSeason ? 1051 : 2, episodes: Array.from({ length: state.longSeason ? 1101 : 3 }, (_, i) => i + 1).map(n => ({ season_number: season, episode_number: n, name: `第 ${n} 集`, title: `第 ${n} 集`, still_url: state.episodeImages ? `/fixture-images/episode-${n}.png` : null, owned: n !== (state.longSeason ? 1052 : 0), played: state.marks?.[`3:${season}:${n}`]?.played ?? n === 1, files: [file(3)], duration_ms: 3600000 })) }));
     }
     if (route === '/people/9') return json(res, ok({ name: '测试演员', profile_url: state.images ? '/fixture-images/good.png' : null, credits: [{ ...item(3), department: 'cast', character: '演员', library_id: 1 }] }));
     if (route === '/playback/sessions' && req.method === 'POST') {

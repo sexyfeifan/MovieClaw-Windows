@@ -519,6 +519,7 @@ const Player = {
   _reportRunning: false,
   mpvTracks: { audio: [], subtitles: [] },
   subtitleFontScale: 1,
+  fullscreenFit: 'contain',
   // JASSUB 字幕渲染
   jassub: null,
   jassubTracks: [],
@@ -526,6 +527,7 @@ const Player = {
   init() {
     this.video = document.getElementById('playerVideo');
     if (!this.video) return;
+    this.fullscreenFit = localStorage.getItem('mc_fullscreenFit') === 'cover' ? 'cover' : 'contain';
     this.initSettings();
     this.initInfoPanel();
 
@@ -753,6 +755,7 @@ const Player = {
           }
           // Esc 阶梯（同 macOS escape()）：收起面板 → 退出全屏 → 关闭播放器
           if (this.closeAnyPanel()) { e.preventDefault(); break; }
+          if (this.nativePip) { e.preventDefault(); this.togglePip(); break; }
           if (this.isFullscreen()) { e.preventDefault(); this.toggleFullscreen(); break; }
           this.close();
           break;
@@ -762,6 +765,7 @@ const Player = {
     // mpv 画面是主窗口的子窗口，缩放/全屏后要手动对齐到视频区域
     window.addEventListener('resize', () => this.syncEmbeddedPlayerRect());
     document.addEventListener('fullscreenchange', () => {
+      this.applyFullscreenFit();
       // 布局要等全屏切换落定才量得准
       requestAnimationFrame(() => this.syncEmbeddedPlayerRect());
     });
@@ -1362,6 +1366,13 @@ const Player = {
         </div>
       `).join('');
     }
+    else if (tabName === 'frame') {
+      content.innerHTML = `<div class="player-settings-group">全屏画幅</div>` + [
+        ['contain', '保持原比例', '完整显示画面，可能保留黑边'],
+        ['cover', '填满屏幕', '等比例放大，裁掉边缘；仅在全屏时生效'],
+      ].map(([mode, label, detail]) => `<button type="button" class="player-settings-item stacked ${this.fullscreenFit === mode ? 'active' : ''}" data-player-action="frame" data-fit="${mode}" aria-pressed="${this.fullscreenFit === mode}">
+        <span class="item-text"><span class="item-label">${label}</span><span class="item-info">${detail}</span></span>${check}</button>`).join('');
+    }
     // Server metadata is text/data only. Do not embed track refs in executable attributes.
     for (const row of content.querySelectorAll('[data-player-action]')) {
       row.addEventListener('click', () => {
@@ -1373,6 +1384,7 @@ const Player = {
         else if (data.playerAction === 'scale') this.adjustSubtitleScale(Number(data.scale));
         else if (data.playerAction === 'quality') this.selectQuality(Number(data.quality));
         else if (data.playerAction === 'speed') this.setSpeed(Number(data.speed));
+        else if (data.playerAction === 'frame') this.setFullscreenFit(data.fit);
       });
     }
   },
@@ -1601,7 +1613,7 @@ const Player = {
     this._outroOffered = false;
     this.controlsVisible = true;
     const pip = document.getElementById('btnPip');
-    if (pip) pip.hidden = engine === 'mpv' || !document.pictureInPictureEnabled;
+    if (pip) { pip.hidden = engine !== 'mpv' && !document.pictureInPictureEnabled; pip.title = '画中画'; pip.setAttribute('aria-pressed', 'false'); }
     this._reportedStart = false;
     this._ended = false;
     this._everPlayed = false;
@@ -2628,26 +2640,31 @@ const Player = {
     const controls = document.getElementById('playerControls');
     if (!wrap || !topbar || !controls) return;
     const wr = wrap.getBoundingClientRect();
-    const tr = topbar.getBoundingClientRect();
-    const cr = controls.getBoundingClientRect();
-    // 控件条自动隐藏走 opacity，矩形一直在，视频带因此是稳的，不会跟着控件进出跳动
-    const top = Math.max(wr.top, tr.bottom);
-    const bottom = Math.min(wr.bottom, cr.top);
     const scale = window.devicePixelRatio || 1;
     const box = (r) => [r.left, r.top, r.width, r.height].map((v) => Math.round(v * scale));
-    // 带内可见的浮层（加载层/面板）留在网页层里画，挖洞时刨掉它们。
-    // 中央按钮故意不刨：它是 border-radius:50% 的圆，刨出的矩形会在四角露出
-    // .player-view 的纯黑底，比少一个按钮更难看。播放/暂停由底栏负责
-    const keepRects = ['playerLoading', 'playerInfoPanel', 'playerSettingsPanel', 'playerSpeedPanel']
+    // 视频始终占满容器，控件只保留网页绘制区域，不改变 mpv 的画幅。
+    // opacity 过渡结束后再挖掉隐藏的控件，避免全屏留下上下黑带。
+    const overlays = ['playerTopbar', 'playerCenterBtn', 'playerSpeedBadge', 'playerLoading', 'playerInfoPanel', 'playerSettingsPanel', 'playerSpeedPanel', 'playerSkipBtn', 'playerDialog', 'autoNextCard']
       .map((id) => document.getElementById(id))
-      .filter((el) => el && !el.hidden)
-      .map((el) => box(el.getBoundingClientRect()));
+      .concat(controls.querySelector('.player-transport'));
+    const visibleOverlays = overlays
+      .filter((el) => el && !el.hidden && !el.closest('[hidden]') && getComputedStyle(el).display !== 'none'
+        && Number(getComputedStyle(el.closest('#playerControls') || el).opacity) > 0);
+    const keepRects = visibleOverlays.map((el) => box(el.getBoundingClientRect()));
+    // 圆形播放键和圆角面板按实际轮廓保留，四角仍透出视频。
+    const keepRadii = visibleOverlays.map(el => {
+      const radius = getComputedStyle(el).borderTopLeftRadius;
+      const rect = el.getBoundingClientRect();
+      const px = radius.endsWith('%') ? Math.min(rect.width, rect.height) * parseFloat(radius) / 100 : parseFloat(radius);
+      return Math.round((px || 0) * scale);
+    });
     const args = {
       x: Math.round(wr.left * scale),
-      y: Math.round(top * scale),
+      y: Math.round(wr.top * scale),
       width: Math.round(wr.width * scale),
-      height: Math.round((bottom - top) * scale),
+      height: Math.round(wr.height * scale),
       keepRects,
+      keepRadii,
     };
     // 浮层显隐没有统一入口，靠轮询兜着；签名没变就不重设区域，免得每 200ms 触发一次重绘
     const sig = JSON.stringify(args);
@@ -2688,7 +2705,32 @@ const Player = {
     return !!document.fullscreenElement || !!this._nativeFullscreen;
   },
 
+  async applyFullscreenFit(mode = this.fullscreenFit) {
+    const fill = this.isFullscreen() && mode === 'cover';
+    if (this.isMpv()) {
+      const result = await this.mpvCmd(['set_property', 'panscan', fill ? 1 : 0]);
+      if (!result) { this.controlError('无法调整画幅，请重试'); return false; }
+    } else if (this.video) this.video.style.objectFit = fill ? 'cover' : 'contain';
+    return true;
+  },
+
+  async setFullscreenFit(mode) {
+    if (!['contain', 'cover'].includes(mode)) return false;
+    const generation = this.generation;
+    const selection = this._frameSelectionSeq = (this._frameSelectionSeq || 0) + 1;
+    if (!await this.applyFullscreenFit(mode)) return false;
+    if (generation !== this.generation || selection !== this._frameSelectionSeq) return false;
+    this.fullscreenFit = mode;
+    localStorage.setItem('mc_fullscreenFit', mode);
+    if (this._settingsTab === 'frame') {
+      this.renderSettingsTab('frame');
+      document.querySelector(`[data-fit="${mode}"]`)?.focus();
+    }
+    return true;
+  },
+
   toggleFullscreen() {
+    if (this.nativePip) return this.togglePip().then(() => { if (!this.nativePip) return this.toggleFullscreen(); });
     const view = document.getElementById('playerView');
     if (!view) return Promise.resolve();
     if (this.isMpv() && window.__TAURI__?.window?.getCurrentWindow) {
@@ -2703,6 +2745,7 @@ const Player = {
         await nativeWindow.setFullscreen(next);
         state.active = next;
         if (this._nativeFullscreenState === state) this._nativeFullscreen = next;
+        if (generation === this.generation && this._nativeFullscreenState === state) await this.applyFullscreenFit();
         requestAnimationFrame(() => this.syncEmbeddedPlayerRect());
       });
       this._nativeFullscreenTask = task;
@@ -2724,7 +2767,27 @@ const Player = {
     return task.catch(() => {});
   },
 
-  togglePip() {
+  async togglePip() {
+    if (this.isMpv()) {
+      if (this._pipPending) return;
+      const generation = this.generation;
+      this._pipPending = true;
+      try {
+        this.closeAnyPanel();
+        const status = await window.MovieClawPlatform?.pictureInPicture(!this.nativePip);
+        if (!status || generation !== this.generation) return;
+        this.nativePip = status.pictureInPicture === true;
+        this._nativeFullscreen = await window.__TAURI__.window.getCurrentWindow().isFullscreen();
+        if (this._nativeFullscreenState) this._nativeFullscreenState.active = this._nativeFullscreen;
+        document.getElementById('playerView')?.classList.toggle('native-pip', this.nativePip);
+        const button = document.getElementById('btnPip');
+        if (button) { button.title = this.nativePip ? '恢复播放器窗口 (Esc)' : '画中画'; button.setAttribute('aria-pressed', String(this.nativePip)); }
+        await this.applyFullscreenFit();
+        this._mpvRectSig = null; this.syncEmbeddedPlayerRect();
+      } catch (_) { if (generation === this.generation) this.controlError('无法切换画中画，请重试'); }
+      finally { this._pipPending = false; }
+      return;
+    }
     if (!this.video || this.isMpv() || !document.pictureInPictureEnabled) return;
     if (document.pictureInPictureElement) document.exitPictureInPicture();
     else this.video.requestPictureInPicture().catch(() => {});
@@ -2960,6 +3023,7 @@ const Player = {
     await this.setSpeed(this.context?.playbackRate || 1);
     if (this.subtitleOffset) await this.adjustSubtitleOffset(0);
     this.applySubtitleStyle();
+    if (generation === this.generation) await this.applyFullscreenFit();
   },
 
   playbackToken() {

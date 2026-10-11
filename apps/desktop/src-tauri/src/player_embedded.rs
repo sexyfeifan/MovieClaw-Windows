@@ -24,6 +24,7 @@ mod win32 {
     pub const HWND_BOTTOM: isize = 1;
     /// CombineRgn 的 fnMode：dst = src1 \ src2
     pub const RGN_DIFF: i32 = 3;
+    pub const BLACK_BRUSH: i32 = 4;
 
     #[repr(C)]
     pub struct POINT {
@@ -96,7 +97,9 @@ mod win32 {
 
     #[link(name = "gdi32")]
     extern "system" {
+        pub fn GetStockObject(object: i32) -> isize;
         pub fn CreateRectRgn(x1: i32, y1: i32, x2: i32, y2: i32) -> isize;
+        pub fn CreateRoundRectRgn(x1: i32, y1: i32, x2: i32, y2: i32, ellipse_width: i32, ellipse_height: i32) -> isize;
         pub fn CombineRgn(hrgnDst: isize, hrgnSrc1: isize, hrgnSrc2: isize, fnMode: i32) -> i32;
         pub fn DeleteObject(hObject: isize) -> i32;
     }
@@ -143,6 +146,7 @@ fn set_webview_hole(
     width: i32,
     height: i32,
     keep_rects: &[[i32; 4]],
+    keep_radii: &[i32],
 ) {
     if parent_hwnd == 0 || width <= 0 || height <= 0 {
         return;
@@ -172,12 +176,17 @@ fn set_webview_hole(
 
         let full = CreateRectRgn(0, 0, wv.right - wv.left, wv.bottom - wv.top);
         let hole = CreateRectRgn(x - dx, y - dy, x - dx + width, y - dy + height);
-        for k in keep_rects {
+        for (index, k) in keep_rects.iter().enumerate() {
             let (kx, ky, kw, kh) = (k[0] - dx, k[1] - dy, k[2], k[3]);
             if kw <= 0 || kh <= 0 {
                 continue;
             }
-            let keep = CreateRectRgn(kx, ky, kx + kw, ky + kh);
+            let radius = keep_radii.get(index).copied().unwrap_or(0).clamp(0, kw.min(kh) / 2);
+            let keep = if radius > 0 {
+                CreateRoundRectRgn(kx, ky, kx + kw, ky + kh, radius * 2, radius * 2)
+            } else {
+                CreateRectRgn(kx, ky, kx + kw, ky + kh)
+            };
             CombineRgn(hole, hole, keep, RGN_DIFF);
             DeleteObject(keep);
         }
@@ -232,7 +241,9 @@ fn ensure_host_class() -> isize {
             hInstance: hinst,
             hIcon: 0,
             hCursor: 0,
-            hbrBackground: 0,
+            // The WebView hole opens before mpv's first frame is ready.
+            // Paint it black rather than exposing the parent window's white background.
+            hbrBackground: unsafe { GetStockObject(BLACK_BRUSH) },
             lpszMenuName: std::ptr::null(),
             lpszClassName: class_name.as_ptr(),
         };
@@ -451,7 +462,7 @@ pub fn launch_embedded_player(
     ));
 
     // 视频子窗口在 WebView2 下面（见 resize 的 HWND_BOTTOM），网页层不挖空就整块黑掉没画面
-    set_webview_hole(parent_hwnd, x, y, width, height, &[]);
+    set_webview_hole(parent_hwnd, x, y, width, height, &[], &[]);
 
     eprintln!(
         "[embedded-player] mpv started, pid={}, hwnd={}, pipe={}",
@@ -475,6 +486,7 @@ pub fn resize_embedded_player(
     width: i32,
     height: i32,
     keep_rects: Option<Vec<[i32; 4]>>,
+    keep_radii: Option<Vec<i32>>,
 ) -> Result<bool, String> {
     let hwnd = CHILD_HWND.load(Ordering::SeqCst);
     if hwnd == 0 {
@@ -498,6 +510,7 @@ pub fn resize_embedded_player(
         width,
         height,
         keep_rects.as_deref().unwrap_or(&[]),
+        keep_radii.as_deref().unwrap_or(&[]),
     );
     Ok(true)
 }

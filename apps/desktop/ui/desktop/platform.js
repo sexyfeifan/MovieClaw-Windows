@@ -39,9 +39,23 @@
     },
     stop() {
       const state = current; current = null; this.status = null;
+      if (state) {
+        state.player.nativePip = false;
+        document.getElementById('playerView')?.classList.remove('native-pip');
+      }
       if (!state) return Promise.resolve();
       clearInterval(state.timer);
       return bridge()?.invoke('end_native_playback', { instanceId: state.instanceId, sequence: state.sequence }).catch(() => {});
+    },
+    async pictureInPicture(enabled) {
+      const state = current;
+      if (!state?.ready) throw new Error('播放器尚未就绪');
+      const status = await bridge().invoke('set_native_picture_in_picture', {
+        instanceId: state.instanceId, sequence: state.sequence, enabled,
+      });
+      if (current !== state || state.player.generation !== state.generation) return null;
+      this.status = status;
+      return status;
     },
     command(payload) {
       const state = current;

@@ -21,11 +21,13 @@
 
 ### 桌面客户端（Windows x64）
 
-1. 从 [Releases](https://github.com/sexyfeifan/MovieClaw-Windows/releases) 下载 `MovieClaw-Desktop-*-Setup-x64.exe`
+1. 从 [1.0.0 Release](https://github.com/sexyfeifan/MovieClaw-Windows/releases/tag/desktop-v1.0.0) 下载 `MovieClaw-Desktop-1.0.0-Setup-x64.exe`
 2. 运行安装包，启动后输入 MovieClaw 服务器地址
 3. 浏览海报墙 → 点击播放 → mpv 本地硬解播放
 
-**系统要求**: Windows 10/11 x64, WebView2 Runtime, mpv
+**系统要求**: Windows 10/11 x64，WebView2 Runtime。安装包已包含 mpv；缺少 WebView2 时安装器会提供安装。
+
+本版包含媒体库封面、深色菜单、隐藏库/成人内容搜索过滤、单集封面修复、全屏画幅选择和置顶小窗。包未进行 Authenticode 签名；验证范围见 [1.0.0 更新说明](docs/changelog/desktop-v1.0.0.md)。扫码登录的 NAS 条件见 [配置说明](docs/deployment/windows-pairing.md)。
 
 ### 服务端部署
 
@@ -48,8 +50,10 @@ MovieClaw-Windows/
 │   ├── web/                    # 🌐 服务端 — Next.js Web UI
 │   ├── desktop/                # 🪟 客户端 — Windows 桌面应用（本仓库核心）
 │   │   ├── src-tauri/          #   Rust/Tauri 壳 + mpv 控制
-│   │   ├── ui/                 #   注入脚本 + 连接页
-│   │   └── scripts/            #   打包脚本 + NSIS 安装包
+│   │   ├── ui/desktop/         #   内嵌媒体库页面与播放器控件
+│   │   ├── tests/              #   单元测试与端到端测试
+│   │   ├── release/            #   硬件验收模板
+│   │   └── scripts/            #   构建、NSIS 打包、验收与兼容检查
 │   ├── apple/                  # 📱 客户端 — iOS/macOS（上游）
 │   └── extension/              # 🧩 浏览器扩展（上游）
 ├── docker/                     # 🐳 Docker 部署配置
@@ -79,8 +83,8 @@ MovieClaw-Windows/
 ```
 ┌──────────────────────────────────────┐
 │  Tauri Shell (Rust)                  │
-│  ├── WebView2 (服务端 Web UI)        │
-│  │   └── inject.js (播放桥)          │
+│  ├── WebView2 (内嵌桌面 UI)         │
+│  │   └── desktop/ (页面与播放控件)   │
 │  ├── mpv sidecar (本地硬解播放)      │
 │  │   └── JSON IPC named pipe         │
 │  └── System Tray                     │
@@ -96,7 +100,7 @@ MovieClaw-Windows/
 
 ### 核心功能
 
-- **播放桥**: 拦截 Next.js 路由 → 创建播放会话 → 启动 mpv
+- **播放桥**: 内嵌桌面页面 → 创建播放会话 → 启动 mpv，字幕和进度由原生桥同步
 - **本地硬解**: `universal: true` → tier 0 直连播放 → mpv `--hwdec=auto-safe`
 - **进度同步**: 每 10s 上报 `/playback/progress`，支持 start/progress/stop 事件
 - **音量控制**: 浮动控件 + 快捷键 (↑↓ / M)，通过 mpv IPC 控制

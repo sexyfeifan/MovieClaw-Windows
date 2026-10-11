@@ -4,10 +4,116 @@ function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 }
 
+function uiIcon(name) {
+  const paths = {
+    play: '<path d="m8 5 11 7-11 7z" fill="currentColor" stroke="none"/>',
+    more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+    left: '<path d="m14 6-6 6 6 6"/>',
+    right: '<path d="m10 6 6 6-6 6"/>',
+    down: '<path d="m7 10 5 5 5-5"/>',
+    close: '<path d="m6 6 12 12M18 6 6 18"/>',
+  };
+  return `<svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[name] || ''}</svg>`;
+}
+
+// 自绘深色下拉菜单，避免 Windows 原生选项底色与页面文字颜色冲突。
+const DesktopSelect = {
+  close(restoreFocus = false) {
+    if (!this.menu) return;
+    this.menu.remove(); this.menu = null;
+    this.trigger?.setAttribute('aria-expanded', 'false');
+    if (restoreFocus) this.trigger?.focus();
+  },
+  enhance(root) {
+    if (!this.bound) {
+      document.addEventListener('pointerdown', event => {
+        if (this.menu && !this.menu.contains(event.target) && !this.trigger.contains(event.target)) this.close();
+      }, true);
+      document.addEventListener('scroll', event => {
+        if (this.menu && !this.menu.contains(event.target)) this.position();
+      }, true);
+      window.addEventListener('resize', () => this.close());
+      this.bound = true;
+    }
+    for (const select of root.querySelectorAll('select.settings-select')) {
+      if (select.hidden) continue;
+      const trigger = document.createElement('button');
+      trigger.type = 'button'; trigger.className = 'settings-select select-trigger';
+      trigger.id = select.id + 'Trigger';
+      trigger.setAttribute('role', 'combobox');
+      trigger.setAttribute('aria-haspopup', 'listbox');
+      trigger.setAttribute('aria-expanded', 'false');
+      trigger.setAttribute('aria-label', select.getAttribute('aria-label') || select.id);
+      trigger.setAttribute('aria-controls', select.id + 'Menu');
+      const update = () => {
+        trigger.innerHTML = `<span>${escapeHtml(select.selectedOptions[0]?.textContent || '')}</span><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m7 10 5 5 5-5"/></svg>`;
+        trigger.disabled = select.disabled;
+      };
+      update(); select.hidden = true; select.after(trigger);
+      select.addEventListener('change', update);
+      trigger.addEventListener('click', () => {
+        if (this.menu && this.trigger === trigger) this.close(); else this.open(select, trigger);
+      });
+      trigger.addEventListener('keydown', event => {
+        if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+          event.preventDefault(); this.open(select, trigger);
+          if (event.key === 'Home') this.menu.firstElementChild?.focus();
+          if (event.key === 'End') this.menu.lastElementChild?.focus();
+        }
+      });
+    }
+  },
+  open(select, trigger) {
+    this.close(); this.trigger = trigger;
+    const menu = this.menu = document.createElement('div');
+    menu.id = select.id + 'Menu'; menu.className = 'select-menu';
+    menu.setAttribute('role', 'listbox');
+    menu.setAttribute('aria-label', trigger.getAttribute('aria-label'));
+    for (const option of select.options) {
+      const row = document.createElement('button');
+      row.type = 'button'; row.className = 'select-option'; row.tabIndex = -1; row.disabled = option.disabled;
+      row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(option.selected));
+      row.innerHTML = `<span>${escapeHtml(option.textContent)}</span><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4 10-10"/></svg>`;
+      row.addEventListener('click', () => {
+        this.close(true);
+        if (select.value !== option.value) { select.value = option.value; select.dispatchEvent(new Event('change', { bubbles: true })); }
+      });
+      menu.appendChild(row);
+    }
+    menu.addEventListener('keydown', event => {
+      const rows = [...menu.children].filter(row => !row.disabled);
+      const index = rows.indexOf(document.activeElement);
+      if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+        event.preventDefault();
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
+        rows[next]?.focus();
+      } else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); this.close(true); }
+      else if (event.key === 'Tab') this.close(true);
+    });
+    document.body.appendChild(menu);
+    trigger.setAttribute('aria-expanded', 'true');
+    this.position();
+    (menu.querySelector('[aria-selected="true"]') || menu.firstElementChild)?.focus({ preventScroll: true });
+  },
+  position() {
+    if (!this.menu) return;
+    const rect = this.trigger.getBoundingClientRect(), menu = this.menu;
+    if (!this.trigger.isConnected || rect.bottom < 0 || rect.top > innerHeight) { this.close(); return; }
+    menu.style.minWidth = Math.min(Math.max(rect.width, 140), innerWidth - 16) + 'px';
+    const box = menu.getBoundingClientRect();
+    menu.style.left = Math.max(8, Math.min(rect.left, innerWidth - box.width - 8)) + 'px';
+    menu.style.top = Math.max(8, rect.bottom + box.height + 8 <= innerHeight ? rect.bottom + 6 : rect.top - box.height - 6) + 'px';
+  },
+};
+
 // 修复图片 URL：相对路径拼接 {server}/api/v1，远程 URL 走服务器代理
+const imageSources = new Map();
+function imageSourceKey(url) { return `${API.contextEpoch}:${API.baseUrl}:${url}`; }
 function resolveUrl(url) {
   if (!url) return '';
   if (typeof url !== 'string') return '';
+  const cached = imageSources.get(imageSourceKey(url));
+  if (cached) return cached;
   if (url.startsWith('data:')) return /^data:image\/(png|jpeg|webp|gif);/i.test(url) ? url : '';
   if (/^[a-z][a-z0-9+.-]*:/i.test(url) && !/^https?:/i.test(url)) return '';
   const base = (window.__MOVIECLAW_SERVER__ || '').replace(/\/+$/, '');
@@ -35,6 +141,9 @@ function imgFallback(imgEl, rawUrl) {
   API.proxyImage(rawUrl).then(dataUri => {
     if (API.contextEpoch !== epoch || imgEl.dataset.raw !== rawUrl || imgEl.getAttribute('src') !== source) return;
     if (dataUri) {
+      const key = imageSourceKey(rawUrl);
+      imageSources.delete(key); imageSources.set(key, dataUri);
+      if (imageSources.size > 64) imageSources.delete(imageSources.keys().next().value);
       imgEl.src = dataUri;
     } else {
       imgEl.style.display = 'none';
@@ -49,18 +158,45 @@ function imageTitleFallback(img, visible) {
   if (title?.tagName === 'H1') title.hidden = !visible;
 }
 
+function replaceContentPreservingImages(root, html) {
+  const images = new Map([...root.querySelectorAll('img.loaded[data-raw]')].map(img => [img.dataset.raw, img]));
+  root.innerHTML = html;
+  for (const img of root.querySelectorAll('img[data-raw]')) {
+    const previous = images.get(img.dataset.raw);
+    if (previous) { img.replaceWith(previous); images.delete(img.dataset.raw); }
+  }
+}
+
 function onImageLoad(event) {
   const img = event.target;
   if (img?.tagName !== 'IMG' || img.dataset.raw === undefined) return;
+  img.classList.add('loaded');
   if (img.dataset.fade !== undefined) img.style.opacity = '1';
+  img.parentElement?.classList.add('has-img');
+  if (img.parentElement?.classList.contains('library-cover')) {
+    img.parentElement.style.setProperty('--library-image', `url("${img.src.replace(/"/g, '%22')}")`);
+  }
   imageTitleFallback(img, false);
 }
 
 function onImageError(event) {
   const img = event.target;
   if (img?.tagName !== 'IMG' || img.dataset.raw === undefined) return;
+  img.classList.remove('loaded');
+  img.parentElement?.classList.remove('has-img');
   imageTitleFallback(img, true);
   imgFallback(img, img.dataset.raw);
+}
+
+function libraryCover(kind, rawUrl) {
+  const icons = {
+    movie: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 8h4M3 16h4M17 8h4M17 16h4"/>',
+    tv: '<rect x="3" y="6" width="18" height="14" rx="2"/><path d="m8 2 4 4 4-4M8 23h8"/>',
+    video: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m10 8 6 4-6 4z"/>',
+    collection: '<rect x="3" y="8" width="18" height="13" rx="2"/><path d="M6 4h12M9 1h6"/>',
+  };
+  return `<div class="library-placeholder" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${icons[kind] || icons.movie}</svg></div>`
+    + (rawUrl ? `<img loading="lazy" src="${escapeHtml(resolveUrl(rawUrl))}" alt="" data-raw="${escapeHtml(rawUrl)}">` : '');
 }
 
 // 「12:34」/「1:02:33」——与 Apple 端 Formatters.clock 同一口径（详情页续播按钮）
@@ -750,7 +886,7 @@ const App = {
       });
     });
     const account = document.getElementById('accountButton');
-    if (account) account.textContent = (this.session?.nickname || this.session?.username || '账号') + ' ▾';
+    if (account) account.innerHTML = `<span>${escapeHtml(this.session?.nickname || this.session?.username || '账号')}</span>${uiIcon('down')}`;
   },
 
   captureRoute() {
@@ -786,6 +922,7 @@ const App = {
   async navigate(page, params = {}, pushHistory = true) {
     const started = window.performance?.now();
     if (this._authPending) return;
+    DesktopSelect.close();
     const previous = this.captureRoute();
     this._searchData = null;
     this._pageController?.abort();
@@ -894,23 +1031,22 @@ const App = {
       const heroHtml = continueItems.length ? `<section class="hero-banner" id="heroBanner" aria-label="接下来继续">
         <div class="hero-bg"><img id="heroImg" alt="" data-raw=""></div>
         <div class="hero-info"><div id="heroIdentity"></div><div class="hero-meta" id="heroMeta"></div>
-          <p class="hero-overview" id="heroOverview"></p><div class="hero-actions"><button class="btn-play" id="heroPlayBtn">▶ <span>继续播放</span></button><button class="btn-secondary" id="heroDetailBtn">详情</button></div>
-          <div class="hero-navigation"><button id="heroPrev" aria-label="上一部">‹</button><div id="heroDots"></div><button id="heroNext" aria-label="下一部">›</button></div>
-        </div></section>` : '';
+          <p class="hero-overview" id="heroOverview"></p><div class="hero-actions"><button class="btn-play" id="heroPlayBtn">${uiIcon('play')}<span>继续播放</span></button><button class="btn-secondary" id="heroDetailBtn">详情</button></div>
+        </div><div class="hero-navigation"><button id="heroPrev" aria-label="上一部">${uiIcon('left')}</button><div id="heroDots"></div><button id="heroNext" aria-label="下一部">${uiIcon('right')}</button></div></section>` : '';
       const shelves = loaded.map(({ row, response, error }) => {
         if (error) return `<section class="shelf-section" data-home-row="${escapeHtml(row.id)}"><h2 class="shelf-title">${escapeHtml(row.title)}</h2><div class="empty-state" role="alert">${escapeHtml(error.message)} <button class="btn-secondary home-retry">重试</button></div></section>`;
         let cards = '';
-        if (row.type === 'libraries') cards = this.libraries.map(lib => `<button class="library-tile" data-open-library="${Number(lib.id)}"><div class="library-cover"><img loading="lazy" src="${escapeHtml(resolveUrl('/libraries/' + lib.id + '/cover'))}" alt="" data-raw="/libraries/${Number(lib.id)}/cover"><span>${escapeHtml(HomeRows.label(lib.kind))}</span></div><strong>${escapeHtml(lib.name)}</strong><span>${Number(lib.stats?.item_count || 0)} 个项目</span></button>`).join('')
-          + HomeRows.pinned(this.homeRows || []).map(collection => `<button class="library-tile collection-tile" data-open-collection="${Number(collection.id)}"><div class="library-cover">${collection.covers?.length ? `<img loading="lazy" src="${escapeHtml(resolveUrl('/collections/' + collection.id + '/cover'))}" alt="" data-raw="/collections/${Number(collection.id)}/cover">` : ''}<span>合集</span></div><strong>${escapeHtml(collection.name)}</strong><span>${Number(collection.item_count || 0)} 个项目</span></button>`).join('');
+        if (row.type === 'libraries') cards = this.libraries.map(lib => `<button class="library-tile" data-open-library="${Number(lib.id)}"><div class="library-cover">${libraryCover(lib.kind, '/libraries/' + Number(lib.id) + '/cover?w=600')}<div class="library-name-band"><strong>${escapeHtml(lib.name)}</strong><small>${Number(lib.stats?.item_count || 0)} 部</small></div></div></button>`).join('')
+          + HomeRows.pinned(this.homeRows || []).map(collection => `<button class="library-tile collection-tile" data-open-collection="${Number(collection.id)}"><div class="library-cover">${libraryCover('collection', collection.covers?.length ? '/collections/' + Number(collection.id) + '/cover?w=600' : '')}<div class="library-name-band"><strong>${escapeHtml(collection.name)}</strong><small>${Number(collection.item_count || 0)} 部</small><span>合集</span></div></div></button>`).join('');
         else if (row.type === 'genres') cards = this.unwrapItems(response).map(genre => `<button class="genre-tile" data-kind="${escapeHtml(row.media_kind)}" data-genre="${escapeHtml(genre.value)}" data-label="${escapeHtml(genre.label)}"><img loading="lazy" src="${escapeHtml(resolveUrl(genre.cover_url))}" alt="" data-raw="${escapeHtml(genre.cover_url)}"><span>${escapeHtml(genre.label)}</span><small>${Number(genre.count || 0)} 部</small></button>`).join('');
         else {
           const items = this.filterMediaItems(this.unwrapItems(response)).slice(0, 20);
           cards = items.map(item => this.posterCard(item, row.library_id, row.type === 'up-next')).join('');
-          if (items.length >= 20 && row.type !== 'up-next') cards += `<button class="see-all-card" data-open-row="${escapeHtml(row.id)}">查看全部 <span>›</span></button>`;
+          if (items.length >= 20 && row.type !== 'up-next') cards += `<button class="see-all-card" data-open-row="${escapeHtml(row.id)}">查看全部 ${uiIcon('right')}</button>`;
         }
         if (!cards) return '';
-        const title = ['up-next', 'libraries', 'genres'].includes(row.type) ? `<h2 class="shelf-title">${escapeHtml(row.title)}</h2>` : `<button class="shelf-title row-title" data-open-row="${escapeHtml(row.id)}">${escapeHtml(row.title)} <span>›</span></button>`;
-        return `<section class="shelf-section" data-home-row="${escapeHtml(row.id)}"><div class="shelf-header">${title}</div><div class="shelf-wrapper"><button class="shelf-arrow shelf-arrow-left" data-dir="-1" aria-label="向左">‹</button><div class="shelf-row ${row.type === 'up-next' ? 'continue-row' : ''}">${cards}</div><button class="shelf-arrow shelf-arrow-right" data-dir="1" aria-label="向右">›</button></div></section>`;
+        const title = ['up-next', 'libraries', 'genres'].includes(row.type) ? `<h2 class="shelf-title">${escapeHtml(row.title)}</h2>` : `<button class="shelf-title row-title" data-open-row="${escapeHtml(row.id)}">${escapeHtml(row.title)} ${uiIcon('right')}</button>`;
+        return `<section class="shelf-section" data-home-row="${escapeHtml(row.id)}"><div class="shelf-header">${title}</div><div class="shelf-wrapper"><button class="shelf-arrow shelf-arrow-left" data-dir="-1" aria-label="向左">${uiIcon('left')}</button><div class="shelf-row ${row.type === 'up-next' ? 'continue-row' : ''}">${cards}</div><button class="shelf-arrow shelf-arrow-right" data-dir="1" aria-label="向右">${uiIcon('right')}</button></div></section>`;
       }).join('');
       container.innerHTML = heroHtml + shelves || '<div class="empty-state">暂无内容，请在服务器添加媒体库。</div>';
       this.bindPosterCards(container);
@@ -1003,7 +1139,7 @@ const App = {
       fetchPage: async page => this.offsetPage(await api.listLibraryItems(libraryId, {
         offset: page.offset, limit: page.limit, sort: prefs.sort, order: prefs.order,
         ...(prefs.unwatched ? { w: 'unwatched' } : {}),
-      }), page.limit),
+      }), page.limit, prefs.unwatched ? undefined : lib?.stats?.item_count),
     });
   },
 
@@ -1045,6 +1181,12 @@ const App = {
 
   async renderSearch(container, query, generation = this.viewGeneration, person) {
     const api = this.pageAPI || API;
+    const hidden = new Set((this.uiPreferences?.home?.rows || []).filter(row => row.hidden)
+      .map(row => Number(row.library_id ?? (row.id?.startsWith('lib:') ? row.id.slice(4) : 0))));
+    const libraryIds = this.libraries.filter(lib => !lib.exclude_from_home && !hidden.has(Number(lib.id))
+      && !lib.adult && !lib.is_adult && !/(?:\b(?:AV|JAV|NSFW|XXX)\b|成人|色情)/i.test(lib.name || ''))
+      .map(lib => Number(lib.id));
+    const allowed = new Set(libraryIds);
     if (!query?.trim()) {
       const recent = this.recentSearches();
       container.innerHTML = `<div class="page-header"><h1 class="page-title">搜索</h1></div><div class="search-idle"><p>搜索片名、演员、导演或类型</p>${recent.items.length ? `<h2>最近搜索 <button class="text-button" id="clearRecentSearches">清除</button></h2><div class="search-chips">${recent.items.map(value => `<button data-recent-query="${escapeHtml(value)}">${escapeHtml(value)}</button>`).join('')}</div>` : ''}</div>`;
@@ -1073,25 +1215,33 @@ const App = {
     await this.renderPagedWall(container, {
       title: `“${query}” 的搜索结果`, generation, header: '<div id="searchFilters"></div>', afterPage: updateHeader,
       fetchPage: async page => {
-        const response = await api.search(query, { limit: page.limit, ...(page.cursor ? { cursor: page.cursor } : {}), ...(person ? { person_id: person.id } : {}) });
+        if (!libraryIds.length) return { items: [], hasMore: false };
+        const response = await api.search(query, { library_ids: libraryIds, home_only: true, exclude_adult: true,
+          limit: page.limit, ...(page.cursor ? { cursor: page.cursor } : {}), ...(person ? { person_id: person.id } : {}) });
         const data = response?.data || response || {};
         if (!page.cursor) {
-          people = data.people || []; suggestions = data.suggestions || [];
+          // Older servers ignore scoped-search parameters. Never show their unscoped
+          // people/suggestions, which could disclose names from excluded libraries.
+          const scoped = data.exclude_adult === true && Array.isArray(data.scope_library_ids)
+            && data.scope_library_ids.every(id => allowed.has(Number(id)));
+          people = scoped ? data.people || [] : []; suggestions = scoped ? data.suggestions || [] : [];
           if (this.isCurrent(generation)) this._searchData = { people, suggestions };
         }
         return {
-          items: this.filterMediaItems((data.items || []).map(hit => ({
-            ...hit.item, library_id: hit.item?.library_id ?? hit.library_ids?.[0], source_missing: !(hit.item?.library_id ?? hit.library_ids?.[0]), match_label: hit.match?.label,
-          }))), cursor: data.next_cursor, hasMore: !!data.next_cursor,
+          items: this.filterMediaItems((data.items || []).flatMap(hit => {
+            const item = hit.item || {}, id = (hit.library_ids || [item.library_id]).find(id => allowed.has(Number(id)));
+            if (!id || item.adult || item.is_adult || /^(?:XXX|X|R18\+?|NC-17|ADULT|成人)$/i.test(item.content_rating || '')) return [];
+            return [{ ...item, library_id: Number(id), source_missing: false, match_label: hit.match?.label }];
+          })), cursor: data.next_cursor, hasMore: !!data.next_cursor,
         };
       },
     });
     updateHeader();
   },
 
-  offsetPage(response, limit) {
+  offsetPage(response, limit, knownTotal) {
     const raw = this.unwrapItems(response);
-    const total = (response?.data || response)?.total;
+    const total = (response?.data || response)?.total ?? knownTotal;
     return { items: this.filterMediaItems(raw), rawCount: raw.length, hasMore: raw.length === limit, total };
   },
 
@@ -1110,15 +1260,16 @@ const App = {
     const sorts = [['added_at', '最近添加'], ['release_date', '最近上映'], ['rating', '评分'], ['title', '片名']];
     if (preferenceId?.startsWith('collection')) sorts.unshift(['default', '合集顺序']);
     if (preferenceId === 'favorites') sorts.unshift(['favorited_at', '最近收藏']);
-    container.innerHTML = `${this.navStack.length ? '<button class="text-button wall-back" id="wallBack">‹ 返回</button>' : ''}<div class="page-header"><h1 class="page-title">${escapeHtml(title)}</h1><span class="page-subtitle" id="wallCount"></span></div>
+    container.innerHTML = `${this.navStack.length ? '<button class="text-button wall-back" id="wallBack">‹ 返回</button>' : ''}<div class="page-header"><h1 class="page-title">${escapeHtml(title)}</h1><span class="page-subtitle" id="wallCount"></span>
       ${prefs ? `<div class="wall-toolbar"><select id="wallSort" class="settings-select" aria-label="排序">${sorts.map(([value, label]) => `<option value="${value}" ${prefs.sort === value ? 'selected' : ''}>${label}</option>`).join('')}</select>
         <select id="wallOrder" class="settings-select" aria-label="排序方向"><option value="desc" ${prefs.order === 'desc' ? 'selected' : ''}>降序</option><option value="asc" ${prefs.order === 'asc' ? 'selected' : ''}>升序</option></select>
-        ${unwatched ? `<label><input type="checkbox" id="wallUnwatched" ${prefs.unwatched ? 'checked' : ''}> 只看没看过的</label>` : ''}</div>` : ''}
+        ${unwatched ? `<label><input type="checkbox" id="wallUnwatched" ${prefs.unwatched ? 'checked' : ''}> 只看没看过的</label>` : ''}</div>` : ''}</div>
       ${header}<div class="poster-wall"><div class="poster-grid" id="posterGrid"></div><div id="wallStatus" class="empty-state" role="status"></div><div id="wallSentinel" style="height:1px"></div></div>`;
     const grid = container.querySelector('#posterGrid');
     const status = container.querySelector('#wallStatus');
     const count = container.querySelector('#wallCount');
     container.querySelector('#wallBack')?.addEventListener('click', () => this.goBack());
+    DesktopSelect.enhance(container);
     const pager = new DesktopPager(fetchPage, () => this.isCurrent(generation));
     const virtual = typeof requestAnimationFrame === 'function' && grid.clientWidth > 0;
     if (virtual) pager.enableWindow(12);
@@ -1129,7 +1280,7 @@ const App = {
       const request = ++renderRequest;
       let start = 0, end = pager.items.length, top = 0, bottom = 0;
       if (virtual && pager.items.length > 360) {
-        const columns = Math.max(1, Math.floor((grid.clientWidth + 18) / 168));
+        const columns = Math.max(1, getComputedStyle(grid).gridTemplateColumns.split(' ').length);
         const width = (grid.clientWidth - 18 * (columns - 1)) / columns;
         const rowHeight = grid.querySelector('.poster-card')?.getBoundingClientRect().height + 26 || width * 1.5 + 70;
         const targetScroll = this._routeRestore?.scrollTop ?? container.scrollTop;
@@ -1188,12 +1339,13 @@ const App = {
     };
     wall.load = load;
     if (prefs) {
-      const changed = () => {
+      const changed = async event => {
         prefs.sort = container.querySelector('#wallSort').value;
         prefs.order = container.querySelector('#wallOrder').value;
         prefs.unwatched = container.querySelector('#wallUnwatched')?.checked || false;
         localStorage.setItem(prefs.key, JSON.stringify({ sort: prefs.sort, order: prefs.order, unwatched: prefs.unwatched }));
-        this.navigate(this.currentPage, this.currentParams, false);
+        await this.navigate(this.currentPage, this.currentParams, false);
+        document.getElementById(event.target.id + 'Trigger')?.focus();
       };
       container.querySelectorAll('#wallSort,#wallOrder,#wallUnwatched').forEach(input => input.addEventListener('change', changed));
     }
@@ -1301,8 +1453,10 @@ const App = {
       // 加载作品
       const credits = person.credits || [];
       const sections = [['参演', credits.filter(c => c.department === 'cast')], ['执导', credits.filter(c => c.department === 'director')]].filter(([, items]) => items.length);
+      const avatar = person.avatar_url || person.profile_url;
 
       container.innerHTML = `
+        ${avatar ? `<div class="person-backdrop" aria-hidden="true"><img src="${escapeHtml(resolveUrl(avatar))}" alt="" data-raw="${escapeHtml(avatar)}"></div>` : ''}
         <div class="person-hero">
           <button class="detail-back-btn" id="personBack" aria-label="返回">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
@@ -1310,12 +1464,12 @@ const App = {
           <div class="person-header">
             ${person.avatar_url || person.profile_url ? `
               <img class="person-avatar" src="${escapeHtml(resolveUrl(person.avatar_url || person.profile_url))}" alt="" data-raw="${escapeHtml(person.avatar_url || person.profile_url)}" data-fade style="opacity:0;transition:opacity 0.3s">
-            ` : '<div class="person-avatar person-avatar-placeholder"></div>'}
+            ` : `<div class="person-avatar person-avatar-placeholder" aria-hidden="true">${escapeHtml((person.name || '?').slice(0, 1))}</div>`}
             <div class="person-info">
               <h1 class="person-name">${escapeHtml(person.name)}</h1>
               <div class="person-meta">
                 ${person.original_name && person.original_name !== person.name ? `<span>${escapeHtml(person.original_name)}</span>` : ''}
-                ${credits.length ? `<span>库内 ${new Set(credits.map(c => c.media_item_id)).size} 部作品</span>` : ''}
+                ${credits.length ? `<span>库内 ${new Set(credits.map(c => c.media_item_id)).size} 部${sections.length > 1 ? sections.map(([title, items]) => ` · ${title} ${items.length}`).join('') : ''}</span>` : ''}
               </div>
             </div>
           </div>
@@ -1327,6 +1481,11 @@ const App = {
       `;
       container.querySelector('#personBack').addEventListener('click', () => this.goBack());
       this.bindPosterCards(container);
+      container.querySelectorAll('.poster-card').forEach(card => {
+        if (String(params.fromItem || '') !== card.dataset.itemId) return;
+        card.dataset.currentItem = 'true';
+        card.querySelector('.poster-art').insertAdjacentHTML('beforeend', '<div class="series-badge">本片</div>');
+      });
     } catch (e) {
       if (!this.isCurrent(generation) || e.name === 'AbortError') return;
       if (e.status === 404) {
@@ -1432,7 +1591,7 @@ const App = {
           ? '片源已移除，暂时不能播放'
           : ((info.seasons || []).length ? '这一集还没有片源，在下面挑别的集' : '这部剧还没有可播放的分集'));
 
-        document.getElementById('detailStage').innerHTML = `
+        replaceContentPreservingImages(document.getElementById('detailStage'), `
           ${logoRaw
             ? `<img class="detail-logo" src="${escapeHtml(resolveUrl(logoRaw))}" alt="${escapeHtml(info.title)}" data-raw="${escapeHtml(logoRaw)}" data-title-fallback>
                <h1 class="detail-title" id="detailTitleFallback" hidden>${escapeHtml(info.title)}</h1>`
@@ -1472,7 +1631,7 @@ const App = {
               </button>
             ` : ''}
           </div>
-        `;
+        `);
         document.getElementById('btnPlay')?.addEventListener('click', () => playUnit(null));
         document.getElementById('btnRestart')?.addEventListener('click', () => playUnit(0));
         document.getElementById('btnFavorite')?.addEventListener('click', () => toggleFavorite());
@@ -1588,7 +1747,7 @@ const App = {
           : (eps.length
             ? visibleEpisodes.map(ep => this.episodeCardHtml(ep, st, runtime)).join('')
             : `<div class="empty-state">${escapeHtml(st.episodesError || '暂无剧集信息')}</div>`);
-        area.innerHTML = `
+        replaceContentPreservingImages(area, `
           ${(info.seasons || []).length > 1 ? `
             <div class="season-selector">
               ${(info.seasons || []).map(s => `<button class="season-pill ${s === st.browseSeason ? 'active' : ''}" data-season="${Number(s)}">${s === 0 ? '特别篇' : `第 ${Number(s)} 季`}</button>`).join('')}
@@ -1596,7 +1755,7 @@ const App = {
           ` : ''}
           ${ranges.length ? `<div class="episode-ranges" aria-label="分集范围">${ranges.map(range => `<button data-episode-range="${range.index}" class="${range.index === st.browseRange ? 'active' : ''} ${EpisodeRanges.index(st.browseAnchor) === range.index ? 'resume-anchor' : ''}" aria-pressed="${range.index === st.browseRange}">${range.label}</button>`).join('')}<button id="allEpisodes">全部 ${eps.length} 集</button></div>` : ''}
           ${this.shelfHtml(st.browseSeason === 0 ? '特别篇' : `第 ${st.browseSeason} 季`, summary, 'episode-row', cards)}
-        `;
+        `);
         area.querySelectorAll('[data-episode-range]').forEach(button => button.addEventListener('click', () => { st.browseRange = Number(button.dataset.episodeRange); renderEpisodeShelf(); }));
         area.querySelector('#allEpisodes')?.addEventListener('click', () => {
           const dialog = document.createElement('dialog'); dialog.className = 'episode-grid-dialog'; dialog.id = 'episodeGridDialog';
@@ -1642,7 +1801,13 @@ const App = {
         });
         // 头图正讲的那一集滚进视野
         const stageCard = area.querySelector('.episode-card.stage');
-        if (stageCard) stageCard.scrollIntoView({ inline: 'start', block: 'nearest' });
+        const episodeRow = stageCard?.closest('.episode-row');
+        if (episodeRow) {
+          // scrollIntoView also scrolls overflow:hidden ancestors, shifting the
+          // detail body's padding and backdrop. Only move this horizontal shelf.
+          const left = episodeRow.scrollLeft + stageCard.getBoundingClientRect().left - episodeRow.getBoundingClientRect().left;
+          episodeRow.scrollTo({ left, behavior: 'instant' });
+        }
       };
 
       // 点分集卡：头图改讲这一集（续播点随单元重取），不起播；起播走悬停播放键或头图按钮
@@ -1785,7 +1950,10 @@ const App = {
       container.querySelectorAll('.person-card[data-person-id]').forEach(card => {
         card.addEventListener('click', () => {
           const pid = card.dataset.personId;
-          if (pid) this.navigate('person', { personId: pid });
+          if (pid) this.navigate('person', { personId: pid, fromItem: mediaId });
+        });
+        card.addEventListener('keydown', event => {
+          if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); card.click(); }
         });
       });
 
@@ -1948,10 +2116,10 @@ const App = {
   // 演职员一格（同 Mac MacPersonCard）：圆头像 + 姓名 + 身份；有 TMDB 影人 id 的点进人物页
   personCardHtml(p) {
     return `
-      <div class="person-card" ${p.personId ? `data-person-id="${Number(p.personId)}"` : ''}>
+      <div class="person-card" ${p.personId ? `data-person-id="${Number(p.personId)}" role="button" tabindex="0" aria-label="${escapeHtml(p.name)} ${escapeHtml(p.role)}"` : ''}>
         ${p.avatar
           ? `<img class="person-card-avatar" src="${escapeHtml(resolveUrl(p.avatar))}" alt="" data-raw="${escapeHtml(p.avatar)}">`
-          : '<div class="person-card-avatar person-card-avatar-placeholder"></div>'}
+          : `<div class="person-card-avatar person-card-avatar-placeholder" aria-hidden="true">${escapeHtml((p.name || '?').slice(0, 1))}</div>`}
         <div class="person-card-name">${escapeHtml(p.name)}</div>
         <div class="person-card-role">${escapeHtml(p.role)}</div>
       </div>
@@ -2080,7 +2248,7 @@ const App = {
         <div class="poster-art">
           ${rawPoster ? `<img src="${escapeHtml(posterUrl)}" alt="" loading="lazy" style="opacity:0;transition:opacity 0.3s" data-raw="${escapeHtml(rawPoster)}" data-fade>` : ''}
           <div class="focus-glow"></div>
-          <div class="poster-hover"><button class="card-play" aria-label="播放 ${escapeHtml(title)}" ${item.source_missing ? 'disabled' : ''}>▶</button><button class="card-more" aria-label="更多 ${escapeHtml(title)}">•••</button></div>
+          <div class="poster-hover"><button class="card-play" aria-label="播放 ${escapeHtml(title)}" ${item.source_missing ? 'disabled' : ''}>${uiIcon('play')}</button><button class="card-more" aria-label="更多 ${escapeHtml(title)}">${uiIcon('more')}</button></div>
           ${item.source_missing ? '<span class="source-missing">片源已移除</span>' : ''}
           ${landscape ? `<div class="continue-band">${item.advanced ? '<span>下一集</span> · ' : ''}${item.kind === 'tv' ? `S${Number(item.season_number)} E${Number(item.episode_number)} · ` : ''}${escapeHtml(item.position_ms > 0 && item.duration_ms > item.position_ms ? '剩 ' + fmtRuntime(Math.ceil((item.duration_ms - item.position_ms) / 60000)) : item.duration_ms ? fmtRuntime(Math.ceil(item.duration_ms / 60000)) : '')}</div>` : ''}
           ${isFav ? '<div class="poster-fav"><svg width="14" height="14" viewBox="0 0 24 24" fill="#ff375f"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg></div>' : ''}
@@ -2111,6 +2279,7 @@ const App = {
       card.dataset.bound = '1';
       const open = () => {
         if (card.getAttribute('aria-disabled') === 'true') return;
+        if (card.dataset.currentItem === 'true') { this.goBack(); return; }
         const itemId = card.dataset.itemId;
         const libId = card.dataset.libraryId;
         if (itemId && libId) {
@@ -2162,7 +2331,7 @@ const App = {
     if (this._authPending || this._changingContext) return;
     document.getElementById('accountPanel')?.remove();
     const panel = document.createElement('dialog'); panel.id = 'accountPanel'; panel.className = 'account-panel';
-    panel.innerHTML = `<button class="panel-close" aria-label="关闭">×</button><h2>${escapeHtml(this.session?.nickname || this.session?.username)}</h2><p>${escapeHtml(API.baseUrl)}</p>
+    panel.innerHTML = `<button class="panel-close" aria-label="关闭">${uiIcon('close')}</button><h2>${escapeHtml(this.session?.nickname || this.session?.username)}</h2><p>${escapeHtml(API.baseUrl)}</p>
       <div id="panelAccountList" class="account-list" role="status">正在读取账号…</div><div class="account-actions"><button id="panelAddAccount" class="btn-secondary">添加账号</button><button id="panelSettings" class="btn-secondary">设置</button><button id="panelLogout" class="btn-secondary">退出当前账号</button></div>`;
     document.body.appendChild(panel); panel.showModal();
     const close = () => { panel.close(); panel.remove(); };
@@ -2201,7 +2370,7 @@ const App = {
           </div>
           <div class="settings-row">
             <span>默认字幕语言</span>
-            <select id="setSubLang" class="settings-select">
+            <select id="setSubLang" class="settings-select" aria-label="默认字幕语言">
               <option value="">关闭</option>
               <option value="zh" ${localStorage.getItem('mc_subLang') === 'zh' ? 'selected' : ''}>中文</option>
               <option value="en" ${localStorage.getItem('mc_subLang') === 'en' ? 'selected' : ''}>English</option>
@@ -2223,7 +2392,7 @@ const App = {
           </div>
           <div class="settings-row">
             <span>默认音轨语言</span>
-            <select id="setAudioLang" class="settings-select">
+            <select id="setAudioLang" class="settings-select" aria-label="默认音轨语言">
               <option value="">自动</option>
               <option value="zh" ${localStorage.getItem('mc_audioLang') === 'zh' ? 'selected' : ''}>中文</option>
               <option value="en" ${localStorage.getItem('mc_audioLang') === 'en' ? 'selected' : ''}>English</option>
@@ -2275,6 +2444,7 @@ const App = {
       if (this.isCurrent(generation)) document.getElementById('settingsVersion').textContent = '版本信息暂不可用';
     });
 
+    DesktopSelect.enhance(container);
     // 事件绑定
     document.getElementById('btnCheckUpdates')?.addEventListener('click', () => window.DesktopUpdates?.check());
     document.getElementById('setAutoNext')?.addEventListener('change', (e) => {

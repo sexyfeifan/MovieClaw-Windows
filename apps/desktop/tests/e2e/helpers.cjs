@@ -78,6 +78,11 @@ async function openDesktop(page, request, options = {}) {
           return { active: true, smtcAvailable: true, sleepInhibited: !args.update.paused, sequence: args.update.sequence };
         }
         if (command === 'end_native_playback') { if (f.platform?.sequence === args.sequence) f.platform.active = false; return; }
+        if (command === 'set_native_picture_in_picture') {
+          if (f.platform?.sequence !== args.sequence) throw new Error('stale playback');
+          f.platform.pictureInPicture = args.enabled;
+          return {...f.platform};
+        }
         if (command === 'get_main_window_hwnd') return 1;
         if (command === 'launch_embedded_player') { f.running = true; f.instanceId = args.instanceId; return; }
         if (command === 'stop_embedded_player') {

@@ -32,7 +32,7 @@ The pinned mpv imports `vulkan-1.dll` at process startup, including CPU playback
 
 Desktop CI runs on Windows MSVC for branch pushes and PRs. It uploads verified installer/portable packages, `SHA256SUMS.txt`, and `release-manifest.json`. The manifest records the exact revision, runtime sources/licenses, package hashes and actual Authenticode status. An unsigned build is reported as unsigned.
 
-Stable releases only run for `desktop-vX.Y.Z` tags matching Cargo. Publication additionally requires repository variables `DESKTOP_ACCEPTANCE_RUN_ID` (successful Desktop CI for the exact commit) and `DESKTOP_HARDWARE_ACCEPTANCE_JSON` (the completed `release/acceptance.example.json` contract). The gate checks exact physically tested artifact hashes, real valid application/installer signatures, and Windows/macOS hardware acceptance. It reuses those tested artifacts instead of substituting a rebuild. Without physical evidence or a signing certificate, CI artifacts remain available and stable publication is blocked. Existing server release workflows are separate.
+Desktop tags must match `desktop-vX.Y.Z` and Cargo. The default tag release requires `DESKTOP_ACCEPTANCE_RUN_ID` (successful Desktop CI for the exact commit) and `DESKTOP_HARDWARE_ACCEPTANCE_JSON` (the completed `release/acceptance.example.json` contract), including valid signatures and physical Windows/macOS acceptance. Maintainers may explicitly dispatch `Desktop Release` with `validation_policy=ci-verified` to publish the exact successful CI packages with disclosed limitations in `docs/changelog/desktop-vX.Y.Z.md`. This path verifies hashes, rejects invalid signatures, and does not claim complete hardware acceptance. Both paths reuse the identified CI artifacts rather than a replacement build. Existing server release workflows are separate.
 
 Browser E2E covers the real DOM and HTTP contracts with a native bridge fixture. Native smoke covers the packaged executable, WebView2 process startup, bundled mpv decoding and IPC. HDR/Dolby output, embedded video geometry, GPU hardware decode, multi-monitor DPI and picture quality still require a Windows machine with the relevant hardware.
 
@@ -55,6 +55,20 @@ Window close and tray Quit share a shutdown hook: the player has up to 1.5 secon
 Updates accept only formal GitHub releases in this repository and exact Windows x64 assets. Downloads enforce HTTPS delivery hosts, declared size, the release SHA-256 list and GitHub asset digest; cancellation drops the transfer and deletes partial files. Installation rechecks cached bytes under a file lock and verifies Authenticode. Invalid signatures are rejected; unsigned installers require explicit user confirmation. Versions without a hash list use the release-page manual path. Portable ZIPs are shown in Explorer for manual replacement after closing the application.
 
 Keep a previous verified installer/portable archive and its SHA-256 list for rollback. Close the application before replacing binaries; preserve the current user's data/vault and avoid running different versions concurrently. Current packaging smoke covers fresh install/start/close/uninstall; it does not claim a production upgrade/rollback was exercised against every historical version.
+
+For the 1.0.0 cleanup, previous release binaries are intentionally removed after successful publication; source tags and Git history remain available for rebuilding. The current installer, portable archive, hashes and manifest are retained together.
+
+## Repository layout and NAS compatibility
+
+- `ui/desktop/`: embedded pages, player controls, icons and styles.
+- `src-tauri/src/`: Windows window/player integration, native credentials, media streaming and verified updates.
+- `src-tauri/{capabilities,permissions}/`: allowed native bridge commands.
+- `tests/`: JavaScript contracts and browser E2E; Rust tests live beside native code.
+- `scripts/`: reproducible build, package, smoke, compatibility and performance tools.
+- `release/`: physical acceptance template; it is not a completed acceptance report.
+- `dist/`, `src-tauri/target/`, `test-results/`: ignored generated files, outside the source tree on GitHub.
+
+QR login requires a server advertising Windows pairing; see [NAS configuration](../../docs/deployment/windows-pairing.md). Search excludes homepage-hidden/adult libraries. Fullscreen supports original ratio or cropped fill, and the native player supports a compact always-on-top window restored with Esc.
 
 ## Upstream maintenance
 

@@ -1,6 +1,23 @@
 const { test, expect } = require('@playwright/test');
 const { openDesktop, browseLibrary, state } = require('./helpers.cjs');
 
+test('native picture in picture has compact controls and restores on Escape and stop', async ({page,request}) => {
+  await nativeTracks(page,request);
+  await expect.poll(()=>page.evaluate(()=>window.MovieClawPlatform.status?.active)).toBe(true);
+  await page.locator('#btnPip').click();
+  await expect(page.locator('#playerView')).toHaveClass(/native-pip/);
+  await page.setViewportSize({width:480,height:270});
+  await expect(page.locator('#btnSettings')).toBeHidden();
+  await expect(page.locator('#btnPlayPause')).toBeVisible();
+  await expect(page.locator('#btnPip')).toHaveAttribute('aria-pressed','true');
+  const rect=await page.locator('.player-transport').boundingBox();
+  expect(rect.x).toBeGreaterThanOrEqual(0); expect(rect.x+rect.width).toBeLessThanOrEqual(480);
+  await page.keyboard.press('Escape'); await expect(page.locator('#playerView')).not.toHaveClass(/native-pip/);
+  await page.locator('#btnPip').click(); await expect(page.locator('#playerView')).toHaveClass(/native-pip/);
+  await page.locator('#playerBack').click(); await expect(page.locator('#playerView')).toBeHidden();
+  await expect.poll(()=>page.evaluate(()=>window.__fixture.platform?.active)).toBe(false);
+});
+
 async function nativeTracks(page, request) {
   await page.route('**/api/v1/playback/sessions', async route => {
     const response = await route.fetch(); const body = await response.json();
@@ -36,6 +53,52 @@ async function nativeTracks(page, request) {
   await expect.poll(() => page.evaluate(() => Player._reportedStart)).toBe(true);
 }
 async function property(page, key) { return page.evaluate(key => window.__fixture.props[key], key); }
+
+test('native fullscreen frame menu fills, restores the original aspect and remembers its choice', async ({ page, request }) => {
+  await nativeTracks(page, request);
+  await expect(page.locator('#btnPip')).toBeVisible();
+  await page.locator('#btnSettings').click();
+  await page.locator('[data-tab="frame"]').click();
+  const fill = page.getByRole('button', { name: /^填满屏幕/ });
+  const original = page.getByRole('button', { name: /^保持原比例/ });
+  await fill.click();
+  await expect(fill).toHaveAttribute('aria-pressed', 'true');
+  await expect.poll(() => property(page, 'panscan')).toBe(0);
+  await page.locator('#btnFullscreen').click();
+  await expect.poll(() => property(page, 'panscan')).toBe(1);
+  await page.locator('#btnSettings').click(); await page.locator('[data-tab="frame"]').click();
+  await original.click();
+  await expect.poll(() => property(page, 'panscan')).toBe(0);
+  await fill.click();
+  await expect.poll(() => property(page, 'panscan')).toBe(1);
+  // Engine reconfiguration must also apply the saved fullscreen mode.
+  await page.evaluate(async () => { window.__fixture.props.panscan = 0; await Player.initializeTracks(); });
+  await expect.poll(() => property(page, 'panscan')).toBe(1);
+  await page.locator('#btnFullscreen').click();
+  await expect.poll(() => property(page, 'panscan')).toBe(0);
+  expect(await page.evaluate(() => localStorage.getItem('mc_fullscreenFit'))).toBe('cover');
+  await page.locator('#playerBack').click();
+  await page.reload();
+  await expect.poll(() => page.evaluate(() => Player.fullscreenFit)).toBe('cover');
+});
+
+test('HTML5 fullscreen uses the same frame menu and restores contain on exit', async ({ page, request }) => {
+  await openDesktop(page, request, { native: false }); await browseLibrary(page);
+  await page.locator('#posterGrid .poster-card[data-item-id="1"]').click();
+  await page.locator('#btnPlay').click();
+  await page.locator('#btnSettings').click(); await page.locator('[data-tab="frame"]').click();
+  await expect(page.locator('[data-tab="audio"]')).toBeHidden();
+  await page.getByRole('button', { name: /^填满屏幕/ }).click();
+  await expect(page.locator('#playerVideo')).toHaveCSS('object-fit', 'contain');
+  await page.locator('#btnFullscreen').click();
+  await expect(page.locator('#playerVideo')).toHaveCSS('object-fit', 'cover');
+  await page.locator('#btnSettings').click(); await page.locator('[data-tab="frame"]').click();
+  await page.getByRole('button', { name: /^保持原比例/ }).click();
+  await expect(page.locator('#playerVideo')).toHaveCSS('object-fit', 'contain');
+  await page.getByRole('button', { name: /^填满屏幕/ }).click();
+  await page.locator('#btnFullscreen').click();
+  await expect(page.locator('#playerVideo')).toHaveCSS('object-fit', 'contain');
+});
 
 test('native track menus control actual mpv IDs, subtitle off, delay and speed', async ({ page, request }) => {
   await nativeTracks(page, request);
@@ -96,6 +159,36 @@ test('native input fullscreen bypasses browser activation and Escape exits befor
   const changes = await page.evaluate(() => window.__fixture.windows.filter(w => w?.name === 'setFullscreen').map(w => w.value));
   expect(changes).toEqual([true, false, true, false]);
   await expect.poll(async () => (await state(request)).stopped).toEqual(['session-1']);
+});
+
+test('native fullscreen video fills its viewport while only visible controls keep their web regions', async ({ page, request }) => {
+  await nativeTracks(page, request);
+  const geometry = () => page.evaluate(() => {
+    Player.syncEmbeddedPlayerRect();
+    const rect = document.querySelector('.player-video-wrap').getBoundingClientRect();
+    const scale = devicePixelRatio;
+    return { expected: { x: Math.round(rect.x * scale), y: Math.round(rect.y * scale),
+      width: Math.round(rect.width * scale), height: Math.round(rect.height * scale) },
+      actual: window.__fixture.calls.filter(c => c.command === 'resize_embedded_player').at(-1)?.args };
+  });
+  await expect.poll(async () => (await geometry()).actual?.height).toBe(800);
+  let boxes = await geometry();
+  expect(boxes.actual).toMatchObject(boxes.expected);
+  expect(boxes.actual.keepRects.some(rect => rect[2] < boxes.actual.width && rect[3] === 100)).toBe(true);
+  await page.locator('#btnFullscreen').click();
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.evaluate(() => Player.hideControls());
+  await expect.poll(async () => (await geometry()).actual?.keepRects).toEqual([]);
+  boxes = await geometry();
+  expect(boxes.actual).toMatchObject({ x: 0, y: 0, width: 1920, height: 1080 });
+  await page.evaluate(() => Player.showControls());
+  await expect.poll(async () => (await geometry()).actual?.keepRects.length).toBe(2);
+  expect((await geometry()).actual).toMatchObject(boxes.expected);
+  await page.evaluate(() => Player.togglePlay());
+  await expect(page.getByRole('button',{name:'播放或暂停',exact:true})).toBeVisible();
+  await expect.poll(async () => (await geometry()).actual?.keepRadii).toContain(36);
+  await page.locator('#playerBack').click();
+  await expect(page.locator('#playerView')).toBeHidden();
 });
 
 test('probed DVD bitmap subtitles stay disabled and explain the actual limitation', async ({ page, request }) => {

@@ -3,6 +3,18 @@ name: Desktop Release
 on:
   push:
     tags: ['desktop-v*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Desktop tag matching the selected source version
+        required: true
+        type: string
+      validation_policy:
+        description: Publish CI-verified packages with disclosed limitations, or require full signed hardware acceptance
+        required: true
+        default: signed-hardware
+        type: choice
+        options: [signed-hardware, ci-verified]
 
 permissions:
   contents: read
@@ -14,7 +26,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Require tag to match Cargo version
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           python3 - <<'PY'
           import os, pathlib, tomllib
@@ -22,10 +34,12 @@ jobs:
           assert os.environ['RELEASE_TAG'] == f'desktop-v{version}', 'Desktop release tag must match Cargo.toml'
           PY
   verify:
+    if: github.event_name == 'push'
     needs: version
     uses: ./.github/workflows/desktop-ci.yml
   publish:
-    needs: verify
+    needs: [version, verify]
+    if: always() && needs.version.result == 'success' && (needs.verify.result == 'success' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -55,17 +69,24 @@ jobs:
           github-token: ${{ github.token }}
           run-id: ${{ vars.DESKTOP_ACCEPTANCE_RUN_ID }}
       - name: Physical acceptance and signature gate
+        if: inputs.validation_policy != 'ci-verified'
         env:
           DESKTOP_HARDWARE_ACCEPTANCE_JSON: ${{ vars.DESKTOP_HARDWARE_ACCEPTANCE_JSON }}
         run: |
           VERSION=$(python3 -c "import pathlib,tomllib; print(tomllib.loads(pathlib.Path('apps/desktop/src-tauri/Cargo.toml').read_text())['package']['version'])")
           python3 apps/desktop/scripts/check-release-evidence.py --directory dist --revision "$GITHUB_SHA" --version "$VERSION"
+      - name: CI packages and disclosed limitations gate
+        if: inputs.validation_policy == 'ci-verified'
+        run: |
+          VERSION=$(python3 -c "import pathlib,tomllib; print(tomllib.loads(pathlib.Path('apps/desktop/src-tauri/Cargo.toml').read_text())['package']['version'])")
+          python3 apps/desktop/scripts/check-release-evidence.py --directory dist --revision "$GITHUB_SHA" --version "$VERSION" --policy ci-verified --notes "docs/changelog/desktop-v$VERSION.md"
       - name: Verify and publish the tested packages
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           cd dist
           sha256sum --check SHA256SUMS.txt
-          gh release create "$RELEASE_TAG" MovieClaw-Desktop-*-Setup-x64.exe MovieClaw-Desktop-*-portable-x64.zip SHA256SUMS.txt release-manifest.json --verify-tag --title "MovieClaw Desktop $RELEASE_TAG" --generate-notes
+          VERSION=$(python3 -c "import json; print(json.load(open('release-manifest.json', encoding='utf-8-sig'))['version'])")
+          gh release create "$RELEASE_TAG" MovieClaw-Desktop-*-Setup-x64.exe MovieClaw-Desktop-*-portable-x64.zip SHA256SUMS.txt release-manifest.json --target "$GITHUB_SHA" --latest --title "MovieClaw Windows $VERSION" --notes-file "../docs/changelog/desktop-v$VERSION.md"
