@@ -23,6 +23,7 @@ static START: Mutex<()> = Mutex::new(());
 static CONNECTIONS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(8)));
 static CLIENT: LazyLock<Client> = LazyLock::new(|| {
     Client::builder()
+        .user_agent(concat!("MovieClaw-Windows/", env!("CARGO_PKG_VERSION"), " (Windows)"))
         .connect_timeout(Duration::from_secs(5))
         .read_timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())

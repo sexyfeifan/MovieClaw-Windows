@@ -153,6 +153,7 @@ test('third-season resume and mpv close report the final file position then rele
   await expect.poll(async () => (await state(request)).requests.some(r => r.path === '/playback/progress' && r.body.event === 'start')).toBe(true);
   const start = (await state(request)).requests.find(r => r.path === '/playback/sessions').body;
   expect(start.season_number).toBe(3); expect(start.episode_number).toBe(2);
+  expect(start.device_id).toMatch(/^desktop-/);
   expect(start.capability.universal).toBe(true);
   await expect(page.locator('#playerTime')).toHaveText('5:21');
   await page.locator('#playerBack').click();
@@ -160,6 +161,7 @@ test('third-season resume and mpv close report the final file position then rele
   await expect.poll(async () => (await state(request)).stopped).toEqual(['session-1']);
   const stop = (await state(request)).requests.find(r => r.path === '/playback/progress' && r.body.event === 'stop');
   expect(stop.body).toMatchObject({ position_ms: 321000, season_number: 3, episode_number: 2 });
+  expect(stop.body.device_id).toBe(start.device_id);
   expect(await page.evaluate(() => window.__fixture.running)).toBe(false);
 });
 
