@@ -34,6 +34,9 @@ test('about exposes local build identity, attribution and selectable inert licen
   await dialog.locator('summary').click(); await expect(dialog.locator('pre')).toContainText('GNU GENERAL PUBLIC LICENSE');
   await expect(dialog.locator('pre img')).toHaveCount(0);
   await expect(dialog).toHaveCSS('user-select','text');
+  const bounds=await dialog.boundingBox(), viewport=page.viewportSize();
+  expect(Math.abs(bounds.x+bounds.width/2-viewport.width/2)).toBeLessThan(2);
+  expect(Math.abs(bounds.y+bounds.height/2-viewport.height/2)).toBeLessThan(2);
   await page.keyboard.press('Escape'); await expect(dialog).toHaveCount(0);
   await page.locator('#accountButton').click(); await page.getByRole('button',{name:'关于 MovieClaw',exact:true}).click();
   await expect(dialog).toBeVisible(); await page.getByRole('button',{name:'关闭关于',exact:true}).click();
