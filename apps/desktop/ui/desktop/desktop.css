@@ -888,7 +888,7 @@ img:not([loading]) {
 .detail-track-card small { color: var(--text-tertiary); line-height: 1.6; }
 .subtitle-job-summary, .generated-subtitles { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .subtitle-job-summary span { color: var(--text-secondary); font-size: 13px; }
-.subtitle-dialog { width: min(640px,calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; padding: 24px; border: 1px solid var(--glass-border); border-radius: 20px; background: #1d2027; color: var(--text); }
+.subtitle-dialog { margin: auto; width: min(640px,calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; padding: 24px; border: 1px solid var(--glass-border); border-radius: 20px; background: #1d2027; color: var(--text); }
 .subtitle-dialog::backdrop { background: rgba(0,0,0,.65); }
 .subtitle-dialog-header, .subtitle-dialog-actions { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
 .subtitle-dialog-header h2 { margin: 0; font-size: 22px; }

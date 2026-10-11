@@ -30,6 +30,9 @@ test('generation prechecks bilingual options, reports real progress and refreshe
   await detail(page,request,{jobStates:['running','succeeded']});
   await page.locator('#subtitleGenerate').click();
   await expect(page.locator('#subtitleStart')).toBeEnabled();
+  const modal = await page.locator('#subtitleDialog').boundingBox();
+  expect(Math.abs(modal.x + modal.width/2 - page.viewportSize().width/2)).toBeLessThan(2);
+  expect(Math.abs(modal.y + modal.height/2 - page.viewportSize().height/2)).toBeLessThan(2);
   await choose(page,'subtitleSecondary','双语 · 英语');
   await expect(page.locator('#subtitleStart')).toBeEnabled();
   await expect(page.locator('.subtitle-preview')).toContainText('2,000 tokens');
