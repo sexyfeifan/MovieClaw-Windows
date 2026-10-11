@@ -2,7 +2,7 @@
 
 Windows x64 client with a Tauri/WebView2 interface and bundled mpv playback. The UI is embedded in the executable. The server remains a separate MovieClaw deployment.
 
-Implementation coverage, measured CI evidence and the remaining physical Windows acceptance checklist are recorded in [the full parity report](../../docs/design/windows-full-parity-results-2026-10-11.md).
+Current capabilities and remaining hardware checks are recorded in [the Windows 1.0.0 comparison](../../docs/design/windows-1.0.0-capabilities.md).
 
 ## Build and test
 
@@ -26,7 +26,7 @@ Tests use isolated temporary data. `MOVIECLAW_DATA_DIR` overrides the normal `%A
 .\scripts\package.ps1
 ```
 
-`package.ps1` is used locally and by both GitHub Actions workflows. It verifies and extracts the exact mpv archive recorded in `scripts/mpv-manifest.json`, includes its DLLs, source metadata and license notices, invokes the pinned Tauri CLI for an NSIS installer, and assembles the portable ZIP from the same executable/runtime. Required files, checksums, process startup and mpv IPC are checked before artifacts are accepted. CI also checks silent installation, installed-app startup and uninstallation; run `package.ps1 -InstallSmoke` to opt into that locally. `Cargo.toml` is the only application version source. The installer downloads Microsoft WebView2 Evergreen Runtime if it is missing; portable users must install the runtime themselves.
+`package.ps1` verifies the pinned mpv runtime, bundles its dependencies and licenses, and produces an NSIS installer and portable ZIP. It checks DLL imports, checksums, process startup and mpv IPC. CI also checks silent installation, installed-app startup and uninstallation; use `package.ps1 -InstallSmoke` locally. `Cargo.toml` is the application version source. The installer embeds the full Microsoft-signed offline WebView2 runtime and installs it when missing; portable users need WebView2 already installed. The application statically links the Visual C++ runtime.
 
 The pinned mpv imports `vulkan-1.dll` at process startup, including CPU playback and `--version`. Packaging includes the x64 Vulkan loader from the official LunarG runtime components ZIP with its published archive hash, binary hash, MIT notices and Apache license; it does not rely on a GPU driver having installed the loader globally. No Windows system DLLs are copied into the package.
 

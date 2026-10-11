@@ -5,6 +5,9 @@ test('native playback shows real read speed and optional diagnostics through but
   await nativeTracks(page,request);
   await page.evaluate(()=>{window.__fixture.props['cache-speed']=4*1024*1024;window.__fixture.props['hwdec-current']='d3d11va';window.__fixture.props['demuxer-cache-duration']=42;window.__fixture.props.ipc_connected=true;});
   await expect(page.locator('#playerSpeedBadge')).toHaveText('↓ 4.0 MB/s');
+  const badge=await page.locator('#playerSpeedBadge').boundingBox();
+  const header=await page.locator('#playerTopbar').boundingBox();
+  expect(badge.y).toBeGreaterThanOrEqual(header.y+header.height);
   await expect(page.locator('#playerInfoPanel')).toBeHidden();
   await page.locator('#btnPlayerInfo').click();
   await expect(page.locator('#btnPlayerInfo')).toHaveAttribute('aria-expanded','true');
