@@ -34,6 +34,9 @@
 .friends-watch progress::-webkit-progress-value {background:#9faaff}
 .friends-watch-actions {display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
 .friends-watch-actions button {flex:1;white-space:nowrap;font-size:12px;padding:8px 10px}
+.friends-watch-actions .btn-primary {background:#548cff;color:#fff;border:1px solid #80abff;border-radius:10px;font:inherit;font-size:12px;font-weight:600;min-height:38px}
+.friends-watch-actions .btn-primary:hover {background:#6799ff}
+.friends-watch-actions button:disabled {opacity:.45;cursor:default}
 .friends-close {border:none;background:transparent;color:inherit;font-size:20px;padding:2px 6px}
 .friends-settings {grid-column:1 / -1}
 .friends-settings .settings-row > span {min-width:0}

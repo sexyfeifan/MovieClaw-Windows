@@ -224,6 +224,38 @@ def test_defaults_and_anonymous_denied(server):
         assert client.get(BASE + path).status_code == 401
 
 
+def test_same_version_reinstall_preserves_account_privacy(server):
+    client, ids, use = server
+    share(client, (1,))
+    start(ids, 11)
+    use("admin")
+    duplicate = client.post(
+        "/api/v1/app/plugins/packages",
+        files={"file": ("watch-presence.mcplugin", package(), "application/zip")},
+    )
+    assert duplicate.status_code == 400
+    removed = client.delete(
+        "/api/v1/app/plugins/packages/watch-presence", params={"purge_data": False}
+    )
+    assert removed.status_code == 200, removed.text
+    uploaded = client.post(
+        "/api/v1/app/plugins/packages",
+        files={"file": ("watch-presence.mcplugin", package(), "application/zip")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    approved = client.post(
+        "/api/v1/app/plugins/packages/watch-presence/approve",
+        json={"version": "1.0.0", "operations": [], "allow_inline": True},
+    )
+    assert approved.status_code == 200 and approved.json()["data"]["status"] == "active"
+    use("alice")
+    prefs = client.get(BASE + "/preferences").json()["data"]
+    assert prefs["share_enabled"] is True and prefs["library_ids"] == [1]
+    use("bob")
+    members = client.get(BASE + "/members").json()["data"]["members"]
+    assert len(members) == 1 and members[0]["member_id"] == ids["alice"]
+
+
 def test_private_settings_page_and_assets_use_host_login(server):
     client, ids, use = server
     for path, content_type in (
