@@ -698,16 +698,19 @@ fn signature(
     {
         use std::os::windows::process::CommandExt;
         let executable = system_directory()?.join("WindowsPowerShell/v1.0/powershell.exe");
-        // Windows PowerShell 5.1's Console.OutputEncoding setter calls
-        // SetConsoleOutputCP, which fails for CREATE_NO_WINDOW. Write UTF-8
-        // directly to the redirected stdout stream, without a console code page.
+        // A child started through Rust inherits PowerShell 7's module paths.
+        // Windows PowerShell 5.1 cannot load those Security module versions.
+        // Select its system modules and import Security by its absolute path.
+        // Write JSON directly as UTF-8, independently of console code pages.
         let script = format!(
             "{POWERSHELL_JSON_OUTPUT}\n{}",
             r#"
 $ErrorActionPreference='Stop';
-$stage='authenticode';
+$stage='import-security';
 try {
-    $s=Get-AuthenticodeSignature -LiteralPath $env:MOVIECLAW_UPDATE_FILE;
+    Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop;
+    $stage='authenticode';
+    $s=Microsoft.PowerShell.Security\Get-AuthenticodeSignature -LiteralPath $env:MOVIECLAW_UPDATE_FILE;
     $signer=if ($s.SignerCertificate) { $s.SignerCertificate.Subject } else { $null };
     $stage='serialize';
     Write-MovieClawJson @{status=$s.Status.ToString();signer=$signer};
@@ -727,6 +730,10 @@ try {
                 "-Command",
                 &script,
             ])
+            .env(
+                "PSModulePath",
+                system_directory()?.join("WindowsPowerShell/v1.0/Modules"),
+            )
             .env("MOVIECLAW_UPDATE_FILE", path)
             .creation_flags(0x08000000)
             .stdout(std::process::Stdio::piped())
