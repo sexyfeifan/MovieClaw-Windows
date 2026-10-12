@@ -291,7 +291,11 @@ class Presence:
             live = await self.live(db, viewer, owners)
             visible = []
             for owner, info in owners.items():
-                if info["is_self"] and not live[owner] and not await self.history_rows(db, viewer, info):
+                if (
+                    info["is_self"]
+                    and not live[owner]
+                    and not await self.history_rows(db, viewer, info)
+                ):
                     continue
                 visible.append(
                     {
