@@ -5,7 +5,7 @@ fn main() {
     use std::process::Command;
     println!("cargo:rerun-if-env-changed=MOVIECLAW_RELEASE_REPOSITORY");
     let repository = std::env::var("MOVIECLAW_RELEASE_REPOSITORY")
-        .unwrap_or_else(|_| "movieclaw/MovieClaw".into());
+        .unwrap_or_else(|_| "sexyfeifan/MovieClaw-Windows".into());
     assert!(release_repository::valid_repository(&repository), "MOVIECLAW_RELEASE_REPOSITORY must be a GitHub owner/repository");
     println!("cargo:rustc-env=MOVIECLAW_RELEASE_REPOSITORY={repository}");
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");

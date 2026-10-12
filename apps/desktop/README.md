@@ -1,5 +1,7 @@
 # MovieClaw Desktop for Windows
 
+This distribution's development branch is `feat/windows-next`, based on current upstream `main`. Its default update repository is `sexyfeifan/MovieClaw-Windows`; `MOVIECLAW_RELEASE_REPOSITORY` can still explicitly override the channel. The sidebar omits Collections while retaining collection rows and navigation within Home. Client and plugin versions remain 1.0.3 and 1.0.0.
+
 A Windows x64 client built with Tauri, Rust and WebView2, with bundled mpv playback. It connects to a separately deployed MovieClaw server. The interface is embedded in the executable; the desktop application has an independent version (currently 1.0.3).
 
 ## Features
