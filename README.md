@@ -4,13 +4,15 @@ MovieClaw 的 Windows 桌面客户端。连接自己的 MovieClaw 服务器，�
 
 ## 安装
 
-1. 打开 [下载页面](https://github.com/sexyfeifan/MovieClaw-Windows/releases/latest)，下载 `MovieClaw-Desktop-1.0.3-Setup-x64.exe`。
-2. 运行安装包，启动 MovieClaw。
+1. 打开 [下载页面](https://github.com/sexyfeifan/MovieClaw-Windows/releases/latest)，下载标有构建号的安装版 ZIP，当前为 `1.0.3(61.1)`。
+2. 解压后运行 `MovieClaw-Desktop-1.0.3(61.1)-Setup-x64.exe`，启动 MovieClaw。
 3. 输入服务器地址并登录，例如 `http://NAS地址:3000`。
 
 支持 Windows 10/11 x64。安装包包含 mpv 播放器及 WebView2 离线安装组件，无需安装 Python、Node.js、Rust、FFmpeg 或额外解码器。便携版包含播放器，要求系统已有 WebView2。
 
 ## 使用
+
+同版本安装包用括号构建号区分。GitHub 保留不带括号的兼容 EXE，供软件内自动更新使用；两者安装程序内容一致。
 
 - 设置中可分别开启“我的订阅”和“发现”，两个入口默认关闭。发现支持浏览和订阅作品；我的订阅可查看下载、入库进度与追踪日程。
 - 侧栏可收起或展开，搜索支持 `Ctrl+F`。

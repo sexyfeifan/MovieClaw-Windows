@@ -1,10 +1,11 @@
 <!-- desktop-release-policy: ci-verified -->
 
-# MovieClaw Windows 1.0.3
+# MovieClaw Windows 1.0.3(61.1)
 
 连接自己的 MovieClaw 服务器，在 Windows 上浏览媒体库、播放电影与剧集。
 
-- 安装：下载 `MovieClaw-Desktop-1.0.3-Setup-x64.exe`，安装后输入服务器地址并登录。
+- 安装：下载标有构建号的安装版 ZIP，解压后运行 `MovieClaw-Desktop-1.0.3(61.1)-Setup-x64.exe`，安装后输入服务器地址并登录。
+- 软件内更新使用兼容 EXE，与带构建号的安装程序内容一致。
 - 正在观看：从主界面侧栏或播放器左上角查看自己的设备与已授权好友，查看影片、进度及最近观看历史，选择从头播放或跟上进度。同账号当前播放按设备区分，历史按影片或单集合并。
 - 隐私：好友入口和观看共享默认关闭。各成员可选择允许共享的媒体库；未选或新建的库默认保密。
 - 自己的设备无需开启公开共享即可由自己查看。Web / Mac / 手机用户可在同一服务器登录后打开 `/api/v1/plugins/watch-presence/settings` 授权共享。

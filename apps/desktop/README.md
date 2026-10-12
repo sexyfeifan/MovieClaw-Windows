@@ -27,7 +27,7 @@ Tests use isolated temporary data. `MOVIECLAW_DATA_DIR` overrides the normal `%A
 ## Packaging
 
 ```powershell
-.\scripts\package.ps1
+.\scripts\package.ps1 -BuildNumber 61.1
 ```
 
 `package.ps1` verifies the pinned mpv runtime, bundles its dependencies and licenses, and produces an NSIS installer and portable ZIP. It checks DLL imports, checksums, process startup and mpv IPC. CI also checks silent installation, installed-app startup and uninstallation; use `package.ps1 -InstallSmoke` locally. `Cargo.toml` is the application version source. The installer embeds the full Microsoft-signed offline WebView2 runtime and installs it when missing; portable users need WebView2 already installed. The application statically links the Visual C++ runtime.
@@ -53,6 +53,8 @@ Server URL, account identity and generation are captured/committed atomically. C
 Native and browser media use revocable loopback HTTP capabilities bound to server base URL/account/generation, with incremental bytes, Range/206 and conditional headers. Cookie/Bearer secrets never appear in the local URL; external redirects receive no configured-server credential. Active requests or playback heartbeats renew idle leases, while revocation cannot be undone. Expired registry entries cancel their in-flight transfers before removal. LAN discovery uses UDP 7359 and confirms MovieClaw health before offering a server.
 
 Window close and tray Quit share a shutdown hook: the player has up to 1.5 seconds to flush progress and release sessions, after which Rust retires native authentication, cancels updates and gives verifier processes up to 750 ms to terminate before stopping the player and exiting. Changing servers cancels old network requests before the new context is used.
+
+Build numbers use the Desktop CI run number and attempt (`run_number.run_attempt`); CI supplies this automatically. GitHub sanitizes parentheses in resource filenames. The build-labeled installer ZIP preserves a filename such as `MovieClaw-Desktop-1.0.3(61.1)-Setup-x64.exe` inside, while GitHub resource labels show the same build number. Legacy installer/portable filenames and checksum entries remain available for installed clients' verified updates. `release-manifest.json` records `buildNumber` and the exact derived artifacts; their installer bytes must match the tested original. Use `label-packages.py --directory dist --build-number 61.1` to label an existing verified build without recompiling it.
 
 ## Updates and rollback
 
