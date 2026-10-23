@@ -115,7 +115,7 @@ fn error(code: &str, message: &str) -> String {
     json!({"code":code,"message":message}).to_string()
 }
 pub(super) fn valid_tag(tag: &str) -> bool {
-    let Some(version) = tag.strip_prefix(super::TAG_PREFIX) else {
+    let Some(version) = super::release_version(tag) else {
         return false;
     };
     let parts: Vec<_> = version.split('.').collect();
@@ -795,12 +795,12 @@ mod tests {
     }
     #[test]
     fn release_tags_and_delivery_urls_are_strict() {
-        for v in ["windows-v0.2.112", "windows-v1.0.0"] {
+        for v in ["windows-v0.2.112", "windows-v1.0.0", "desktop-v1.0.3", "desktop-v1.0.4"] {
             assert!(valid_tag(v));
         }
         for v in [
             "v0.2.112",
-            "desktop-v1.0.0",
+            "desktop-test-v1.1.0-rc.1",
             "android-v0.3.1",
             "windows-v0.2.112-beta",
             "../tag",

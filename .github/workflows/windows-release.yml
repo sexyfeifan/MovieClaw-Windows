@@ -115,6 +115,8 @@ jobs:
           gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber \
             "dist/MovieClaw-Windows-$version-Setup-x64.exe" \
             "dist/MovieClaw-Windows-$version-portable-x64.zip" \
+            "dist/MovieClaw-Desktop-$version-Setup-x64.exe" \
+            "dist/MovieClaw-Desktop-$version-portable-x64.zip" \
             "${labeled[@]}" dist/SHA256SUMS.txt dist/release-manifest.json dist/downloads.json
           bash scripts/publish-release-info.sh "$RELEASE_TAG"
           gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false

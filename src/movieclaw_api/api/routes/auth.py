@@ -291,10 +291,7 @@ def _find_account(accounts: list[SavedAccount], username: str) -> SavedAccount |
 )
 async def bootstrap_status() -> ApiResponse[BootstrapStatus]:
     """公开接口：仅返回布尔状态，供前端决定进 /setup 还是 /login。"""
-    return ok(BootstrapStatus(
-        initialized=await auth_service.is_admin_initialized(),
-        native_device_kinds=list(login_devices.APP_KINDS),
-    ))
+    return ok(BootstrapStatus(initialized=await auth_service.is_admin_initialized()))
 
 
 @router.post(

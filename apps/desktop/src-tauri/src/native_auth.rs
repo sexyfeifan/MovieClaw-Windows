@@ -590,7 +590,7 @@ async fn status(context: &Context, initialized: bool, supports: bool) -> Result<
         };
         ensure_current(context)?;
         return Ok(
-            json!({"mode":"cookie","initialized":initialized,"session":me,"accounts":list,"pairing_supported":false,"compatibility_reason":"服务器尚未支持 Windows 设备登录，当前使用兼容登录；升级服务器后可使用设备配对。","context_generation":context.generation}),
+            json!({"mode":"cookie","initialized":initialized,"session":me,"accounts":list,"pairing_supported":false,"compatibility_reason":"请使用原服务端的账号密码登录。","context_generation":context.generation}),
         );
     }
     let me = if let Some(identity) = identity(&context.server, None)? {
@@ -841,7 +841,7 @@ pub async fn native_pair_begin() -> Result<Value, String> {
         return Err(fail(
             422,
             "WINDOWS_DEVICE_UNSUPPORTED",
-            "请升级并初始化服务器后使用 Windows 配对登录",
+            "当前服务器不支持 Windows 扫码配对，请使用账号密码登录",
         ));
     }
     let client = client()?;
@@ -1535,7 +1535,7 @@ mod tests {
                 }
                 let (body, extra) = match expected {
                     "/api/v1/auth/bootstrap" => (
-                        r#"{"data":{"initialized":true,"native_device_kinds":["macos"]}}"#,
+                        r#"{"data":{"initialized":true}}"#,
                         "",
                     ),
                     "/api/v1/auth/login" => {
@@ -1557,6 +1557,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(logged_in["mode"], "cookie");
+        assert_eq!(logged_in["pairing_supported"], false);
+        assert!(!logged_in["compatibility_reason"].as_str().unwrap().contains("升级"));
         assert_eq!(logged_in["session"]["username"], "cookie-b");
         assert!(old.cancellation.is_cancelled());
         assert!(identity(&server, None).unwrap().is_none());

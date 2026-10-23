@@ -13,6 +13,14 @@ async function screenshot(page, info, name) {
   await info.attach(name,{path:filename,contentType:'image/png'});
 }
 
+test('sequential desktop releases remain displayable and downloadable after upstream synchronization', async ({page,request}) => {
+  await updates(page,request,{updateLegacyTag:true});
+  await expect(page.locator('.update-versions')).toHaveText('当前 1.0.3 · 最新 1.0.4');
+  await page.locator('#updateDownload').click();
+  await expect(page.locator('#updateInstall')).toBeVisible();
+  expect((await state(request)).updateRequests.find(value=>value.command==='download_update').args).toEqual({version:'desktop-v1.0.4'});
+});
+
 test('startup and tray update events supply a downloadable version through legacy field names', async ({page,request}) => {
   await openDesktop(page,request,{updater:true,updateSameVersion:true});
   await page.evaluate(()=>window.__fixture.emit('update_available',{version:'windows-v1.0.0',current:'1.0.0',message:'发现同版本新构建'}));

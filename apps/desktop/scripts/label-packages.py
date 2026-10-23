@@ -43,8 +43,19 @@ def label_packages(directory, build_number):
     labeled = directory / "labeled"
     labeled.mkdir(exist_ok=True)
     artifacts = []
+    compatibility = []
     for suffix in ["Setup-x64.exe", "portable-x64.zip"]:
         original = f"MovieClaw-Windows-{version}-{suffix}"
+        legacy_name = f"MovieClaw-Desktop-{version}-{suffix}"
+        shutil.copyfile(directory / original, directory / legacy_name)
+        compatibility.append(
+            dict(
+                name=legacy_name,
+                originalName=original,
+                size=originals[original]["size"],
+                sha256=originals[original]["sha256"],
+            )
+        )
         local_name = f"MovieClaw-Windows-{version}({build_number})-{suffix}"
         shutil.copyfile(directory / original, labeled / local_name)
         asset_suffix = "Setup-x64.zip" if suffix.endswith(".exe") else suffix
@@ -68,10 +79,11 @@ def label_packages(directory, build_number):
         )
     manifest["buildNumber"] = build_number
     manifest["buildArtifacts"] = artifacts
+    manifest["compatibilityArtifacts"] = compatibility
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    for item in [*manifest["files"], *artifacts]:
+    for item in [*manifest["files"], *artifacts, *compatibility]:
         sums[item["name"]] = item["sha256"]
     sums_path.write_text(
         "".join(f"{sha}  {name}\n" for name, sha in sums.items()), encoding="utf-8"

@@ -407,10 +407,14 @@ test('an expired QR can be regenerated and cancel retires an in-flight approval 
   await expect(page.locator('#loginForm')).toBeVisible();
 });
 
-test('old servers give a specific QR upgrade explanation while native password compatibility remains usable', async ({ page, request }) => {
+test('original servers allow password login without patches and never start unsupported pairing', async ({ page, request }) => {
   await openDesktop(page,request,{nativeAuth:'cookie',authenticated:false,savedAccounts:[]});
-  await expect(page.locator('#loginPairing')).toHaveCount(0); await page.evaluate(()=>App.renderPairing()); await expect(page.locator('#appNotice')).toContainText('尚不支持 Windows');
+  await expect(page.locator('#loginPairing')).toHaveCount(0);
+  await expect(page.locator('.login-card')).not.toContainText(/升级服务器|补丁|兼容登录/);
+  await page.evaluate(()=>App.renderPairing());
+  await expect(page.locator('#appNotice')).toContainText('原服务端的账号密码');
   await page.locator('#loginUser').fill('fixture'); await page.locator('#loginPass').fill('fixture-password'); await page.locator('#loginBtn').click();
   await expect(page.locator('#heroBanner')).toBeVisible();
   expect((await state(request)).nativeRequests.some(r=>r.command==='native_password_login')).toBe(true);
+  expect((await state(request)).nativeRequests.some(r=>r.command==='native_pair_begin')).toBe(false);
 });

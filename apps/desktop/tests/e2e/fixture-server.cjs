@@ -67,6 +67,7 @@ http.createServer(async (req, res) => {
       state.updateRequests ||= []; state.updateRequests.push({ command, args });
       if (command === 'check_for_updates') {
         if (state.updateCheckFailure) return json(res, { code: 'UPDATE_NETWORK', message: '更新服务暂不可用' }, 503);
+        if (state.updateLegacyTag) return json(res, {has_update:true,current_version:'1.0.3',latest_version:'desktop-v1.0.4',message:'发现新版本 1.0.4',release_notes:'原服务端直接登录，无需补丁。'});
         if (state.updateCurrent) return json(res, {has_update:false,current_version:'1.0.0',latest_version:'windows-v1.0.0',message:'已是最新版本 (1.0.0)',release_notes:state.updateNotes || ''});
         if (state.updateSameVersion) return json(res, {has_update:true,current_version:'1.0.0',latest_version:'windows-v1.0.0',message:'发现 1.0.0 的新构建 bbbbbbbb（当前 aaaaaaaa）',release_notes:'Windows 10/11 x64；安装后输入服务器地址。'});
         return json(res, { has_update: true, current_version: '0.2.111', latest_version: 'windows-v0.2.112',
@@ -105,7 +106,7 @@ http.createServer(async (req, res) => {
       const status = () => ({ mode: state.nativeAuth === 'cookie' ? 'cookie' : 'device', initialized: state.initialized,
         session: state.authenticated ? { username: state.username || 'fixture', role: state.role || 'admin', capabilities: state.capabilities || {} } : null,
         accounts: state.savedAccounts || [{ username: state.username || 'fixture', nickname: '当前账号', active: state.authenticated, authenticated: state.authenticated }],
-        pairing_supported: state.nativeAuth !== 'cookie', compatibility_reason: state.nativeAuth === 'cookie' ? '服务器尚不支持 Windows 设备登录，请升级服务器。' : null, context_generation: 1 });
+        pairing_supported: state.nativeAuth !== 'cookie', compatibility_reason: state.nativeAuth === 'cookie' ? '请使用原服务端的账号密码登录。' : null, context_generation: 1 });
       if (command === 'native_auth_status') return json(res, status());
       if (command === 'native_password_login') {
         if (state.loginDelay) await new Promise(resolve => setTimeout(resolve, state.loginDelay));

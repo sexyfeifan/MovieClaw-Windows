@@ -31,7 +31,7 @@ jobs:
           python-version: '3.12.9'
       - name: Install server test dependencies
         run: pip install -e '.[dev]'
-      - name: Native Windows login, pairing, addresses and plugin web contracts
+      - name: Original server authentication, addresses and plugin web contracts
         run: python -m pytest tests/api/test_login_devices.py tests/api/test_device_auth.py tests/api/test_server_addresses.py tests/api/test_health.py tests/api/test_plugin_web.py tests/api/test_skip_segments_api.py tests/api/test_member_auth.py -q --timeout=90 --junitxml=server-contracts.xml
       - name: Upload server contract results
         if: always()
@@ -99,6 +99,8 @@ jobs:
             apps/desktop/dist/MovieClaw-Windows-*-Setup-x64.exe
             apps/desktop/dist/MovieClaw-Windows-*-portable-x64.zip
             apps/desktop/dist/MovieClaw-Windows-*-Setup-x64.zip
+            apps/desktop/dist/MovieClaw-Desktop-*-Setup-x64.exe
+            apps/desktop/dist/MovieClaw-Desktop-*-portable-x64.zip
             apps/desktop/dist/SHA256SUMS.txt
             apps/desktop/dist/release-manifest.json
           if-no-files-found: error
