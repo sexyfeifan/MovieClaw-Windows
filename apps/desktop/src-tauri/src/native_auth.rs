@@ -297,7 +297,7 @@ async fn request(
     let base = crate::connect::validate_http_url(&context.server)?;
     let logical = url::Url::parse(&format!("{}/api/v1{path}",context.server)).map_err(|_|"服务器地址无效")?;
     let operation = async {
-    let mut response = crate::server_routes::send(&base,&logical,&method,|wire| {
+    let mut response = crate::server_routes::send(&base,&logical,&method,false,|wire| {
     let mut req = CLIENT
         .request(method.clone(), wire)
         .header("User-Agent", concat!("MovieClaw-Windows/", env!("CARGO_PKG_VERSION"), " (Windows)"))

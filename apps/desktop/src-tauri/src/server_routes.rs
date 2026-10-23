@@ -124,7 +124,7 @@ async fn prove(book: Book, address: Address) -> Option<Url> {
     let value = serde_json::from_slice(&bytes).ok()?;
     verify(&book, &nonce, &value).then_some(base)
 }
-async fn select(base: &Url, force: bool, failed: Option<&Url>) -> Option<Url> {
+async fn select(base: &Url, force: bool, failed: Option<&Url>, require_https: bool) -> Option<Url> {
     let name = namespace(base);
     let gate = PROBE_GATES
         .lock()
@@ -139,15 +139,17 @@ async fn select(base: &Url, force: bool, failed: Option<&Url>) -> Option<Url> {
             v.book == book
                 && v.verified.elapsed() < Duration::from_secs(300)
                 && failed != Some(&v.url)
+                && (!require_https || v.url.scheme() == "https")
         }) {
             return Some(v.url.clone());
         }
     }
     let mut probes = FuturesUnordered::new();
     for address in book.addresses.iter().take(8).filter(|v| {
-        failed.is_none_or(|failed| {
-            failed.as_str().trim_end_matches('/') != v.url.trim_end_matches('/')
-        })
+        (!require_https || v.url.starts_with("https://"))
+            && failed.is_none_or(|failed| {
+                failed.as_str().trim_end_matches('/') != v.url.trim_end_matches('/')
+            })
     }) {
         probes.push(prove(book.clone(), address.clone()));
     }
@@ -205,6 +207,7 @@ pub(crate) async fn send<F>(
     base: &Url,
     logical: &Url,
     method: &Method,
+    require_https: bool,
     mut build: F,
 ) -> Result<Response, String>
 where
@@ -212,7 +215,7 @@ where
 {
     let scoped = crate::connect::url_in_server_scope(base, logical);
     let chosen = if scoped {
-        select(base, false, None).await
+        select(base, false, None, require_https).await
     } else {
         None
     };
@@ -227,7 +230,7 @@ where
                 return Err("服务器连接中断".into());
             }
             let failed = chosen.as_ref().unwrap_or(base);
-            let alternative = select(base, true, Some(failed)).await;
+            let alternative = select(base, true, Some(failed), require_https).await;
             // Never replay a write: the server may already have applied it.
             if !matches!(*method, Method::GET | Method::HEAD) {
                 return Err("网络已切换，请重试本次操作".into());
@@ -276,9 +279,17 @@ pub async fn refresh_server_routes() -> Result<bool, String> {
         std::fs::write(path(), bytes).map_err(|_| "地址簿保存失败")?;
         Ok(())
     })?;
+    let require_https = crate::native_auth::identity(&context.server, None)?.is_none()
+        && crate::api_proxy::cookie_snapshot(&base).requires_https(
+            &Url::parse(&format!(
+                "{}/api/v1/server/addresses",
+                base.as_str().trim_end_matches('/')
+            ))
+            .map_err(|_| "服务器地址无效")?,
+        );
     tokio::select! {
         _=context.cancellation.cancelled()=>Err("服务器或账号已更改".into()),
-        selected=select(&base,true,None)=>Ok(selected.is_some()),
+        selected=select(&base,true,None,require_https)=>Ok(selected.is_some()),
     }
 }
 
@@ -390,7 +401,7 @@ mod tests {
         let base = unavailable();
         BOOKS.lock().unwrap().insert(namespace(&base), book);
         let target = base.join("/api/v1/media?session=fixture").unwrap();
-        let response = send(&base, &target, &Method::GET, |wire| {
+        let response = send(&base, &target, &Method::GET, false, |wire| {
             Ok(PROBES
                 .get(wire)
                 .bearer_auth("fixture-token")
@@ -409,7 +420,7 @@ mod tests {
         assert!(records.lock().unwrap()[1].starts_with("GET /api/v1/media?session=fixture "));
         let (next, next_book, _, next_task) = fixture(true).await;
         BOOKS.lock().unwrap().insert(namespace(&base), next_book);
-        assert_eq!(select(&base, true, None).await, Some(next));
+        assert_eq!(select(&base, true, None, false).await, Some(next));
         assert_eq!(
             canonicalize(&base, &alias.join("/api/v1/late-playlist.m3u8").unwrap()),
             base.join("/api/v1/late-playlist.m3u8").unwrap()
@@ -423,7 +434,7 @@ mod tests {
         let base = unavailable();
         BOOKS.lock().unwrap().insert(namespace(&base), book);
         let target = base.join("/api/v1/auth/me").unwrap();
-        assert!(send(&base, &target, &Method::GET, |wire| Ok(PROBES
+        assert!(send(&base, &target, &Method::GET, false, |wire| Ok(PROBES
             .get(wire)
             .bearer_auth("fixture-token")))
         .await
@@ -440,9 +451,23 @@ mod tests {
         let (_, book, records, task) = fixture(true).await;
         let base = unavailable();
         BOOKS.lock().unwrap().insert(namespace(&base), book);
-        let (a, b) = tokio::join!(select(&base, false, None), select(&base, false, None));
+        let (a, b) = tokio::join!(
+            select(&base, false, None, false),
+            select(&base, false, None, false)
+        );
         assert!(a.is_some());
         assert_eq!(a, b);
+        assert_eq!(records.lock().unwrap().len(), 1);
+        task.abort();
+    }
+    #[tokio::test]
+    async fn secure_cookie_policy_skips_a_previously_verified_http_alias() {
+        let (_, book, records, task) = fixture(true).await;
+        let mut base = unavailable();
+        base.set_scheme("https").unwrap();
+        BOOKS.lock().unwrap().insert(namespace(&base), book);
+        assert!(select(&base, false, None, false).await.is_some());
+        assert!(select(&base, false, None, true).await.is_none());
         assert_eq!(records.lock().unwrap().len(), 1);
         task.abort();
     }
@@ -466,6 +491,7 @@ mod tests {
             &base,
             &base.join("/api/v1/playback/sessions").unwrap(),
             &Method::POST,
+            false,
             |wire| {
                 attempts += 1;
                 Ok(PROBES.post(wire).body("{}"))

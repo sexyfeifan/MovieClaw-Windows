@@ -129,6 +129,11 @@ pub(crate) struct CookieSnapshot {
     base: Option<Url>,
 }
 impl CookieSnapshot {
+    pub(crate) fn requires_https(&self, logical: &Url) -> bool {
+        let mut secure=self.clone();
+        for jar in secure.store.values_mut() {jar.retain(|_,cookie|cookie.secure);}
+        secure.header(logical).is_some()
+    }
     pub(crate) fn header_for_transport(&self, logical: &Url, wire: &Url) -> Option<String> {
         let mut store = self.store.clone();
         if wire.scheme() != "https" {
@@ -411,7 +416,8 @@ async fn fetch(
         {
             return Err("服务器或账号已更改".into());
         }
-        let response = crate::server_routes::send(&credential_base, &url, &method, |wire| {
+        let require_https = identity.is_none() && cookie_snapshot(&credential_base).requires_https(&url);
+        let response = crate::server_routes::send(&credential_base, &url, &method, require_https, |wire| {
         let mut req = client
             .request(method.clone(), wire.clone())
             .header(header::USER_AGENT, concat!("MovieClaw-Windows/", env!("CARGO_PKG_VERSION"), " (Windows)"))
@@ -649,6 +655,7 @@ mod tests {
         let logical = base.join("/api/v1/auth/me").unwrap();
         let mut snapshot = CookieSnapshot::test_cookie(&base,"session","private","/");
         snapshot.store.get_mut("https://nas.example").unwrap().get_mut("session").unwrap().secure=true;
+        assert!(snapshot.requires_https(&logical));
         assert!(snapshot.header_for_transport(&logical,&logical).is_some());
         let http = Url::parse("http://192.168.0.2:3000/api/v1/auth/me").unwrap();
         assert!(snapshot.header_for_transport(&logical,&http).is_none());

@@ -59,7 +59,7 @@ window.DesktopPlugins = (() => {
       refreshedAt = Date.now();
     } finally { refreshing = false; }
   }
-  window.addEventListener('focus', () => refresh());
+  window.addEventListener('focus', () => refresh(true));
   window.addEventListener('online', () => refresh(true));
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
   return {load,reset,has,entries,nav,open,refresh};

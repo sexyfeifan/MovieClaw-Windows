@@ -480,7 +480,8 @@ async fn upstream(
             } else {
                 Method::GET
             };
-        let response = tokio::time::timeout(Duration::from_secs(30), crate::server_routes::send(&lease.base, &url, &method, |wire| {
+        let require_https = lease.identity.is_none() && lease.cookies.requires_https(&url);
+        let response = tokio::time::timeout(Duration::from_secs(30), crate::server_routes::send(&lease.base, &url, &method, require_https, |wire| {
         let mut request = CLIENT.request(method.clone(),wire.clone());
         for name in [
             "range",

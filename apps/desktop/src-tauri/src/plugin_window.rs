@@ -192,34 +192,36 @@ async fn handle(
             Ok(Ok(v)) => v.to_bytes(), _ => return Ok(reply(413,"插件请求过大或超时")),
         }
     };
-    let operation = crate::server_routes::send(&s.base, &target, &parts.method, |wire| {
-        let mut outbound = CLIENT
-            .request(parts.method.clone(), wire.clone())
-            .body(body.clone())
-            .header(
-                header::USER_AGENT,
-                concat!("MovieClaw-Windows/", env!("CARGO_PKG_VERSION")),
-            );
-        for name in [
-            "accept",
-            "content-type",
-            "range",
-            "if-range",
-            "if-none-match",
-            "if-modified-since",
-            "last-event-id",
-        ] {
-            if let Some(value) = parts.headers.get(name) {
-                outbound = outbound.header(name, value);
+    let require_https = s.identity.is_none() && s.cookies.requires_https(&target);
+    let operation =
+        crate::server_routes::send(&s.base, &target, &parts.method, require_https, |wire| {
+            let mut outbound = CLIENT
+                .request(parts.method.clone(), wire.clone())
+                .body(body.clone())
+                .header(
+                    header::USER_AGENT,
+                    concat!("MovieClaw-Windows/", env!("CARGO_PKG_VERSION")),
+                );
+            for name in [
+                "accept",
+                "content-type",
+                "range",
+                "if-range",
+                "if-none-match",
+                "if-modified-since",
+                "last-event-id",
+            ] {
+                if let Some(value) = parts.headers.get(name) {
+                    outbound = outbound.header(name, value);
+                }
             }
-        }
-        if let Some(identity) = &s.identity {
-            outbound = outbound.bearer_auth(&identity.token);
-        } else if let Some(cookie) = s.cookies.header_for_transport(&target, &wire) {
-            outbound = outbound.header(header::COOKIE, cookie);
-        }
-        Ok(outbound)
-    });
+            if let Some(identity) = &s.identity {
+                outbound = outbound.bearer_auth(&identity.token);
+            } else if let Some(cookie) = s.cookies.header_for_transport(&target, &wire) {
+                outbound = outbound.header(header::COOKIE, cookie);
+            }
+            Ok(outbound)
+        });
     let response = tokio::select! {
         _=s.context.cancellation.cancelled()=>return Ok(reply(410,"账号已切换")),
         _=s.closed.cancelled()=>return Ok(reply(410,"插件已关闭")),
