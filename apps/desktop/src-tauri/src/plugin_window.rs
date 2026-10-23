@@ -108,6 +108,21 @@ fn entry_target(
             .collect(),
     ))
 }
+fn host_link(url: &Url) -> bool {
+    let parts: Vec<_> = url.path().trim_matches('/').split('/').collect();
+    let id = |value: &str| {
+        value
+            .parse::<u64>()
+            .is_ok_and(|v| v > 0 && v <= 9_007_199_254_740_991)
+    };
+    match parts.as_slice() {
+        ["play", item] => id(item),
+        ["library", library, "item", item] => id(library) && id(item),
+        ["media", kind, item] => matches!(*kind, "movie" | "tv") && id(item),
+        ["search"] => url.query().is_some_and(|q| q.len() <= 2048),
+        _ => false,
+    }
+}
 async fn handle(
     request: Request<Incoming>,
     session: Arc<Session>,
@@ -215,6 +230,16 @@ async fn handle(
                     outbound = outbound.header(name, value);
                 }
             }
+            // Plugin CSRF/custom headers must survive, while proxy routing headers never do.
+            for (name, value) in &parts.headers {
+                let key = name.as_str();
+                if key.starts_with("x-")
+                    && !key.starts_with("x-forwarded-")
+                    && !matches!(key, "x-real-ip" | "x-original-url" | "x-rewrite-url")
+                {
+                    outbound = outbound.header(name, value);
+                }
+            }
             if let Some(identity) = &s.identity {
                 outbound = outbound.bearer_auth(&identity.token);
             } else if let Some(cookie) = s.cookies.header_for_transport(&target, &wire) {
@@ -295,6 +320,7 @@ pub async fn open_plugin_page(
     app: tauri::AppHandle,
     entry_id: String,
     index: usize,
+    client_epoch: u64,
 ) -> Result<(), String> {
     let context = native_auth::load_context()?;
     let metadata = api_proxy::proxy_api("GET".into(), "/ui/apps".into(), None, None, None).await?;
@@ -343,6 +369,9 @@ pub async fn open_plugin_page(
             return;
         }
         let allowed = origin.clone();
+        let navigation_app = window_app.clone();
+        let navigation_cancel = cancelled.clone();
+        let navigation_generation = context.generation;
         let result = WebviewWindowBuilder::new(
             &window_app,
             format!("plugin-{secret}"),
@@ -352,7 +381,29 @@ pub async fn open_plugin_page(
         .inner_size(1100.0, 800.0)
         .min_inner_size(700.0, 500.0)
         .incognito(true)
-        .on_navigation(move |url| url.origin().ascii_serialization() == allowed)
+        .on_navigation(move |url| {
+            if navigation_cancel.is_cancelled()
+                || navigation_generation != native_auth::generation()
+                || url.origin().ascii_serialization() != allowed
+            {
+                return false;
+            }
+            if !host_link(url) {
+                return true;
+            }
+            let target_app = navigation_app.clone();
+            let payload =
+                serde_json::json!({"path":url.path(),"query":url.query(),"epoch":client_epoch});
+            let _ = navigation_app.run_on_main_thread(move || {
+                use tauri::{Emitter, Manager};
+                let _ = target_app.emit_to("main", "movieclaw:plugin-route", payload);
+                if let Some(window) = target_app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            });
+            false
+        })
         .build()
         .map_err(|_| "无法创建插件窗口".to_owned());
         if let Ok(window) = &result {
@@ -461,6 +512,31 @@ pub fn diagnostic_probe(app: tauri::AppHandle) {
 mod tests {
     use super::*;
     #[test]
+    fn plugin_links_only_enter_known_movieclaw_routes() {
+        for path in [
+            "/play/12",
+            "/library/1/item/3",
+            "/media/tv/4",
+            "/search?q=movie&private=1",
+        ] {
+            assert!(host_link(
+                &Url::parse(&format!("http://127.0.0.1:4179{path}")).unwrap()
+            ));
+        }
+        for path in [
+            "/play/0",
+            "/play/9999999999999999999999999",
+            "/api/v1/auth/me",
+            "/settings",
+            "/media/unknown/1",
+            "/search",
+        ] {
+            assert!(!host_link(
+                &Url::parse(&format!("http://127.0.0.1:4179{path}")).unwrap()
+            ));
+        }
+    }
+    #[test]
     fn only_server_advertised_visible_entries_can_open() {
         let base = Url::parse("https://nas.test/movieclaw").unwrap();
         let mut apps = serde_json::json!([{"id":"watch-friends","nav":true,"base":"/api/v1/plugins/watch-friends/web/","entries":[{"label":"映迹","path":""}]}]);
@@ -496,17 +572,28 @@ mod tests {
             let upstream = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let base = Url::parse(&format!("http://{}", upstream.local_addr().unwrap())).unwrap();
             let remote = std::thread::spawn(move || {
-                let (mut socket, _) = upstream.accept().unwrap();
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let mut buf = [0; 8192];
-                let n = socket.read(&mut buf).unwrap();
-                let request = String::from_utf8_lossy(&buf[..n]);
-                assert!(request.starts_with("GET /api/v1/plugins/watch-friends/web/ "));
-                assert!(request.contains("session=private-fixture"));
-                assert!(!request.contains("window-secret"));
-                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nSet-Cookie: session=never-visible\r\nContent-Length: 7\r\nConnection: close\r\n\r\nfixture").unwrap();
+                for index in 0..2 {
+                    let (mut socket, _) = upstream.accept().unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut buf = [0; 8192];
+                    let n = socket.read(&mut buf).unwrap();
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    if index == 0 {
+                        assert!(request.starts_with("GET /api/v1/plugins/watch-friends/web/ "));
+                    } else {
+                        assert!(
+                            request.starts_with("POST /api/v1/plugins/watch-friends/preferences ")
+                        );
+                        assert!(request.to_lowercase().contains("x-friends-request: 1"));
+                        assert!(!request.to_lowercase().contains("x-forwarded-for:"));
+                        assert!(!request.to_lowercase().contains("origin:"));
+                    }
+                    assert!(request.contains("session=private-fixture"));
+                    assert!(!request.contains("window-secret"));
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nSet-Cookie: session=never-visible\r\nContent-Length: 7\r\nConnection: close\r\n\r\nfixture").unwrap();
+                }
             });
             tokio::runtime::Runtime::new().unwrap().block_on(async {
                 let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -571,6 +658,18 @@ mod tests {
                     .unwrap();
                 assert!(!content.headers().contains_key(header::SET_COOKIE));
                 assert_eq!(content.text().await.unwrap(), "fixture");
+                let mutation = client
+                    .post(format!("{origin}/api/v1/plugins/watch-friends/preferences"))
+                    .header(header::COOKIE, cookie)
+                    .header("X-Friends-Request", "1")
+                    .header(header::ORIGIN, &origin)
+                    .header("X-Forwarded-For", "evil")
+                    .body("{}")
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(mutation.status(), 200);
+                assert_eq!(mutation.text().await.unwrap(), "fixture");
                 assert_eq!(
                     client
                         .post(format!("{origin}/api/v1/auth/device/login"))

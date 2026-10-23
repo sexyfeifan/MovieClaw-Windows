@@ -29,7 +29,7 @@ window.DesktopPlugins = (() => {
     if (!has(id)) { App.notice('插件已移除或当前账号没有权限'); return false; }
     const epoch=API.contextEpoch;
     try {
-      await API.nativeCall('open_plugin_page',{entryId:id,index});
+      await API.nativeCall('open_plugin_page',{entryId:id,index,clientEpoch:epoch});
       return epoch === API.contextEpoch;
     } catch (error) { if (epoch === API.contextEpoch) App.notice(error.message || '无法打开插件'); return false; }
   }
@@ -62,5 +62,27 @@ window.DesktopPlugins = (() => {
   window.addEventListener('focus', () => refresh(true));
   window.addEventListener('online', () => refresh(true));
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
-  return {load,reset,has,entries,nav,open,refresh};
+  async function route(payload) {
+    if (!App.session || App._authPending || payload?.epoch !== API.contextEpoch) return;
+    const epoch=API.contextEpoch, path=payload.path || '';
+    if (path.length>512 || (payload.query?.length || 0)>2048) return;
+    let match;
+    try {
+      if ((match=path.match(/^\/play\/(\d+)$/))) {
+        const result=await API.request('/playback/items/'+match[1]);
+        if (epoch!==API.contextEpoch) return;
+        const item=result?.data ?? result;
+        if (Number.isSafeInteger(item.media_item_id) && Number.isSafeInteger(item.library_id)) await App.startPlayback(item);
+      } else if ((match=path.match(/^\/library\/(\d+)\/item\/(\d+)$/))) {
+        await App.navigate('detail',{libraryId:Number(match[1]),itemId:Number(match[2])});
+      } else if ((match=path.match(/^\/media\/(movie|tv)\/(\d+)$/))) {
+        await App.navigate('discoverDetail',{ref:`tmdb:${match[1]}:${match[2]}`,fromPlugin:true});
+      } else if (path==='/search') {
+        const params=new URLSearchParams(payload.query || ''), query=(params.get('q') || '').slice(0,100);
+        if (query) await App.navigate(params.get('tab')==='media'?'search':'discover',{query,fromPlugin:true});
+      }
+    } catch (error) {if (epoch===API.contextEpoch && error.name!=='AbortError') App.notice(error.message || '无法打开插件中的影片链接');}
+  }
+  document.addEventListener('DOMContentLoaded',()=>window.__TAURI__?.event?.listen('movieclaw:plugin-route',({payload})=>route(payload)));
+  return {load,reset,has,entries,nav,open,refresh,route};
 })();

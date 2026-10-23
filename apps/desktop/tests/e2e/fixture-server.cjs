@@ -260,6 +260,7 @@ http.createServer(async (req, res) => {
       return json(res, ok({ played: false, is_favorite: false, unplayed_count: 2, ...state.marks[key] }));
     }
     if (route === '/playback/resume') return json(res, ok({ season_number: 3, episode_number: 2, position_ms: 300000, duration_ms: 3600000 }));
+    if (/^\/playback\/items\/\d+$/.test(route)) return json(res,ok(item(Number(route.split('/').pop()))));
     if (/^\/libraries\/1\/items\/\d+$/.test(route)) {
       const n = Number(route.split('/').pop());
       return json(res, ok({ ...item(n), files: state.mediaFiles?.[n] || [file(n)], local_meta: { plot: '测试简介', genres: [], runtime_minutes: 60, actors: [{ name: '测试演员', tmdb_person_id: 9, thumb_url: state.images ? '/fixture-images/good.png' : null }] }, collections: [] }));

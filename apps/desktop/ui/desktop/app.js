@@ -953,7 +953,7 @@ const App = {
   async navigate(page, params = {}, pushHistory = true) {
     const started = window.performance?.now();
     if (this._authPending) return;
-    if (window.DesktopCatalog?.pages.has(page) && !window.DesktopCatalog.enabled(page)) { page = 'home'; params = {}; pushHistory = false; this.selectedTab = 'home'; }
+    if (window.DesktopCatalog?.pages.has(page) && !window.DesktopCatalog.canOpen(page,params)) { page = 'home'; params = {}; pushHistory = false; this.selectedTab = 'home'; }
     DesktopSelect.close();
     const previous = this.captureRoute();
     this._searchData = null;

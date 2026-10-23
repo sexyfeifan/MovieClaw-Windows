@@ -32,6 +32,25 @@ test('plugin labels are text, hidden entries stay hidden and late results cannot
   await page.evaluate(()=>{DesktopPlugins.load();API.contextEpoch++;DesktopPlugins.reset();DesktopPlugins.nav();});
   await page.waitForTimeout(350);await expect(page.locator('#pluginNav')).toBeHidden();
 });
+test('plugin movie links resolve current-account source metadata before native playback and ignore stale sessions',async({page,request})=>{
+  await openDesktop(page,request);await ready(page);
+  await page.evaluate(()=>DesktopPlugins.route({path:'/play/1',epoch:API.contextEpoch}));
+  await expect(page.locator('#playerView')).toBeVisible();
+  await expect.poll(async()=>(await state(request)).requests.find(r=>r.path==='/playback/sessions')?.body.media_item_id).toBe(1);
+  await page.locator('#playerBack').click();
+  await page.evaluate(()=>DesktopPlugins.route({path:'/library/1/item/3',epoch:API.contextEpoch}));
+  await expect(page.locator('.detail-title')).toContainText('第三季续播');
+  const before=(await state(request)).requests.filter(r=>r.path==='/playback/sessions').length;
+  await page.evaluate(()=>DesktopPlugins.route({path:'/play/1',epoch:API.contextEpoch-1}));
+  expect((await state(request)).requests.filter(r=>r.path==='/playback/sessions')).toHaveLength(before);
+});
+test('plugin resource search opens explicitly without changing the saved sidebar preference',async({page,request})=>{
+  await openDesktop(page,request,{catalog:true});await ready(page);
+  await page.evaluate(()=>DesktopPlugins.route({path:'/search',query:'q=星海&private=1',epoch:API.contextEpoch}));
+  await expect(page.locator('.catalog-page h1')).toHaveText('发现');
+  await expect(page.locator('#catalogNav [data-page="discover"]')).toHaveCount(0);
+  await expect.poll(async()=>(await state(request)).requests.find(r=>r.path==='/search/titles')?.body).toMatchObject({query:'星海',save_history:false});
+});
 async function play(page,request,options) {
   await openDesktop(page,request,options);await ready(page);
   await page.evaluate(async()=>{

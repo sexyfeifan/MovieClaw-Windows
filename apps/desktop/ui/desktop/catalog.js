@@ -18,6 +18,7 @@ window.DesktopCatalog = (() => {
     const key = page.startsWith('subscription') ? 'subscriptions' : 'discover';
     return preferences()[key] === true && (key !== 'subscriptions' || permissions().subscribe);
   }
+  const canOpen = (page,params) => enabled(page) || (params?.fromPlugin === true && ['discover','discoverDetail'].includes(page));
   const option = (value, text, selected) => `<option value="${html(value)}" ${String(value) === String(selected) ? 'selected' : ''}>${html(text)}</option>`;
   const select = (id, label, values, selected) => `<label class="catalog-field">${html(label)}<select id="${id}" class="settings-select" aria-label="${html(label)}">${values.map(([value,text]) => option(value,text,selected)).join('')}</select></label>`;
   const checked = value => value ? 'checked' : '';
@@ -542,12 +543,12 @@ window.DesktopCatalog = (() => {
   }
   const routes={discover:'discover',discoverCollection:'collection',discoverDetail:'titleDetail',discoverPerson:'person',subscriptions:'subscriptionList',subscriptionDetail:'subscriptionDetail'};
   return {
-    pages, preferences, permissions, enabled, nav, settings,
+    pages, preferences, permissions, enabled, canOpen, nav, settings,
     reset(){view?.dispose();view=null;subscriptionCache=null;},
     dispose(){view?.dispose();view=null;},
     async render(page,host,params,generation){
       view?.dispose();view=new CatalogView(host,generation,params);
-      if(!enabled(page)){host.innerHTML='<div class="empty-state">请先在设置中开启该入口，并确认账号权限。</div>';return;}
+      if(!canOpen(page,params)){host.innerHTML='<div class="empty-state">请先在设置中开启该入口，并确认账号权限。</div>';return;}
       await view[routes[page]]();
     },
     CatalogView,
