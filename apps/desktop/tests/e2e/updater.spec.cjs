@@ -13,12 +13,12 @@ async function screenshot(page, info, name) {
   await info.attach(name,{path:filename,contentType:'image/png'});
 }
 
-test('sequential desktop releases remain displayable and downloadable after upstream synchronization', async ({page,request}) => {
-  await updates(page,request,{updateLegacyTag:true});
-  await expect(page.locator('.update-versions')).toHaveText('当前 1.0.3 · 最新 1.0.4');
+test('aligned official Windows versions remain displayable and downloadable', async ({page,request}) => {
+  await updates(page,request,{updateAlignedVersion:true});
+  await expect(page.locator('.update-versions')).toHaveText('当前 0.1.1 · 最新 0.1.2');
   await page.locator('#updateDownload').click();
   await expect(page.locator('#updateInstall')).toBeVisible();
-  expect((await state(request)).updateRequests.find(value=>value.command==='download_update').args).toEqual({version:'desktop-v1.0.4'});
+  expect((await state(request)).updateRequests.find(value=>value.command==='download_update').args).toEqual({version:'windows-v0.1.2'});
 });
 
 test('startup and tray update events supply a downloadable version through legacy field names', async ({page,request}) => {

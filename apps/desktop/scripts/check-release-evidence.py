@@ -24,28 +24,6 @@ REQUIRED_CHECKS = (
 
 
 def validate_build_artifacts(directory, manifest):
-    if "compatibilityArtifacts" in manifest:
-        version = manifest["version"]
-        originals = {item["name"]: item for item in manifest["files"]}
-        compatibility = manifest["compatibilityArtifacts"]
-        expected = {
-            f"MovieClaw-Desktop-{version}-{suffix}"
-            for suffix in ("Setup-x64.exe", "portable-x64.zip")
-        }
-        if len(compatibility) != 2 or {item.get("name") for item in compatibility} != expected:
-            raise ValueError("Both legacy desktop update packages are required")
-        for item in compatibility:
-            original = originals.get(item.get("originalName"), {})
-            path = directory / item["name"]
-            if (
-                item["name"].replace("MovieClaw-Desktop-", "MovieClaw-Windows-", 1)
-                != original.get("name")
-                or item.get("sha256") != original.get("sha256")
-                or item.get("size") != original.get("size")
-                or path.stat().st_size != item["size"]
-                or hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]
-            ):
-                raise ValueError("Legacy update package differs from the tested original")
     if "buildNumber" not in manifest and "buildArtifacts" not in manifest:
         return
     number = manifest.get("buildNumber", "")

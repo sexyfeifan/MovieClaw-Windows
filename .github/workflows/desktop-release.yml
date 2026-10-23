@@ -96,7 +96,7 @@ jobs:
           VERSION=$(python3 -c "import json; print(json.load(open('release-manifest.json', encoding='utf-8-sig'))['version'])")
           BUILD_NUMBER=$(python3 -c "import json; print(json.load(open('release-manifest.json', encoding='utf-8-sig')).get('buildNumber',''))")
           TITLE="MovieClaw Windows $VERSION${BUILD_NUMBER:+ ($BUILD_NUMBER)}"
-          mapfile -t PACKAGE_FILES < <(python3 -c "import json; m=json.load(open('release-manifest.json',encoding='utf-8-sig')); print(*[f['name'] for f in m['files']+m.get('buildArtifacts',[])+m.get('compatibilityArtifacts',[])],sep='\n')")
+          mapfile -t PACKAGE_FILES < <(python3 -c "import json; m=json.load(open('release-manifest.json',encoding='utf-8-sig')); print(*[f['name'] for f in m['files']+m.get('buildArtifacts',[])],sep='\n')")
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             test "$REPLACE_EXISTING" = "true" || { echo 'Existing releases require explicit replace_existing'; exit 1; }
             gh release download "$RELEASE_TAG" --pattern release-manifest.json --dir previous

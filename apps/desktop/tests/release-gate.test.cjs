@@ -57,15 +57,8 @@ test('build labeling preserves the tested installer, keeps legacy update checksu
   const localName='MovieClaw-Windows-0.2.112(61.1)-Setup-x64.exe';
   assert.deepEqual(fs.readFileSync(path.join(f.directory,'labeled',localName)),fs.readFileSync(path.join(f.directory,f.manifest.files[0].name)));
   const sums=fs.readFileSync(path.join(f.directory,'SHA256SUMS.txt'),'utf8');
-  for (const item of [...f.manifest.files,...f.manifest.buildArtifacts,...f.manifest.compatibilityArtifacts]) assert.ok(sums.includes(`${item.sha256}  ${item.name}`));
-  for (const item of f.manifest.compatibilityArtifacts) {
-    assert.deepEqual(fs.readFileSync(path.join(f.directory,item.name)), fs.readFileSync(path.join(f.directory,item.originalName)));
-  }
+  for (const item of [...f.manifest.files,...f.manifest.buildArtifacts]) assert.ok(sums.includes(`${item.sha256}  ${item.name}`));
   assert.equal(f.run().status,0);
-  const compatibility=f.manifest.compatibilityArtifacts[0];
-  fs.appendFileSync(path.join(f.directory,compatibility.name),'mutated');
-  assert.notEqual(f.run().status,0);
-  fs.copyFileSync(path.join(f.directory,compatibility.originalName),path.join(f.directory,compatibility.name));
   fs.appendFileSync(path.join(f.directory,f.manifest.buildArtifacts[0].name),'mutated');
   assert.notEqual(f.run().status,0);
 });

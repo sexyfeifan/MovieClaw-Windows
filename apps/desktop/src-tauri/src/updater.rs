@@ -105,7 +105,7 @@ fn windows_download_url(release: &serde_json::Value) -> Option<&str> {
     None
 }
 
-/// 本渠道的 Windows 正式版标签，按版本从高到低。兼容 desktop-v* 引用，
+/// 本渠道的 Windows 正式版标签，按版本从高到低。只跟随官方 windows-v* 命名，
 /// 不翻 Release 列表：同仓库还有服务器和其他客户端的发布，Windows 版可能排不进第一页。
 fn windows_tags(refs: &serde_json::Value) -> Vec<&str> {
     let mut tags: Vec<&str> = refs
@@ -113,7 +113,7 @@ fn windows_tags(refs: &serde_json::Value) -> Vec<&str> {
         .into_iter()
         .flatten()
         .filter_map(|item| item.get("ref")?.as_str()?.strip_prefix("refs/tags/"))
-        .filter(|tag| verified::valid_tag(tag))
+        .filter(|tag| tag.starts_with(TAG_PREFIX) && verified::valid_tag(tag))
         .collect();
     tags.sort_by_key(|tag| std::cmp::Reverse(parse_version(tag)));
     tags
@@ -133,15 +133,10 @@ fn not_found(error: &str) -> bool {
 /// 缺 Windows x64 包的跳过，退到下一个较低的标签。
 async fn latest_windows_release() -> Result<Option<serde_json::Value>, String> {
     let floor = parse_version(CURRENT_VERSION);
-    let mut all_refs = Vec::new();
-    for prefix in [TAG_PREFIX, LEGACY_TAG_PREFIX] {
-        let url = format!("https://api.github.com/repos/{GITHUB_REPO}/git/matching-refs/tags/{prefix}");
-        let bytes = verified::small(verified::delivery_url(&url)?, 1024 * 1024).await?;
-        let refs: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(|_| "更新发布信息无效".to_owned())?;
-        all_refs.extend(refs.as_array().ok_or("更新标签信息无效")?.iter().cloned());
-    }
-    let refs = serde_json::Value::Array(all_refs);
+    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/git/matching-refs/tags/{TAG_PREFIX}");
+    let bytes = verified::small(verified::delivery_url(&url)?, 1024 * 1024).await?;
+    let refs: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| "更新发布信息无效".to_owned())?;
     for tag in windows_tags(&refs) {
         if parse_version(tag) < floor {
             break;
@@ -271,7 +266,7 @@ mod tests {
             .iter().map(|tag| serde_json::json!({"ref": format!("refs/tags/{tag}")}))
             .chain([serde_json::json!({"ref": "refs/heads/windows-v9.9.9"}), serde_json::json!({})])
             .collect::<Vec<_>>());
-        assert_eq!(windows_tags(&refs), ["desktop-v1.0.4", "desktop-v1.0.3", "windows-v0.10.0", "windows-v0.2.10", "windows-v0.2.9"]);
+        assert_eq!(windows_tags(&refs), ["windows-v0.10.0", "windows-v0.2.10", "windows-v0.2.9"]);
         assert!(windows_tags(&serde_json::json!({"message": "Not Found"})).is_empty());
         assert!(not_found(r#"{"code":"UPDATE_NOT_FOUND","message":"x"}"#));
         assert!(!not_found(r#"{"code":"UPDATE_HTTP","message":"x"}"#));
@@ -334,9 +329,9 @@ mod tests {
     }
 
     #[test]
-    fn sequential_desktop_release_keeps_verified_downloads_and_skips_test_tags() {
-        let tag = "desktop-v1.0.4";
-        let name = "MovieClaw-Windows-1.0.4-Setup-x64.exe";
+    fn aligned_windows_release_keeps_verified_downloads_and_skips_test_tags() {
+        let tag = "windows-v0.1.2";
+        let name = "MovieClaw-Windows-0.1.2-Setup-x64.exe";
         let url = format!("https://github.com/{GITHUB_REPO}/releases/download/{tag}/{name}");
         let release = serde_json::json!({"tag_name":tag,"draft":false,"prerelease":false,
             "assets":[{"name":name,"browser_download_url":url}]});
@@ -345,7 +340,7 @@ mod tests {
         let mut prerelease = release.clone();
         prerelease["prerelease"] = serde_json::json!(true);
         assert!(!installable(&prerelease));
-        prerelease["tag_name"] = serde_json::json!("desktop-test-v1.0.4-rc.1");
+        prerelease["tag_name"] = serde_json::json!("windows-test-v0.1.2-rc.1");
         assert!(windows_download_url(&prerelease).is_none());
     }
 }
