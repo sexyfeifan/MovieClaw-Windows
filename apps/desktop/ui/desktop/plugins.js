@@ -48,10 +48,14 @@ window.DesktopPlugins = (() => {
     if (!App.session || App._authPending || refreshing || (!force && Date.now() - refreshedAt < 15000)) return;
     refreshing = true;
     try {
+      const before = JSON.stringify(apps), available = window.DesktopFriends?.available();
       API.nativeCall('refresh_server_routes').catch(() => {});
       await load();
       await window.DesktopFriends?.discover();
       if (App.session) nav();
+      if (App.currentPage === 'settings' && (before !== JSON.stringify(apps) || available !== window.DesktopFriends?.available())) {
+        window.DesktopFriends?.settings(document.getElementById('content'));
+      }
       refreshedAt = Date.now();
     } finally { refreshing = false; }
   }

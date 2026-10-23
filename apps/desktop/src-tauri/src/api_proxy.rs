@@ -643,6 +643,18 @@ mod tests {
         assert!(!cookie_domain_matches("127.0.0.1", "0.0.1"));
     }
 
+    #[test]
+    fn a_verified_http_alias_still_cannot_receive_a_secure_cookie() {
+        let base = Url::parse("https://nas.example").unwrap();
+        let logical = base.join("/api/v1/auth/me").unwrap();
+        let mut snapshot = CookieSnapshot::test_cookie(&base,"session","private","/");
+        snapshot.store.get_mut("https://nas.example").unwrap().get_mut("session").unwrap().secure=true;
+        assert!(snapshot.header_for_transport(&logical,&logical).is_some());
+        let http = Url::parse("http://192.168.0.2:3000/api/v1/auth/me").unwrap();
+        assert!(snapshot.header_for_transport(&logical,&http).is_none());
+        assert!(snapshot.header_for_transport(&Url::parse("https://other.example/api/v1/auth/me").unwrap(),&logical).is_none());
+    }
+
     #[tokio::test]
     async fn multiple_account_cookies_are_captured_together() {
         let (url, handle) = local_server("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nSet-Cookie: mc_accounts_bag=bag-value; Domain=127.0.0.1; Path=/; HttpOnly\r\nSet-Cookie: mc_active_account=active-value; Path=/; HttpOnly\r\nConnection: close\r\n\r\nok");

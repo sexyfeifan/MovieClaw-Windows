@@ -164,6 +164,7 @@ window.DesktopFriends = (() => {
     refreshButton();
   }
   function settings(host) {
+    host.querySelector('.friends-settings')?.remove();
     const card = document.createElement('div'); card.className = 'settings-card friends-settings';
     card.innerHTML = `<h3>好友与观看隐私</h3><p class="friends-muted">查看与公开互相独立。自己的其他设备无需开启共享；关闭公开共享不会影响自己查看。</p><div class="settings-row"><span>显示服务器好友列表<small class="friends-muted">开启后，从主界面侧栏或播放器左上角的“正在观看”查看自己的设备与已授权好友</small></span><label class="settings-toggle"><input id="setFriendsVisible" aria-label="显示服务器好友列表" type="checkbox" ${enabled() ? 'checked' : ''}><span class="toggle-slider"></span></label></div><div class="settings-row"><span>允许其他成员查看我的观看状态<small class="friends-muted">包括所选媒体库的当前播放和最近 7 天历史；按账号在服务器保存</small></span><label class="settings-toggle"><input id="setFriendsShare" aria-label="允许其他成员查看我的观看状态" type="checkbox" disabled><span class="toggle-slider"></span></label></div><fieldset class="friends-libraries"><legend>允许共享的媒体库</legend><p class="friends-muted">未勾选的库和新建的库默认保密。</p><div id="friendsLibraries"></div></fieldset><button class="btn-secondary" id="saveFriendsPrivacy" disabled>保存共享设置</button><p id="friendsPrivacyState" class="friends-muted" role="status">正在读取服务器隐私设置…</p>`;
     host.querySelector('.settings-body')?.insertBefore(card, host.querySelector('.settings-about'));

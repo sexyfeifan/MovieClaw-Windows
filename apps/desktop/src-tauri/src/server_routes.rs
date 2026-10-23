@@ -6,7 +6,7 @@ use reqwest::{Client, Method, RequestBuilder, Response};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    sync::{LazyLock, Mutex},
+    sync::{Arc, LazyLock, Mutex},
     time::{Duration, Instant},
 };
 use url::Url;
@@ -26,6 +26,7 @@ struct Selection {
     book: Book,
     url: Url,
     verified: Instant,
+    aliases: Vec<Url>,
 }
 static BOOKS: LazyLock<Mutex<HashMap<String, Book>>> = LazyLock::new(|| {
     Mutex::new(
@@ -36,6 +37,8 @@ static BOOKS: LazyLock<Mutex<HashMap<String, Book>>> = LazyLock::new(|| {
     )
 });
 static SELECTED: LazyLock<Mutex<HashMap<String, Selection>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static PROBE_GATES: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static PROBES: LazyLock<Client> = LazyLock::new(|| {
     Client::builder()
@@ -123,14 +126,20 @@ async fn prove(book: Book, address: Address) -> Option<Url> {
 }
 async fn select(base: &Url, force: bool, failed: Option<&Url>) -> Option<Url> {
     let name = namespace(base);
+    let gate = PROBE_GATES
+        .lock()
+        .unwrap()
+        .entry(name.clone())
+        .or_default()
+        .clone();
+    let _probe = gate.lock().await;
     let book = BOOKS.lock().unwrap().get(&name).cloned()?;
-    if !force {
-        if let Some(v) = SELECTED
-            .lock()
-            .unwrap()
-            .get(&name)
-            .filter(|v| v.book == book && v.verified.elapsed() < Duration::from_secs(300))
-        {
+    if !force || failed.is_some() {
+        if let Some(v) = SELECTED.lock().unwrap().get(&name).filter(|v| {
+            v.book == book
+                && v.verified.elapsed() < Duration::from_secs(300)
+                && failed != Some(&v.url)
+        }) {
             return Some(v.url.clone());
         }
     }
@@ -148,18 +157,36 @@ async fn select(base: &Url, force: bool, failed: Option<&Url>) -> Option<Url> {
             if BOOKS.lock().unwrap().get(&name) != Some(&book) {
                 return None;
             }
-            SELECTED.lock().unwrap().insert(
+            let mut selected = SELECTED.lock().unwrap();
+            // Keep response URLs from in-flight transfers recognizable after a route switch.
+            // Reverse mapping never authorizes a transport; send() still proves its destination.
+            let mut aliases = selected
+                .get(&name)
+                .filter(|v| {
+                    v.book.instance_id == book.instance_id && v.book.host_key == book.host_key
+                })
+                .map(|v| v.aliases.clone())
+                .unwrap_or_default();
+            aliases.retain(|v| v != &url);
+            aliases.push(url.clone());
+            if aliases.len() > 8 {
+                aliases.remove(0);
+            }
+            selected.insert(
                 name,
                 Selection {
                     book,
                     url: url.clone(),
                     verified: Instant::now(),
+                    aliases,
                 },
             );
             return Some(url);
         }
     }
-    SELECTED.lock().unwrap().remove(&name);
+    if let Some(v) = SELECTED.lock().unwrap().get_mut(&name) {
+        v.verified = Instant::now() - Duration::from_secs(301);
+    }
     None
 }
 pub(crate) fn canonicalize(base: &Url, target: &Url) -> Url {
@@ -167,7 +194,11 @@ pub(crate) fn canonicalize(base: &Url, target: &Url) -> Url {
         .lock()
         .unwrap()
         .get(&namespace(base))
-        .and_then(|v| remap(&v.url, base, target))
+        .and_then(|v| {
+            v.aliases
+                .iter()
+                .find_map(|alias| remap(alias, base, target))
+        })
         .unwrap_or_else(|| target.clone())
 }
 pub(crate) async fn send<F>(
@@ -374,9 +405,16 @@ mod tests {
             canonicalize(&base, &alias.join("/api/v1/media").unwrap()),
             base.join("/api/v1/media").unwrap()
         );
-        let records = records.lock().unwrap();
-        assert_eq!(records.len(), 2);
-        assert!(records[1].starts_with("GET /api/v1/media?session=fixture "));
+        assert_eq!(records.lock().unwrap().len(), 2);
+        assert!(records.lock().unwrap()[1].starts_with("GET /api/v1/media?session=fixture "));
+        let (next, next_book, _, next_task) = fixture(true).await;
+        BOOKS.lock().unwrap().insert(namespace(&base), next_book);
+        assert_eq!(select(&base, true, None).await, Some(next));
+        assert_eq!(
+            canonicalize(&base, &alias.join("/api/v1/late-playlist.m3u8").unwrap()),
+            base.join("/api/v1/late-playlist.m3u8").unwrap()
+        );
+        next_task.abort();
         task.abort();
     }
     #[tokio::test]
@@ -398,6 +436,17 @@ mod tests {
         task.abort();
     }
     #[tokio::test]
+    async fn simultaneous_requests_share_one_anonymous_probe() {
+        let (_, book, records, task) = fixture(true).await;
+        let base = unavailable();
+        BOOKS.lock().unwrap().insert(namespace(&base), book);
+        let (a, b) = tokio::join!(select(&base, false, None), select(&base, false, None));
+        assert!(a.is_some());
+        assert_eq!(a, b);
+        assert_eq!(records.lock().unwrap().len(), 1);
+        task.abort();
+    }
+    #[tokio::test]
     async fn a_write_is_not_replayed_after_transport_failure() {
         let (_, book, records, task) = fixture(true).await;
         let base = unavailable();
@@ -409,6 +458,7 @@ mod tests {
                 book,
                 url: dead,
                 verified: Instant::now(),
+                aliases: vec![],
             },
         );
         let mut attempts = 0;

@@ -20,6 +20,27 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  server-contracts:
+    name: Windows server compatibility contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.9'
+      - name: Install server test dependencies
+        run: pip install -e '.[dev]'
+      - name: Native Windows login, pairing, addresses and plugin web contracts
+        run: python -m pytest tests/api/test_login_devices.py tests/api/test_device_auth.py tests/api/test_server_addresses.py tests/api/test_health.py tests/api/test_plugin_web.py tests/api/test_skip_segments_api.py tests/api/test_member_auth.py -q --timeout=90 --junitxml=server-contracts.xml
+      - name: Upload server contract results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-server-contracts-${{ github.sha }}
+          path: server-contracts.xml
+          if-no-files-found: ignore
+
   verify:
     name: Windows x64 tests and packages
     runs-on: windows-2022

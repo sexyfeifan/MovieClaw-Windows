@@ -90,7 +90,6 @@ fn entry_target(
         .map_err(|_| "插件入口无效")?;
     if target.origin() != root.origin()
         || !target.path().starts_with(root.path())
-        || target.query().is_some()
         || target.fragment().is_some()
     {
         return Err("插件入口超出页面目录".into());
@@ -468,6 +467,11 @@ mod tests {
             "/api/v1/plugins/watch-friends/web/"
         );
         assert!(entry_target(&base, &apps, "missing", 0).is_err());
+        apps[0]["entries"][0]["path"] = "history?tab=friends".into();
+        assert_eq!(
+            entry_target(&base, &apps, "watch-friends", 0).unwrap().0,
+            "/api/v1/plugins/watch-friends/web/history?tab=friends"
+        );
         assert!(entry_target(&base, &apps, "watch-friends", 1).is_err());
         apps[0]["nav"] = false.into();
         assert!(entry_target(&base, &apps, "watch-friends", 0).is_err());

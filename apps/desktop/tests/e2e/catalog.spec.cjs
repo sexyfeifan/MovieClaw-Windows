@@ -40,7 +40,8 @@ test('subscriptions preserve filters, show weekly schedule and distinct download
  await subs(page,request);await expect(page.locator('[data-download-summary]')).toContainText('55%');await expect(page.locator('#subscriptionSchedule')).toContainText('S1E4');await page.getByLabel('搜索订阅').fill('不存在');await expect(page.locator('.catalog-subscription')).toHaveCount(0);await page.getByLabel('搜索订阅').fill('星海');await choose(page,'subscriptionView','海报');await expect(page.locator('.catalog-subscription-poster')).toHaveCount(1);await page.locator('.catalog-subscription').click();await expect(page.locator('#subscriptionUnits')).toContainText('等待入库');await expect(page.locator('#subscriptionUnits')).toContainText('55%');await expect(page.locator('#subscriptionUnits')).toContainText('2.0 MB/s');
 });
 test('recent arrival plays the actual first-unwatched season and episode, not the first batch unit',async({page,request})=>{
- await subs(page,request);await page.locator('[data-recent]').click();await expect(page.locator('#playerView')).toBeVisible();expect((await state(request)).requests.find(r=>r.path==='/playback/sessions').body).toMatchObject({media_item_id:3,season_number:3,episode_number:2});
+ await subs(page,request);await page.locator('[data-recent]').click();await expect(page.locator('#playerView')).toBeVisible();
+ await expect.poll(async()=>(await state(request)).requests.find(r=>r.path==='/playback/sessions')?.body).toMatchObject({media_item_id:3,season_number:3,episode_number:2});
 });
 test('create smart subscription sends stable ref and profile revision exactly once',async({page,request})=>{
  await newSub(page,request,{catalogCreateDelay:400});await page.getByRole('button',{name:'确认订阅',exact:true}).click();await expect(page.getByRole('button',{name:'确认订阅',exact:true})).toBeDisabled();await expect(page.locator('.catalog-dialog')).toHaveCount(0);

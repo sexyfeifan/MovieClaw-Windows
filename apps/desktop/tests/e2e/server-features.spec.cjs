@@ -19,6 +19,7 @@ test('plugin entries follow installation, navigation permissions and uninstall w
   expect((await state(request)).requests.filter(v=>v.path.startsWith('/plugins/watch-presence'))).toHaveLength(count);
   await patch(request,{pluginApps:[]});await page.evaluate(()=>DesktopPlugins.refresh(true));
   await expect(page.locator('#pluginNav')).toBeHidden();await expect(page.locator('#btnBrowseFriends')).toBeHidden();
+  await expect(page.locator('#openWatchFriends')).toHaveCount(0);
   await page.locator('[data-page="home"]').click();await page.locator('[data-page="settings"]').click();
   await expect(page.locator('.friends-settings')).toContainText('服务器未提供当前账号可用');
   await expect(page.locator('#openWatchFriends')).toHaveCount(0);
@@ -62,4 +63,17 @@ test('learned intro automatically skips and undo returns to the prior position a
   await expect(page.locator('#autoSkipFeedback')).toContainText('已跳过片头');
   await page.locator('#autoSkipFeedback button').click();
   await expect.poll(()=>seekTo(page)).toContain(12);expect((await state(request)).autoSkip.intro).toBe(false);
+});
+test('global auto-skip follows the server, restores a failed setting, and takes effect after a successful save',async({page,request})=>{
+  await play(page,request,{segments:[{type:'ad',start_ms:10000,end_ms:30000}],autoSkip:{enabled:false,intro:false},autoSkipError:true});
+  await page.evaluate(()=>Player.checkSegments());expect(await seekTo(page)).not.toContain(30);
+  await page.locator('#btnSettings').click();
+  const toggle=page.getByLabel('自动跳过广告、预告和已记住的片头',{exact:true});
+  await expect(toggle).not.toBeChecked();await toggle.check();
+  await expect(page.locator('#autoSkipFeedback')).toContainText('设置未保存');
+  await expect(toggle).not.toBeChecked();await expect(toggle).toBeEnabled();
+  expect((await state(request)).autoSkip.enabled).toBe(false);
+  await patch(request,{autoSkipError:false});await toggle.check();
+  await expect.poll(async()=>(await state(request)).autoSkip.enabled).toBe(true);
+  await expect.poll(()=>seekTo(page)).toContain(30);
 });
