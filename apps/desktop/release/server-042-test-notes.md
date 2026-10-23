@@ -10,6 +10,8 @@
 
 下载带构建号的安装版 ZIP，解压后运行其中带括号构建号的 EXE。兼容 EXE 与便携版继续保留；最终发布提供提交号、构建号和 SHA-256。
 
+发布资源同时保留旧客户端要求的 `MovieClaw-Desktop-*` 名称，内容与 `MovieClaw-Windows-*` 相同，校验清单同时覆盖两者。正式版本沿用 `desktop-vX.Y.Z` 发布顺序；测试版不会被自动更新器当作正式升级。
+
 此为托管 CI 验证的测试版。安装包可能未签名。真实显卡的 HDR、音频直通、DPI、多显示器、休眠及跨网络播放仍需 Windows 真机验证。
 
 完整行为和清单见 [Windows 验证说明](../../../docs/windows-server-042-validation.md)。
