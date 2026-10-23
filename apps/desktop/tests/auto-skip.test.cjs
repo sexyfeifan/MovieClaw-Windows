@@ -29,3 +29,12 @@ test('manual intro persists to its own series and a late preference cannot enter
   h.owner.session.username='bob';release({});await pending;assert.equal(h.skip.check(h.player),false);
   h.skip.reset();assert.equal(h.skip.check(h.player),false);
 });
+test('a session restart retains skipped segments but an explicit stop or different episode clears them',()=>{
+  const h=load();h.player.currentSegments=[{type:'ad',start_ms:10000,end_ms:20000}];
+  h.skip.attach(h.player,{auto_skip:{enabled:true}});assert.equal(h.skip.check(h.player),true);
+  h.skip.reset(true);h.player.generation++;h.skip.attach(h.player,{auto_skip:{enabled:true}});
+  h.setPosition(12);assert.equal(h.skip.check(h.player),false);
+  h.skip.reset();h.skip.attach(h.player,{auto_skip:{enabled:true}});assert.equal(h.skip.check(h.player),true);
+  h.skip.reset(true);h.player.context.media_item_id=8;h.player.generation++;
+  h.skip.attach(h.player,{auto_skip:{enabled:true}});h.setPosition(12);assert.equal(h.skip.check(h.player),true);
+});

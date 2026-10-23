@@ -70,6 +70,20 @@ test('automatic ad skip and undo use the original file clock without skipping ag
   expect((await seekTo(page)).filter(v=>v===30)).toHaveLength(1);
   await page.locator('#playerBack').click();await expect(page.locator('#autoSkipFeedback')).toBeHidden();
 });
+test('an automatic skip beyond the transcode buffer retains undo through both session restarts',async({page,request})=>{
+  await play(page,request,{segments:[{type:'ad',start_ms:10000,end_ms:120000}],autoSkip:{enabled:true,intro:false}});
+  await expect.poll(async()=>(await state(request)).created.length).toBe(2);
+  await expect(page.locator('#autoSkipFeedback')).toContainText('已跳过广告');
+  await expect.poll(()=>page.evaluate(()=>Player.activeEngine)).toBe('mpv');
+  await page.evaluate(()=>{window.__fixture.props['time-pos']=0;});
+  await page.locator('#autoSkipFeedback button').click();
+  await expect.poll(async()=>(await state(request)).created.length).toBe(3);
+  await expect.poll(()=>page.evaluate(()=>Player.activeEngine)).toBe('mpv');
+  await expect(page.locator('#autoSkipFeedback')).toBeHidden();
+  await page.evaluate(()=>Player.checkSegments());
+  const starts=(await state(request)).requests.filter(r=>r.path==='/playback/sessions').map(r=>r.body.start_ms);
+  expect(starts).toEqual([0,120000,12000]);
+});
 test('manual intro learns the series preference, and undo disables it on the server',async({page,request})=>{
   await play(page,request,{segments:[{type:'intro',start_ms:10000,end_ms:30000}],autoSkip:{enabled:true,intro:false}});
   await expect(page.locator('#playerSkipBtn')).toBeVisible();await page.locator('#playerSkipBtn').click();

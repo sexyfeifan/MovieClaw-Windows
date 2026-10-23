@@ -1997,7 +1997,7 @@ const Player = {
   close(options = {}) {
     window.DesktopFriends?.dispose();
     if (options.invalidate !== false && typeof App !== 'undefined') App._playbackSeq = (App._playbackSeq || 0) + 1;
-    window.DesktopAutoSkip?.reset();
+    window.DesktopAutoSkip?.reset(options.hide === false && options.final === false);
     if (typeof App !== 'undefined') { App.cancelAutoNext(); clearTimeout(App._networkRetryTimer); App._networkRetryTimer = null; }
     const nativeFullscreenRestore = options.hide !== false ? this.restoreNativeFullscreen() : Promise.resolve();
     if (!this.activeEngine && this._closePromise) {
