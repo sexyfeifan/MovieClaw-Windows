@@ -34,7 +34,7 @@ SEPARATOR = "\n---\n\n## 简体中文\n"
 # 客户端 tag 前缀 → 官网的产品标识
 CLIENT_PRODUCTS = {
     "ios": "iphone", "tvos": "appletv", "macos": "mac", "transcoder": "transcoder",
-    "android": "android", "androidtv": "androidtv", "windows": "windows",
+    "android": "android", "androidtv": "androidtv", "windows": "windows", "desktop": "windows",
 }
 
 

@@ -174,7 +174,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release download "$NER_MODEL_TAG" \
-            --repo "${{ github.repository }}" \
+            --repo "movieclaw/MovieClaw" \
             --dir data/models/torrent-ner
 
       # 全仓库一次就够，放在第一片

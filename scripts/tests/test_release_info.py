@@ -129,6 +129,7 @@ class ReleaseInfoTest(unittest.TestCase):
         self.assertNotIn("imageUpdate", info)
         self.assertIsNone(module.build_client("tvos-v0.7.0", None)["notes"])
         self.assertEqual(module.build_client("ios-v0.8.0", None)["product"], "iphone")
+        self.assertEqual(module.build_client("desktop-v1.0.3", None)["product"], "windows")
         with self.assertRaises(ValueError):
             module.build_client("android-v0.3.3", notes)  # 标题里的版本对不上
         with self.assertRaises(ValueError):
