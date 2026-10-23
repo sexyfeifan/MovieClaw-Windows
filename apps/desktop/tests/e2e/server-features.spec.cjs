@@ -50,6 +50,11 @@ test('plugin resource search opens explicitly without changing the saved sidebar
   await expect(page.locator('.catalog-page h1')).toHaveText('发现');
   await expect(page.locator('#catalogNav [data-page="discover"]')).toHaveCount(0);
   await expect.poll(async()=>(await state(request)).requests.find(r=>r.path==='/search/titles')?.body).toMatchObject({query:'星海',save_history:false});
+  await page.locator('[data-title-ref="tmdb:tv:44"]').click();
+  await expect.poll(()=>page.evaluate(()=>App.currentPage)).toBe('discoverDetail');
+  await expect(page.locator('.catalog-page')).toContainText('星海');
+  await page.evaluate(()=>DesktopPlugins.route({path:'/media/tv/44',epoch:API.contextEpoch}));
+  await expect(page.locator('.catalog-title-detail')).toContainText('星海旅程');
 });
 async function play(page,request,options) {
   await openDesktop(page,request,options);await ready(page);

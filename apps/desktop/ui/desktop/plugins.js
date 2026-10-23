@@ -76,7 +76,7 @@ window.DesktopPlugins = (() => {
       } else if ((match=path.match(/^\/library\/(\d+)\/item\/(\d+)$/))) {
         await App.navigate('detail',{libraryId:Number(match[1]),itemId:Number(match[2])});
       } else if ((match=path.match(/^\/media\/(movie|tv)\/(\d+)$/))) {
-        await App.navigate('discoverDetail',{ref:`tmdb:${match[1]}:${match[2]}`,fromPlugin:true});
+        await App.navigate('discoverDetail',{reference:`tmdb:${match[1]}:${match[2]}`,fromPlugin:true});
       } else if (path==='/search') {
         const params=new URLSearchParams(payload.query || ''), query=(params.get('q') || '').slice(0,100);
         if (query) await App.navigate(params.get('tab')==='media'?'search':'discover',{query,fromPlugin:true});

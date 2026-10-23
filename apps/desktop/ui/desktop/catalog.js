@@ -18,7 +18,8 @@ window.DesktopCatalog = (() => {
     const key = page.startsWith('subscription') ? 'subscriptions' : 'discover';
     return preferences()[key] === true && (key !== 'subscriptions' || permissions().subscribe);
   }
-  const canOpen = (page,params) => enabled(page) || (params?.fromPlugin === true && ['discover','discoverDetail'].includes(page));
+  // Pinning the discovery sidebar entry is optional; explicit film/person links remain usable.
+  const canOpen = (page,params) => enabled(page) || ['discoverDetail','discoverPerson','discoverCollection'].includes(page) || (params?.fromPlugin === true && page === 'discover');
   const option = (value, text, selected) => `<option value="${html(value)}" ${String(value) === String(selected) ? 'selected' : ''}>${html(text)}</option>`;
   const select = (id, label, values, selected) => `<label class="catalog-field">${html(label)}<select id="${id}" class="settings-select" aria-label="${html(label)}">${values.map(([value,text]) => option(value,text,selected)).join('')}</select></label>`;
   const checked = value => value ? 'checked' : '';
