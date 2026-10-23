@@ -96,6 +96,8 @@ import io.movieclaw.android.core.designsystem.McNavButton
 import io.movieclaw.android.core.designsystem.RemoteImage
 import io.movieclaw.android.core.designsystem.Accent
 import io.movieclaw.android.core.designsystem.Bg
+import io.movieclaw.android.core.designsystem.LocalTabHazeState
+import dev.chrisbanes.haze.hazeSource
 import io.movieclaw.android.core.designsystem.Danger
 import io.movieclaw.android.core.designsystem.ErrorPane
 import io.movieclaw.android.core.designsystem.GlassCard
@@ -107,6 +109,11 @@ import io.movieclaw.android.core.designsystem.TextMuted
 import io.movieclaw.android.core.designsystem.Warning
 import io.movieclaw.android.core.model.EpisodeView
 import io.movieclaw.android.core.model.LibraryItemDetailView
+import io.movieclaw.android.core.model.LibraryItemView
+import io.movieclaw.android.core.model.CollectionSeriesView
+import io.movieclaw.android.core.api.McApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import io.movieclaw.android.core.model.LibraryFileView
 import io.movieclaw.android.core.model.DeleteFollowUpView
 import io.movieclaw.android.core.model.ItemDeletePreviewView
@@ -168,6 +175,21 @@ class ItemDetailViewModel @Inject constructor(
 
     private val _state = MutableStateFlow<Loadable<Detail>>(Loadable.Loading)
     val state = _state.asStateFlow()
+
+    /**
+     * 详情页下面的「相似推荐」与电影的「作品系列」两行（iOS / Apple TV / Mac / Web 同一套规则）。
+     * 有系列一行时相似推荐排除同系列的片——系列那一行已经按上映顺序列全了。
+     */
+    data class Related(
+        val similar: List<LibraryItemView> = emptyList(),
+        val series: CollectionSeriesView? = null,
+    )
+
+    private val _related = MutableStateFlow(Related())
+    val related = _related.asStateFlow()
+
+    /** 两行只在第一次拿到详情时拉：换字幕、恢复文件后整页重拉详情，推荐不跟着闪 */
+    private var relatedRequested = false
 
     private val _selectedSeason = MutableStateFlow<Int?>(null)
     val selectedSeason = _selectedSeason.asStateFlow()
@@ -483,6 +505,30 @@ class ItemDetailViewModel @Inject constructor(
         return lines.joinToString("\n")
     }
 
+    /**
+     * 相似推荐与系列并行拉：先按「有系列合集」排除同系列；系列一行最后没出来（只有一部、
+     * 或拉不到上游档案——本地 NFO 定的系列就没有）时再拉一次不排除的，否则续集哪儿都看不到。
+     * 推荐是锦上添花：失败、旧服务端没有这个接口，都是那一行不出。
+     */
+    private suspend fun fetchRelated(api: McApi, detail: LibraryItemDetailView): Related = coroutineScope {
+        val seriesId = detail.seriesCollectionId.takeIf { detail.kind != "tv" }
+        suspend fun similar(excludeSeries: Boolean) = runCatching {
+            api.similarItems(libraryId, itemId, excludeSeries = if (excludeSeries) true else null).dataOrThrow()
+        }.getOrDefault(emptyList())
+        val similarItems = async { similar(seriesId != null) }
+        val series = seriesId?.let { id ->
+            runCatching { api.collectionSeries(id).dataOrThrow() }.getOrNull()
+                ?.takeIf { it.available && it.parts.size > 1 }
+        }
+        val items = if (seriesId != null && series == null) {
+            similarItems.cancel()
+            similar(false)
+        } else {
+            similarItems.await()
+        }
+        Related(items, series)
+    }
+
     fun load() {
         viewModelScope.launch {
             _state.value = Loadable.Loading
@@ -496,6 +542,10 @@ class ItemDetailViewModel @Inject constructor(
                 val detail = api.libraryItemDetail(libraryId, itemId).dataOrThrow()
                 val (episodes, anchors) = fetchSeasons(detail)
                 _state.value = Loadable.Ready(Detail(detail, episodes, anchors))
+                if (!relatedRequested) {
+                    relatedRequested = true
+                    launch { _related.value = fetchRelated(api, detail) }
+                }
                 episodesBySeason = episodes
                 anchorsBySeason = anchors
                 // 初始选中：续播那一季的锚点（长剧分段 §3「进详情页」：段锁在它所在的段）。
@@ -744,6 +794,248 @@ class ItemDetailViewModel @Inject constructor(
             apiFactory.forOrigin(origin).purgeLibraryFile(libraryId, itemId, fileId).dataOrThrow()
         }.map { io.movieclaw.android.core.model.LibraryMarksBus.bump() }
     }
+
+    /* ---------------- 「⋯」菜单的动作（iOS `LibraryItemDetailView.actionsMenu` 的同款动作） ---------------- */
+
+    /**
+     * 库本身（不是条目）。⋯ 菜单要用它的两处：
+     * `capabilities.scraped`（决定刮削类动作摆不摆）与 `extract_chapter_images`（决定「重新生成章节」）。
+     */
+    private val _library = MutableStateFlow<io.movieclaw.android.core.model.LibraryView?>(null)
+    val library = _library.asStateFlow()
+
+    fun loadLibrary() {
+        if (_library.value != null) return
+        viewModelScope.launch {
+            val origin = repository.ui.value.origin ?: return@launch
+            runCatching { apiFactory.forOrigin(origin).library(libraryId).dataOrThrow() }
+                .onSuccess { _library.value = it }
+        }
+    }
+
+    /** 删除整个条目（⋯ 菜单的「删除影片」）：目录连 NFO/海报/字幕一起清掉 */
+    suspend fun deleteItem(): Result<io.movieclaw.android.core.model.ItemDeleteResultView> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).deleteLibraryItem(libraryId, itemId).dataOrThrow()
+        }.onSuccess { io.movieclaw.android.core.model.LibraryMarksBus.bump() }
+    }
+
+    /** 刷新元数据（后台作业，202）：受理成功界面自己进「正在刷新」态（服务端 `scraping` 也会置位） */
+    suspend fun refreshMetadata(): Result<io.movieclaw.android.core.model.ItemJobView> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching { apiFactory.forOrigin(origin).refreshItemMetadata(libraryId, itemId).dataOrThrow() }
+    }
+
+    /** 重新生成章节图（后台作业） */
+    suspend fun regenerateChapters(): Result<io.movieclaw.android.core.model.ItemJobView> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching { apiFactory.forOrigin(origin).regenerateItemChapters(libraryId, itemId).dataOrThrow() }
+    }
+
+    /** 重新识别预览（打开面板时重走一遍识别链，只读不落库） */
+    suspend fun reidentifyPreview(): Result<io.movieclaw.android.core.model.ReidentifyPreviewView> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching { apiFactory.forOrigin(origin).reidentifyPreview(libraryId, itemId).dataOrThrow() }
+    }
+
+    /** 把一组文件改挂到某部作品（走识别链的认领接口，会记为人工身份） */
+    suspend fun assignFilesToTitle(
+        fileIds: List<Long>,
+        titleRef: String,
+    ): Result<Unit> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).assignFilesToTitle(
+                io.movieclaw.android.core.model.ClaimBatchPayload(fileIds = fileIds, titleRef = titleRef),
+            ).dataOrThrow()
+        }.map { io.movieclaw.android.core.model.LibraryMarksBus.bump() }
+    }
+
+    /** 标为非独立作品（花絮/预告类，不动磁盘） */
+    suspend fun markFilesAsExtras(fileIds: List<Long>): Result<Unit> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).markFilesAsExtras(
+                io.movieclaw.android.core.model.DetachPayload(fileIds = fileIds),
+            ).dataOrThrow()
+        }.map { io.movieclaw.android.core.model.LibraryMarksBus.bump() }
+    }
+
+    /** 面板里「自己搜…」用：按片名搜上游条目（不写搜索历史） */
+    suspend fun searchTitlesForReidentify(query: String): Result<List<io.movieclaw.android.core.model.DiscoveredTitle>> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin)
+                .searchTitles(
+                    io.movieclaw.android.core.model.TitleSearchRequest(
+                        query = query,
+                        saveHistory = false,
+                    )
+                )
+                .dataOrThrow()
+                .titles
+        }
+    }
+
+    /** 换图候选 */
+    suspend fun artworkCandidates(): Result<io.movieclaw.android.core.model.ArtworkCandidatesView> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching { apiFactory.forOrigin(origin).artworkCandidates(libraryId, itemId).dataOrThrow() }
+    }
+
+    /** 选定一张图（`filePath = null` = 恢复自动选图）；选完详情页要重拉（海报/背景换了） */
+    suspend fun selectArtwork(kind: String, filePath: String?): Result<Unit> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).selectArtwork(
+                libraryId,
+                itemId,
+                io.movieclaw.android.core.model.ArtworkSelectPayload(kind = kind, filePath = filePath),
+            ).dataOrThrow()
+        }
+    }
+
+    /** 转移预览（只读） */
+    suspend fun transferPreview(targetLibraryId: Long): Result<io.movieclaw.android.core.model.TransferPreviewView> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).transferPreview(libraryId, itemId, targetLibraryId).dataOrThrow()
+        }
+    }
+
+    /** 提交转移（后台作业） */
+    suspend fun startTransfer(targetLibraryId: Long): Result<Unit> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).transferItem(
+                libraryId,
+                itemId,
+                io.movieclaw.android.core.model.TransferPayload(targetLibraryId),
+            ).dataOrThrow()
+        }
+    }
+
+    /** 转移状态（源库一份） */
+    suspend fun transferStatus(): Result<io.movieclaw.android.core.model.TransferStatusView> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching { apiFactory.forOrigin(origin).transferStatus(libraryId).dataOrThrow() }
+    }
+
+    /** 清除本条目的观看记录；返回服务端给的结论文案（信封 message） */
+    suspend fun clearHistory(): Result<String> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            val env = apiFactory.forOrigin(origin).clearPlaybackHistory(scope = "item", mediaItemId = itemId)
+            env.dataOrThrow()
+            env.message
+        }.onSuccess { io.movieclaw.android.core.model.LibraryMarksBus.bump() }
+    }
+
+    /** 可加入的合集（名单驱动 + 自己能动的；面板再按这个二次过滤） */
+    suspend fun collectionsForPicker(): Result<List<io.movieclaw.android.core.model.CollectionView>> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).collections(libraryId = libraryId, includeEmpty = true).dataOrThrow()
+        }
+    }
+
+    suspend fun addToCollection(collectionId: Long): Result<io.movieclaw.android.core.model.CollectionView> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).collectionAddItems(
+                collectionId,
+                io.movieclaw.android.core.model.CollectionItemsPayload(mediaItemIds = listOf(itemId)),
+            ).dataOrThrow()
+        }
+    }
+
+    /** 新建手动合集并把这一个条目放进去（一次请求，同 iOS） */
+    suspend fun createCollectionAndAdd(name: String): Result<io.movieclaw.android.core.model.CollectionView> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            apiFactory.forOrigin(origin).createCollection(
+                io.movieclaw.android.core.model.CollectionPayload(
+                    name = name,
+                    libraryId = libraryId,
+                    itemIds = listOf(itemId),
+                )
+            ).dataOrThrow()
+        }
+    }
+
+    /**
+     * 当前有效分享；null = 还没分享过。
+     * 服务端这里 `data` 可以为 null（信封仍 success），**不能走 dataOrThrow**。
+     */
+    suspend fun existingShare(): Result<io.movieclaw.android.core.model.ShareView?> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            val env = apiFactory.forOrigin(origin).libraryItemShare(libraryId, itemId)
+            if (!env.success) {
+                throw io.movieclaw.android.core.network.ApiException(
+                    code = env.code.ifEmpty { "FAILED" },
+                    message = env.message.ifEmpty { "请求失败" },
+                )
+            }
+            env.data
+        }
+    }
+
+    /** 生成分享链接；第二个值 = 服务端说「已有一条有效分享」（`SHARE_EXISTS`） */
+    suspend fun createShare(
+        days: Int,
+        password: String?,
+    ): Result<Pair<io.movieclaw.android.core.model.ShareView, Boolean>> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching {
+            val env = apiFactory.forOrigin(origin).createLibraryItemShare(
+                libraryId,
+                itemId,
+                io.movieclaw.android.core.model.ShareCreateRequest(expiresInDays = days, password = password),
+            )
+            env.dataOrThrow() to (env.code == "SHARE_EXISTS")
+        }
+    }
+
+    suspend fun revokeShare(): Result<Unit> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching { apiFactory.forOrigin(origin).revokeLibraryItemShare(libraryId, itemId).dataOrThrow() }
+            .map { }
+    }
+
+    /** 「洗版…」按条目类型找现成的订阅（找到就把订阅详情页跑一轮洗版） */
+    suspend fun subscriptionsOfKind(kind: String): Result<List<io.movieclaw.android.core.model.SubscriptionView>> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching { apiFactory.forOrigin(origin).subscriptions(kind = kind).dataOrThrow() }
+    }
+
+    /** 「转移到其他库…」的目标库候选（同类型、可见的库；面板再排掉本库） */
+    suspend fun librariesForTransfer(): Result<List<io.movieclaw.android.core.model.LibraryView>> {
+        val origin = repository.ui.value.origin
+            ?: return Result.failure(IllegalStateException("尚未连接服务器"))
+        return runCatching { apiFactory.forOrigin(origin).libraries().dataOrThrow() }
+    }
 }
 
 @Composable
@@ -760,9 +1052,22 @@ fun ItemDetailScreen(
     onOpenLlmSettings: () -> Unit = {},
     /** 「交给 Agent 处理」建好会话后跳会话页 */
     onOpenAgentSession: (String) -> Unit = {},
+    /** 相似推荐 / 系列里库内有的那部 → 它的库内详情（库 id, 条目 id） */
+    onOpenItem: (Long, Long) -> Unit = { _, _ -> },
+    /** 系列里缺的那部 → 发现页的 TMDB 详情（title_ref 形如 tmdb:movie:123），在那里订阅 */
+    onOpenTitle: (String) -> Unit = {},
+    /** ⋯ 菜单「搜索资源」：带片名与类型进搜索页（iOS `SearchScope.ofMediaKind` 同口径） */
+    onSearch: (String, String?) -> Unit = { _, _ -> },
+    /** ⋯ 菜单「洗版…」已有订阅时：去订阅详情页跑一轮洗版（iOS `.subscription(id:upgradeRun: true)`） */
+    onOpenSubscription: (Long, Boolean) -> Unit = { _, _ -> },
+    /** ⋯ 菜单「洗版…」没有订阅时：打开订阅弹层（title_ref 形如 tmdb:movie:123） */
+    onSubscribe: (String) -> Unit = {},
+    /** 「转移到其他库」完成后「去目标库查看」（iOS `goToTarget`） */
+    onOpenLibrary: (Long) -> Unit = {},
     vm: ItemDetailViewModel = hiltViewModel(),
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
+    val related by vm.related.collectAsStateWithLifecycle()
     val selectedSeason by vm.selectedSeason.collectAsStateWithLifecycle()
     /** 选中的单元（季 + 集）：播放键、续播点、已看、版本都以它为准（iOS SelectedEpisode） */
     val selectedUnit by vm.selectedEpisode.collectAsStateWithLifecycle()
@@ -774,6 +1079,14 @@ fun ItemDetailScreen(
     // 文件区动作：删除走底部确认单（iOS `DeleteFileSheet`），立即清理走确认弹窗
     var trashTarget by remember { mutableStateOf<io.movieclaw.android.core.model.LibraryFileView?>(null) }
     var purgeTarget by remember { mutableStateOf<io.movieclaw.android.core.model.LibraryFileView?>(null) }
+    // ⋯ 菜单（iOS `actionsMenu`）：菜单开关、点下的动作、两个确认框、本地「正在刷新」态
+    var menuOpen by remember { mutableStateOf(false) }
+    var picking by remember { mutableStateOf<ItemActionId?>(null) }
+    var refreshConfirm by remember { mutableStateOf(false) }
+    var clearConfirm by remember { mutableStateOf(false) }
+    /** 点下到服务端 `scraping` 置位之间挡住重复点击（iOS 的本地 `kicking`） */
+    var kicking by remember { mutableStateOf(false) }
+    val library by vm.library.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
@@ -817,15 +1130,34 @@ fun ItemDetailScreen(
             CircularProgressIndicator(color = TextMuted)
         }
         is Loadable.Failed -> ErrorPane(message = s.message, onRetry = vm::load)
-        is Loadable.Ready -> Column(
+        is Loadable.Ready -> {
+        // 沉浸式：页面底色 = 剧照的主色（iOS HeroEdgeColor / 网页 .detail-ambient；
+        // 与首页英雄同源 → 同一个取色缓存键，从封面点进来零等待）。取色是异步的，
+        // 底色淡入而不是从黑跳变（iOS heroEdgeBackground 也是 0.5s 渐显）
+        val rawTint = io.movieclaw.android.core.discovery.rememberAmbientColor(
+            s.value.item.backdropUrl ?: s.value.item.posterUrl,
+            origin,
+            // 详情页口径：**底边色带**（iOS HeroEdgeColor：饱和 ×1.1、亮度 ≤0.34）——
+            // 比「整图主色」更暗更像页面底色（AmbientColorLoader 里详情页就是这么分的）
+            bottomBand = true,
+            // 无 fanart 的条目服务端对 kind=fanart 返回 404 → 退到海报再取
+            fallbackUrl = s.value.item.posterUrl,
+        )
+        val detailTint by androidx.compose.animation.animateColorAsState(
+            targetValue = rawTint ?: Bg,
+            animationSpec = androidx.compose.animation.core.tween(420),
+            label = "detail-tint",
+        )
+        Column(
             Modifier
                 .fillMaxSize()
-                .background(Bg)
+                .background(detailTint)
                 .verticalScroll(rememberScrollState()),
         ) {
             Hero(
                 detail = s.value.item,
                 origin = origin,
+                tint = detailTint,
                 onBack = onBack,
                 onPlay = onPlay,
                 libraryId = libraryId,
@@ -858,6 +1190,10 @@ fun ItemDetailScreen(
                     onCancelJob = { vm.cancelSubtitleJob() },
                     onHandOffToAgent = { id -> vm.handOffSubtitleGenToAgent(id) },
                 ),
+                trailingActions = {
+                    // 刮削中：按钮右上角点一颗蓝点（iOS `actionsMenu` 的蓝点同款）
+                    ItemActionsButton(scraping = s.value.item.scraping || kicking) { menuOpen = !menuOpen }
+                },
             ) {
                 // 网页正文顺序：分集区 → 章节 → **演职员** → 文件区
                 if (s.value.item.kind == "tv" && s.value.episodes.isNotEmpty()) {
@@ -882,6 +1218,18 @@ fun ItemDetailScreen(
                     )
                 }
                 CastSection(detail = s.value.item, origin = origin, onOpenPerson = onOpenPerson)
+                // 演职员 → 相似推荐 → 系列（iOS / Apple TV / Mac / Web 同一个顺序）
+                SimilarSection(items = related.similar, libraryId = libraryId, origin = origin, onOpenItem = onOpenItem)
+                related.series?.let { series ->
+                    SeriesSection(
+                        series = series,
+                        libraryId = libraryId,
+                        itemId = itemId,
+                        origin = origin,
+                        onOpenItem = onOpenItem,
+                        onOpenTitle = onOpenTitle,
+                    )
+                }
                 // 文件区（iOS `isMovie ? detail.files : selectedEpisode.files`）：
                 // 电影 = 整条的文件；剧集 = 当前选中那一集的文件（没选中就不显示这一区）
                 val sectionFiles = sectionFilesFor(s.value.item, selectedUnit, s.value.episodes)
@@ -913,8 +1261,10 @@ fun ItemDetailScreen(
                         },
                     )
                 }
+                ExternalLinks(s.value.item)
                 Spacer(Modifier.height(32.dp))
             }
+        }
         }
     }
 
@@ -956,6 +1306,186 @@ fun ItemDetailScreen(
             },
         )
     }
+
+    /* ---------------- ⋯ 菜单的动作（iOS `actionsMenu` 的 switch） ---------------- */
+
+    // 库能力（capabilities.scraped / extract_chapter_images）跟着条目一起要
+    LaunchedEffect(readyDetail?.mediaItemId) {
+        if (readyDetail != null) vm.loadLibrary()
+    }
+    // 菜单本体独立成一层（Popup）：11 行比 hero 高，摆在 hero 里会被正文盖住
+    if (menuOpen && readyDetail != null) {
+        ItemActionsMenuPopup(
+            entries = itemMenuEntries(
+                detail = readyDetail,
+                library = library,
+                permissions = permissions,
+                scraping = readyDetail.scraping || kicking,
+            ),
+            onPick = { id ->
+                menuOpen = false
+                picking = id
+            },
+            onDismiss = { menuOpen = false },
+        )
+    }
+    picking?.let { action ->
+        if (readyDetail != null) {
+            when (action) {
+                ItemActionId.SEARCH -> {
+                    picking = null
+                    onSearch(
+                        readyDetail.title,
+                        readyDetail.kind.takeIf { it == "movie" || it == "tv" },
+                    )
+                }
+
+                ItemActionId.ADD_TO_COLLECTION -> AddToCollectionSheet(
+                    title = readyDetail.title,
+                    onDismiss = { picking = null },
+                    loadCollections = { vm.collectionsForPicker() },
+                    addTo = { vm.addToCollection(it) },
+                    createAndAdd = { vm.createCollectionAndAdd(it) },
+                )
+
+                ItemActionId.SHARE -> ItemShareSheet(
+                    title = readyDetail.title,
+                    origin = origin,
+                    onDismiss = { picking = null },
+                    loadShare = { vm.existingShare() },
+                    createShare = { days, password -> vm.createShare(days, password) },
+                    revokeShare = { vm.revokeShare() },
+                )
+
+                ItemActionId.UPGRADE -> {
+                    // 洗版：已有订阅就去它那儿跑一轮（iOS `upgrade`）；没有就以洗版模式开订阅弹层
+                    val subKind = if (readyDetail.kind == "tv") "tv" else "movie"
+                    val tmdb = readyDetail.tmdbId ?: 0L
+                    picking = null
+                    // 组合提交后再启动（协程挂在外层 scope 上，分支随 picking=null 离开组合也不受影响）
+                    androidx.compose.runtime.SideEffect {
+                        scope.launch {
+                            val existing = vm.subscriptionsOfKind(subKind).getOrDefault(emptyList())
+                                .firstOrNull { it.media.tmdbId?.toLong() == tmdb }
+                            if (existing != null) onOpenSubscription(existing.id, true)
+                            else onSubscribe("tmdb:$subKind:$tmdb")
+                        }
+                    }
+                }
+
+                ItemActionId.REIDENTIFY -> ReidentifySheet(
+                    onDismiss = { picking = null },
+                    origin = origin,
+                    loadPreview = { vm.reidentifyPreview() },
+                    assign = { fileIds, titleRef -> vm.assignFilesToTitle(fileIds, titleRef) },
+                    markExtras = { fileIds -> vm.markFilesAsExtras(fileIds) },
+                    searchTitles = { query -> vm.searchTitlesForReidentify(query) },
+                )
+
+                ItemActionId.REFRESH_METADATA -> {
+                    picking = null
+                    refreshConfirm = true
+                }
+
+                ItemActionId.REGENERATE_CHAPTERS -> {
+                    picking = null
+                    androidx.compose.runtime.SideEffect {
+                        scope.launch {
+                            vm.regenerateChapters()
+                                .onSuccess {
+                                    feedback.show(McNotice("已开始重新生成章节", FeedbackTone.Success))
+                                    vm.load()
+                                }
+                                .onFailure { feedback.show(McNotice(friendlyMessage(it), FeedbackTone.Error)) }
+                        }
+                    }
+                }
+
+                ItemActionId.ARTWORK -> ArtworkPickerSheet(
+                    onDismiss = { picking = null },
+                    origin = origin,
+                    loadCandidates = { vm.artworkCandidates() },
+                    select = { kind, filePath ->
+                        vm.selectArtwork(kind, filePath).onSuccess { vm.load() }
+                    },
+                )
+
+                ItemActionId.TRANSFER -> TransferItemSheet(
+                    title = readyDetail.title,
+                    kind = readyDetail.kind,
+                    sourceLibraryId = libraryId,
+                    // 候选口径同后端 `assert_transferable`：比的是**库**的来源
+                    sourceOrigin = library?.source,
+                    onDismiss = { picking = null },
+                    loadCandidates = { vm.librariesForTransfer() },
+                    loadPreview = { vm.transferPreview(it) },
+                    run = { vm.startTransfer(it) },
+                    pollStatus = { vm.transferStatus() },
+                    onOpenLibrary = { id ->
+                        picking = null
+                        onOpenLibrary(id)
+                    },
+                )
+
+                ItemActionId.DELETE_ITEM -> DeleteItemSheet(
+                    detail = readyDetail,
+                    onDismiss = { picking = null },
+                    run = { vm.deleteItem() },
+                    onDeleted = {
+                        picking = null
+                        // 整条删掉了：离开详情页（iOS `leaveToLibrary` 的等价物）
+                        onBack()
+                    },
+                )
+
+                ItemActionId.CLEAR_HISTORY -> {
+                    picking = null
+                    clearConfirm = true
+                }
+            }
+        }
+    }
+    if (refreshConfirm && readyDetail != null) {
+        RefreshMetadataDialog(
+            detail = readyDetail,
+            onDismiss = { refreshConfirm = false },
+            onConfirm = {
+                refreshConfirm = false
+                scope.launch {
+                    // iOS 的刷新：受理后原地重拉，1.5 秒后再拉一次（刮削结果通常这时才回来）
+                    kicking = true
+                    vm.refreshMetadata()
+                        .onSuccess {
+                            vm.load()
+                            kotlinx.coroutines.delay(1500)
+                            vm.load()
+                        }
+                        .onFailure { feedback.show(McNotice(friendlyMessage(it), FeedbackTone.Error)) }
+                    kicking = false
+                }
+            },
+        )
+    }
+    if (clearConfirm && readyDetail != null) {
+        ClearHistoryDialog(
+            title = readyDetail.title,
+            onDismiss = { clearConfirm = false },
+            onConfirm = {
+                clearConfirm = false
+                scope.launch {
+                    vm.clearHistory()
+                        .onSuccess { message ->
+                            // 结论文案用服务端给的（iOS `feedback.success(message)` 同一句）
+                            if (message.isNotBlank()) {
+                                feedback.show(McNotice(message, FeedbackTone.Success))
+                            }
+                            vm.load()
+                        }
+                        .onFailure { feedback.show(McNotice(friendlyMessage(it), FeedbackTone.Error)) }
+                }
+            },
+        )
+    }
 }
 
 /**
@@ -971,6 +1501,8 @@ fun ItemDetailScreen(
 private fun Hero(
     detail: LibraryItemDetailView,
     origin: String?,
+    /** 页面底色（剧照取色）：hero 底边淡成这个色，图与页面之间没有硬边 */
+    tint: Color = Bg,
     onBack: () -> Unit,
     onPlay: (PlayTarget) -> Unit,
     libraryId: Long,
@@ -987,10 +1519,14 @@ private fun Hero(
     subtitleGen: SubtitleGenUiState,
     isAdmin: Boolean,
     subtitleGenActions: SubtitleGenActions,
+    /** 顶栏右侧的动作（详情页的「⋯」更多操作）：与返回键同一行、同一份玻璃 */
+    trailingActions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {},
+    /** hero 上的浮层（⋯ 面板挂在这里，跟随 hero 定位，不跟着正文滚） */
+    heroOverlay: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit = {},
     /** 正文其余部分（分集 / 演职员 / 文件）：与简介同用那一块上提 124 的列 */
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    // 版本/文件、音轨源、discSource 都跟着**选中的那一集**走（iOS `selectedEpisode.files`）：
+    // 版本/文件、音轨源都跟着**选中的那一集**走（iOS `selectedEpisode.files`）：
     // 原来一律拿 `detail.files.firstOrNull()`（第 1 季第 1 个文件），选了季也对不上
     val unitFiles = remember(detail.mediaItemId, unit, episodes) {
         val ids = unit?.let { u -> episodes[u.season]?.firstOrNull { it.episodeNumber == u.episode }?.fileIds }
@@ -1048,13 +1584,17 @@ private fun Hero(
     }
     val remainingMs = resume?.durationMs?.takeIf { it > 0 }?.minus(resumeMs)?.takeIf { it > 0 }
 
+    // hero 内部一份玻璃取样源（剧照 = 模糊源）：返回圆钮压在剧照上，
+    // 走的就是顶栏那套玻璃（iOS 详情页的返回也是 .glass）
+    val heroHaze = dev.chrisbanes.haze.rememberHazeState()
     Column {
+        androidx.compose.runtime.CompositionLocalProvider(LocalTabHazeState provides heroHaze) {
         Box(Modifier.fillMaxWidth().height(heroHeight())) {
             RemoteImage(
                 url = detail.backdropUrl ?: detail.posterUrl,
                 origin = origin,
                 contentDescription = detail.title,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.fillMaxSize().hazeSource(heroHaze),
             )
             Box(
                 Modifier
@@ -1065,22 +1605,27 @@ private fun Hero(
                             0.22f to Color.Transparent,
                             0.52f to Color.Black.copy(alpha = 0.28f),
                             0.84f to Color.Black.copy(alpha = 0.8f),
-                            1f to Bg,
+                            1f to tint,
                         )
                     ),
             )
             Row(
                 Modifier
+                    .fillMaxWidth()
                     .align(Alignment.TopStart)
                     .statusBarsPadding()
                     .padding(horizontal = 8.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 McNavButton(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回", onClick = onBack)
-                // 网页这里只有一颗「更多操作」（搜索资源 / 加入合集 / 分享 / 洗版 /
-                // 重新刮削 / 换海报 / 转移 / 删除 / 清除观看记录）。
-                // 那个菜单还没接，先不挂两颗点不动的键——假控件。
+                // 网页/iOS 这里只有一颗「更多操作」（搜索资源 / 加入合集 / 分享 / 洗版 /
+                // 修正识别 / 刷新元数据 / 重新生成章节 / 更换图片 / 转移 / 删除 / 清除观看记录），
+                // 判定与显隐照 iOS `actionsMenu`——见 ItemActionsMenu.kt
+                Spacer(Modifier.weight(1f))
+                trailingActions()
             }
+            heroOverlay()
+        }
         }
 
         Column(Modifier.padding(horizontal = McMetrics.pagePadding).offset(y = (-124).dp)) {
@@ -1225,8 +1770,6 @@ private fun Hero(
                             // 详情页选好的轨随起播请求带走（服务端 apply 后返回的 plan 就是它）
                             preferredAudio = effectiveAudio,
                             preferredSubtitle = effectiveSubtitle,
-                            // 原盘（ISO / BDMV 目录）本机引擎读不了盘内结构，协商时特殊处理
-                            discSource = file?.container == "iso" || file?.container == "bluray",
                         )
                     )
                 },
@@ -1291,9 +1834,12 @@ private fun Hero(
 }
 
 @Composable
-private fun heroHeight(): androidx.compose.ui.unit.Dp =
-    (androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp * 0.52f)
-        .coerceAtMost(420f).dp
+private fun heroHeight(): androidx.compose.ui.unit.Dp {
+    // iOS ImmersiveHero：min(屏宽 × 1.15, 屏高 × 0.62)。旧口径「屏高 52%、封顶 420」
+    // 比 iOS 矮一截（393dp 宽的手机上 iOS 是 452，旧口径 420）
+    val c = androidx.compose.ui.platform.LocalConfiguration.current
+    return minOf(c.screenWidthDp * 1.15f, c.screenHeightDp * 0.62f).dp
+}
 
 private fun metaLine(detail: LibraryItemDetailView): String {
     val file = detail.files.firstOrNull()
@@ -1312,8 +1858,6 @@ internal data class DetailTrackOption(
     val ref: String,
     val label: String,
     val isDefault: Boolean = false,
-    /** 本机渲染不了/服务端给不了地址时的原因；非空则置灰不可选（与播放器菜单同口径） */
-    val unavailableReason: String? = null,
 )
 
 /**
@@ -1343,7 +1887,6 @@ private fun trackOptions(
                     ref = ref,
                     label = TrackLabels.subtitle(s.language, kindOfCodec(s.codec), ref, false, s.title, s.forced),
                     isDefault = s.default,
-                    unavailableReason = TrackLabels.subtitleUnsupportedReason(kindOfCodec(s.codec)),
                 )
             }
         } else {
@@ -1399,11 +1942,10 @@ private fun TrackPickerSheet(
                 )
             }
             options.forEach { option ->
-                val reason = option.unavailableReason
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .then(if (reason == null) Modifier.clickable { onPick(option.ref) } else Modifier)
+                        .clickable { onPick(option.ref) }
                         .padding(horizontal = 20.dp, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -1422,12 +1964,10 @@ private fun TrackPickerSheet(
                         Text(
                             option.label,
                             style = McType.sub,
-                            color = if (reason != null) TextFaint else TextPrimary,
+                            color = TextPrimary,
                             maxLines = 2,
                         )
-                        if (reason != null) {
-                            Text(reason, style = McType.caption2, color = TextFaint)
-                        } else if (option.isDefault) {
+                        if (option.isDefault) {
                             Text("片源默认轨", style = McType.caption2, color = TextFaint)
                         }
                     }
@@ -1631,6 +2171,134 @@ private fun CastSection(detail: LibraryItemDetailView, origin: String?, onOpenPe
  * 季选择器用下拉菜单而不是一排 chips：季多的剧（十几季很常见）chip 一行放不下，
  * 而这行不滚动——后排的季就点不到了；下拉菜单是可滚的，且能标「未入库」。
  */
+/** 相似推荐：只推自己库里有的片（同主创、主演、类型相近），点进那一部的库内详情；没有就整行不出 */
+@Composable
+private fun SimilarSection(
+    items: List<LibraryItemView>,
+    libraryId: Long,
+    origin: String?,
+    onOpenItem: (Long, Long) -> Unit,
+) {
+    if (items.isEmpty()) return
+    RelatedRow(title = "相似推荐") {
+        items(items, key = { it.mediaItemId }) { item ->
+            PosterCard(
+                imageUrl = item.posterUrl ?: item.backdropUrl,
+                origin = origin,
+                title = item.title,
+                meta = item.year?.toString(),
+                modifier = Modifier.width(McMetrics.rowCardWidth),
+                onClick = { onOpenItem(item.libraryId ?: libraryId, item.mediaItemId) },
+            )
+        }
+    }
+}
+
+/**
+ * 电影的作品系列（排在相似推荐下面）：整个系列按上映顺序，标题旁写「已有 7 / 共 8」。
+ * 这一部写「本片」；库里有的点进库内详情；缺的那部压暗、写「未入库」，点进 TMDB 详情去订阅
+ * （与网页 / iOS 详情页的系列一行同口径）。
+ */
+@Composable
+private fun SeriesSection(
+    series: CollectionSeriesView,
+    libraryId: Long,
+    itemId: Long,
+    origin: String?,
+    onOpenItem: (Long, Long) -> Unit,
+    onOpenTitle: (String) -> Unit,
+) {
+    RelatedRow(title = series.seriesName ?: "系列", detail = "已有 ${series.ownedCount} / 共 ${series.total}") {
+        items(series.parts, key = { it.tmdbId }) { part ->
+            val owned = part.mediaItemId
+            val year = part.releaseDate?.take(4)
+            val note = when {
+                owned == itemId -> "本片"
+                owned == null -> if (part.subscribed) "追踪中" else "未入库"
+                else -> null
+            }
+            PosterCard(
+                imageUrl = part.posterUrl,
+                origin = origin,
+                title = part.title,
+                meta = listOfNotNull(year, note).joinToString(" · ").ifEmpty { null },
+                modifier = Modifier.width(McMetrics.rowCardWidth).alpha(if (owned == null) 0.45f else 1f),
+                onClick = when {
+                    owned == itemId -> null
+                    owned != null -> ({ onOpenItem(libraryId, owned) })
+                    else -> ({ onOpenTitle("tmdb:movie:${part.tmdbId}") })
+                },
+            )
+        }
+    }
+}
+
+/** 详情页的横排一行：标题（+ 右侧灰字）与演职员同一套排版 */
+@Composable
+private fun RelatedRow(
+    title: String,
+    detail: String? = null,
+    content: androidx.compose.foundation.lazy.LazyListScope.() -> Unit,
+) {
+    Column(Modifier.padding(top = 18.dp)) {
+        Row(
+            Modifier.padding(horizontal = McMetrics.pagePadding),
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            Text(title, style = McType.title3, color = TextPrimary, modifier = Modifier.weight(1f, fill = false))
+            detail?.let {
+                Spacer(Modifier.width(10.dp))
+                Text(it, style = McType.sub, color = TextFaint)
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = McMetrics.pagePadding),
+            horizontalArrangement = Arrangement.spacedBy(McMetrics.rowSpacing),
+            modifier = Modifier.fillMaxWidth(),
+            content = content,
+        )
+    }
+}
+
+/** 页底「相关链接」（与网页 / iOS 详情页一致）：TMDB / IMDb / 豆瓣，有哪个出哪个，在浏览器（或已装的 App）里打开 */
+@Composable
+private fun ExternalLinks(detail: LibraryItemDetailView) {
+    val links = buildList {
+        detail.tmdbId?.takeIf { it > 0 }?.let {
+            add("TMDB ↗" to "https://www.themoviedb.org/${if (detail.kind == "tv") "tv" else "movie"}/$it")
+        }
+        detail.imdbId?.takeIf { it.isNotBlank() }?.let { add("IMDb ↗" to "https://www.imdb.com/title/$it/") }
+        detail.doubanId?.takeIf { it.isNotBlank() }?.let { add("豆瓣 ↗" to "https://movie.douban.com/subject/$it/") }
+    }
+    if (links.isEmpty()) return
+    val ctx = LocalContext.current
+    Row(
+        Modifier.padding(start = McMetrics.pagePadding, end = McMetrics.pagePadding, top = 24.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("相关链接", style = McType.sub, color = TextFaint)
+        Spacer(Modifier.width(12.dp))
+        links.forEach { (label, url) ->
+            Text(
+                label,
+                style = McType.sub,
+                color = TextMuted,
+                modifier = Modifier
+                    .padding(end = 16.dp)
+                    .clickable {
+                        runCatching {
+                            ctx.startActivity(
+                                android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
+                            )
+                        }
+                    },
+            )
+        }
+    }
+}
+
 @Composable
 private fun SeasonSection(
     seasons: List<Int>,

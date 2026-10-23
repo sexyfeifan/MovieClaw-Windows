@@ -8,6 +8,14 @@ nonisolated extension APIClient {
         return try await send("POST", "/agent-handoff", body: body)
     }
 
+    /// 客户端最新版本
+    /// `GET /app/clients/{product}/latest`
+    func appClientsLatest(product: String, refresh: Bool? = nil) async throws -> API.ClientReleaseView {
+        var query: [URLQueryItem] = []
+        if let refresh { query.append(URLQueryItem(name: "refresh", value: "\(refresh)")) }
+        return try await send("GET", "/app/clients/\(product)/latest", query: query)
+    }
+
     /// 读取应用设置
     /// `GET /app/config`
     func appShow() async throws -> API.AppConfigView {
@@ -90,6 +98,12 @@ nonisolated extension APIClient {
         return try await send("POST", "/app/plugins/packages/\(entryId)/approve", body: body)
     }
 
+    /// 重试安装插件包的第三方依赖（按已批准的锁文件，不再询问）；装好即加载
+    /// `POST /app/plugins/packages/{entry_id}/dependencies/retry`
+    func appPluginsPackagesRetryDependencies(entryId: String) async throws -> API.PackageResultView {
+        return try await send("POST", "/app/plugins/packages/\(entryId)/dependencies/retry")
+    }
+
     /// 放弃一个等待批准的插件包
     /// `DELETE /app/plugins/packages/{entry_id}/pending`
     func appPluginsPackagesDiscard(entryId: String) async throws -> Void {
@@ -100,6 +114,12 @@ nonisolated extension APIClient {
     /// `POST /app/plugins/packages/{entry_id}/rollback`
     func appPluginsPackagesRollback(entryId: String) async throws -> API.PackageResultView {
         return try await send("POST", "/app/plugins/packages/\(entryId)/rollback")
+    }
+
+    /// 带网页的插件（插件包与本地插件）：是否已同意、侧边栏入口
+    /// `GET /app/plugins/pages`
+    func appPluginsPagesList() async throws -> [API.WebPageView] {
+        return try await send("GET", "/app/plugins/pages")
     }
 
     /// 退出插件安全模式：当场重新加载被跳过的本地 / 第三方插件
@@ -144,6 +164,18 @@ nonisolated extension APIClient {
     /// `PUT /app/plugins/{entry_id}/settings`
     func appPluginsSettingsUpdate(entryId: String, body: API.PluginSettingsPayload) async throws -> API.PluginSettingsView {
         return try await send("PUT", "/app/plugins/\(entryId)/settings", body: body)
+    }
+
+    /// 撤销插件网页的同意：不再托管、从侧边栏撤下（插件本身照常运行）
+    /// `DELETE /app/plugins/{entry_id}/web`
+    func appPluginsWebRevoke(entryId: String) async throws -> Void {
+        let _: API.JSONValue? = try await send("DELETE", "/app/plugins/\(entryId)/web")
+    }
+
+    /// 同意插件网页授信运行，或改它加不加侧边栏、成员能不能看到（只能由人在网页里操作）
+    /// `PUT /app/plugins/{entry_id}/web`
+    func appPluginsWebUpdate(entryId: String, body: API.WebConsentUpdate) async throws -> API.WebPageView {
+        return try await send("PUT", "/app/plugins/\(entryId)/web", body: body)
     }
 
     /// 修改对外端口（保存后全量重启生效）
@@ -840,6 +872,93 @@ nonisolated extension APIClient {
         return try await send("POST", "/downloaders/\(downloaderId)/verify")
     }
 
+    /// 网盘账号列表
+    /// `GET /drives/accounts`
+    func drivesAccountsList() async throws -> [API.DriveAccountView] {
+        return try await send("GET", "/drives/accounts")
+    }
+
+    /// 用 Cookie 登录网盘（粘贴整页 Cookie）
+    /// `POST /drives/accounts/cookie`
+    func drivesAccountsCookie(body: API.DriveCookiePayload) async throws -> API.DriveLoginView {
+        return try await send("POST", "/drives/accounts/cookie", body: body)
+    }
+
+    /// 填表登录网盘（开放平台的 Client ID / 密钥等，字段由插件声明）
+    /// `POST /drives/accounts/form`
+    func drivesAccountsForm(body: API.DriveFormLoginPayload) async throws -> API.DriveLoginView {
+        return try await send("POST", "/drives/accounts/form", body: body)
+    }
+
+    /// 移除网盘账号（只删 MovieClaw 里的记录，不动网盘上的文件）
+    /// `DELETE /drives/accounts/{account_id}`
+    func drivesAccountsDelete(accountId: Int) async throws -> [String: API.JSONValue] {
+        return try await send("DELETE", "/drives/accounts/\(accountId)")
+    }
+
+    /// 改网盘账号的名字、速率、每日预算、同时播放数
+    /// `PATCH /drives/accounts/{account_id}`
+    func drivesAccountsUpdate(accountId: Int, body: API.DriveAccountUpdatePayload) async throws -> API.DriveAccountView {
+        return try await send("PATCH", "/drives/accounts/\(accountId)", body: body)
+    }
+
+    /// 列网盘目录的子目录（给媒体库选网盘文件夹）
+    /// `GET /drives/accounts/{account_id}/dirs`
+    func drivesAccountsDirs(accountId: Int, parentId: String? = nil, path: String? = nil) async throws -> [API.DriveDirView] {
+        var query: [URLQueryItem] = []
+        if let parentId { query.append(URLQueryItem(name: "parent_id", value: "\(parentId)")) }
+        if let path { query.append(URLQueryItem(name: "path", value: "\(path)")) }
+        return try await send("GET", "/drives/accounts/\(accountId)/dirs", query: query)
+    }
+
+    /// 刷新网盘账号的昵称与容量
+    /// `POST /drives/accounts/{account_id}/refresh`
+    func drivesAccountsRefresh(accountId: Int) async throws -> API.DriveAccountView {
+        return try await send("POST", "/drives/accounts/\(accountId)/refresh")
+    }
+
+    /// 可用的网盘（有插件提供后端的）
+    /// `GET /drives/backends`
+    func drivesBackendsList() async throws -> [API.DriveBackendView] {
+        return try await send("GET", "/drives/backends")
+    }
+
+    /// 开始扫码登录网盘
+    /// `POST /drives/logins`
+    func drivesLoginsStart(body: API.DriveLoginPayload) async throws -> API.DriveLoginView {
+        return try await send("POST", "/drives/logins", body: body)
+    }
+
+    /// 取消扫码登录
+    /// `DELETE /drives/logins/{login_id}`
+    func drivesLoginsCancel(loginId: String) async throws -> [String: API.JSONValue] {
+        return try await send("DELETE", "/drives/logins/\(loginId)")
+    }
+
+    /// 查询扫码登录状态（前端轮询）
+    /// `GET /drives/logins/{login_id}`
+    func drivesLoginsStatus(loginId: String) async throws -> API.DriveLoginView {
+        return try await send("GET", "/drives/logins/\(loginId)")
+    }
+
+    /// 网盘的全局选项
+    /// `GET /drives/settings`
+    func drivesSettingsGet() async throws -> API.DriveSettingsView {
+        return try await send("GET", "/drives/settings")
+    }
+
+    /// 改网盘的全局选项
+    /// `PUT /drives/settings`
+    func drivesSettingsUpdate(body: API.DriveSettingsPayload) async throws -> API.DriveSettingsView {
+        return try await send("PUT", "/drives/settings", body: body)
+    }
+
+    /// 网盘功能是否启用、有几个账号（各端决定网盘入口出不出现）
+    /// `GET /drives/status`
+    func drivesStatus() async throws -> API.DriveStatusView {
+        return try await send("GET", "/drives/status")
+    }
+
     /// 推送某站点的 Cookie（保存后异步验证）
     /// `POST /extension/cookies`
     func extensionCookiesPush(body: API.CookiePushRequest) async throws -> API.CookieSyncResult {
@@ -886,8 +1005,10 @@ nonisolated extension APIClient {
 
     /// Health check
     /// `GET /health`
-    func healthCheck() async throws -> API.HealthResponse {
-        return try await raw("GET", "/health")
+    func healthCheck(nonce: String? = nil) async throws -> API.HealthResponse {
+        var query: [URLQueryItem] = []
+        if let nonce { query.append(URLQueryItem(name: "nonce", value: "\(nonce)")) }
+        return try await raw("GET", "/health", query: query)
     }
 
     /// 列出全部监听导入规则
@@ -1380,10 +1501,11 @@ nonisolated extension APIClient {
 
     /// 海报墙的跳转索引（按标题：A-Z 首字母档；按内容时间：月份档）
     /// `GET /libraries/{library_id}/item-index`
-    func uiLibraryItemsIndex(libraryId: Int, sort: String? = nil, order: String? = nil, g: String? = nil, c: String? = nil, d: String? = nil, w: String? = nil, ratingGte: Double? = nil, rt: String? = nil, lang: String? = nil, res: String? = nil, hdr: Bool? = nil, stock: String? = nil, seriesKeys: String? = nil) async throws -> [API.LibraryIndexEntryView] {
+    func uiLibraryItemsIndex(libraryId: Int, sort: String? = nil, order: String? = nil, granularity: String? = nil, g: String? = nil, c: String? = nil, d: String? = nil, w: String? = nil, ratingGte: Double? = nil, rt: String? = nil, lang: String? = nil, res: String? = nil, hdr: Bool? = nil, stock: String? = nil, seriesKeys: String? = nil) async throws -> [API.LibraryIndexEntryView] {
         var query: [URLQueryItem] = []
         if let sort { query.append(URLQueryItem(name: "sort", value: "\(sort)")) }
         if let order { query.append(URLQueryItem(name: "order", value: "\(order)")) }
+        if let granularity { query.append(URLQueryItem(name: "granularity", value: "\(granularity)")) }
         if let g { query.append(URLQueryItem(name: "g", value: "\(g)")) }
         if let c { query.append(URLQueryItem(name: "c", value: "\(c)")) }
         if let d { query.append(URLQueryItem(name: "d", value: "\(d)")) }
@@ -1551,6 +1673,15 @@ nonisolated extension APIClient {
         return try await send("POST", "/libraries/\(libraryId)/items/\(mediaItemId)/share", body: body)
     }
 
+    /// 条目详情页的相似推荐（只在观看者可见的同类型库里挑）
+    /// `GET /libraries/{library_id}/items/{media_item_id}/similar`
+    func uiLibraryItemsSimilar(libraryId: Int, mediaItemId: Int, limit: Int? = nil, excludeSeries: Bool? = nil) async throws -> [API.LibraryItemView] {
+        var query: [URLQueryItem] = []
+        if let limit { query.append(URLQueryItem(name: "limit", value: "\(limit)")) }
+        if let excludeSeries { query.append(URLQueryItem(name: "exclude_series", value: "\(excludeSeries)")) }
+        return try await send("GET", "/libraries/\(libraryId)/items/\(mediaItemId)/similar", query: query)
+    }
+
     /// 预览条目转移：哪些目录/文件搬到目标库的什么位置（只读，不动磁盘）
     /// `GET /libraries/{library_id}/items/{media_item_id}/transfer-preview`
     func libraryItemsPreviewTransfer(libraryId: Int, mediaItemId: Int, targetLibraryId: Int) async throws -> API.TransferPreviewView {
@@ -1683,6 +1814,12 @@ nonisolated extension APIClient {
         return try await send("GET", "/llm/models")
     }
 
+    /// 查询端点上报的模型 ID（不保存配置）
+    /// `POST /llm/models/discover`
+    func llmModelsDiscover(body: API.LlmModelDiscoveryPayload) async throws -> [String] {
+        return try await send("POST", "/llm/models/discover", body: body)
+    }
+
     /// 列出可接入的供应商类型及其模型目录
     /// `GET /llm/presets`
     func llmPresets() async throws -> [API.LlmPresetView] {
@@ -1723,6 +1860,30 @@ nonisolated extension APIClient {
     /// `POST /llm/providers/{provider_id}/verify`
     func llmProvidersVerify(providerId: Int) async throws -> API.LlmProviderView {
         return try await send("POST", "/llm/providers/\(providerId)/verify")
+    }
+
+    /// 关闭智能体网页搜索并清除已保存的 API Key
+    /// `DELETE /llm/web-search`
+    func llmWebSearchClear() async throws -> API.WebSearchConfigView {
+        return try await send("DELETE", "/llm/web-search")
+    }
+
+    /// 查看智能体网页搜索的接入状态（不含密钥明文）
+    /// `GET /llm/web-search`
+    func llmWebSearchShow() async throws -> API.WebSearchConfigView {
+        return try await send("GET", "/llm/web-search")
+    }
+
+    /// 验证并保存智能体网页搜索的供应商和 API Key（验证不过不保存）
+    /// `PUT /llm/web-search`
+    func llmWebSearchUpdate(body: API.WebSearchSavePayload) async throws -> API.WebSearchConfigView {
+        return try await send("PUT", "/llm/web-search", body: body)
+    }
+
+    /// 测试搜索供应商的 API Key（不保存）
+    /// `POST /llm/web-search/test`
+    func llmWebSearchTest(body: API.WebSearchTestPayload) async throws -> API.WebSearchTestView {
+        return try await send("POST", "/llm/web-search/test", body: body)
     }
 
     /// 新建 MCP 端点（令牌明文仅本次返回）
@@ -1839,6 +2000,38 @@ nonisolated extension APIClient {
         return try await send("POST", "/network/test", body: body)
     }
 
+    /// 建或复用一个转码导出（1080p / 720p / 480p）
+    /// `POST /offline/exports`
+    func offlineExportsCreate(body: API.OfflineExportRequest) async throws -> API.OfflineExportView {
+        return try await send("POST", "/offline/exports", body: body)
+    }
+
+    /// 下载完了：通知服务端可以回收导出
+    /// `DELETE /offline/exports/{export_id}`
+    func offlineExportsRelease(exportId: String) async throws -> Void {
+        let _: API.JSONValue? = try await send("DELETE", "/offline/exports/\(exportId)")
+    }
+
+    /// 导出进度
+    /// `GET /offline/exports/{export_id}`
+    func offlineExportsGet(exportId: String) async throws -> API.OfflineExportView {
+        return try await send("GET", "/offline/exports/\(exportId)")
+    }
+
+    /// 离线下载清单：一个播放单元打包所需的一切
+    /// `GET /offline/manifest`
+    func offlineManifest(fileId: Int) async throws -> API.OfflineManifestView {
+        var query: [URLQueryItem] = []
+        query.append(URLQueryItem(name: "file_id", value: "\(fileId)"))
+        return try await send("GET", "/offline/manifest", query: query)
+    }
+
+    /// 一批文件的可选下载档位与预计大小（选档表单批量估大小）
+    /// `POST /offline/profiles`
+    func offlineProfiles(body: API.OfflineProfilesRequest) async throws -> API.OfflineProfilesView {
+        return try await send("POST", "/offline/profiles", body: body)
+    }
+
     /// 人物页：库内这个影人的档案与作品
     /// `GET /people/{tmdb_person_id}`
     func peopleShow(tmdbPersonId: Int) async throws -> API.PersonView {
@@ -1863,6 +2056,18 @@ nonisolated extension APIClient {
     /// `GET /playback/attempts/{attempt_id}`
     func playbackAttemptGet(attemptId: String) async throws -> API.PlaybackAttemptView {
         return try await send("GET", "/playback/attempts/\(attemptId)")
+    }
+
+    /// 自动跳过总开关（关了片头、广告都只给按钮）
+    /// `PUT /playback/auto-skip`
+    func playbackAutoSkipSet(body: API.PlaybackAutoSkipRequest) async throws -> Void {
+        let _: API.JSONValue? = try await send("PUT", "/playback/auto-skip", body: body)
+    }
+
+    /// 这部剧的片头自动跳 / 不再自动跳
+    /// `PUT /playback/auto-skip/intro/{media_item_id}`
+    func playbackAutoSkipIntroSet(mediaItemId: Int, body: API.PlaybackAutoSkipRequest) async throws -> Void {
+        let _: API.JSONValue? = try await send("PUT", "/playback/auto-skip/intro/\(mediaItemId)", body: body)
     }
 
     /// 播放器客户端日志
@@ -1904,6 +2109,14 @@ nonisolated extension APIClient {
         if let sort { query.append(URLQueryItem(name: "sort", value: "\(sort)")) }
         if let order { query.append(URLQueryItem(name: "order", value: "\(order)")) }
         return try await send("GET", "/playback/favorites/gallery", query: query)
+    }
+
+    /// 蓝光主片的剪辑清单（按剪辑直推）
+    /// `GET /playback/files/{file_id}/bluray`
+    func playbackFileBluray(fileId: Int, token: String) async throws -> API.PlaybackBlurayView {
+        var query: [URLQueryItem] = []
+        query.append(URLQueryItem(name: "token", value: "\(token)"))
+        return try await send("GET", "/playback/files/\(fileId)/bluray", query: query)
     }
 
     /// 原盘目录清单（目录直推）
@@ -2088,6 +2301,12 @@ nonisolated extension APIClient {
         return try await send("GET", "/playback/up-next", query: query)
     }
 
+    /// 本机播放的观看记录（含离线补传），按编号幂等合并
+    /// `POST /playback/viewings`
+    func playbackViewings(body: API.PlaybackViewingsRequest) async throws -> API.PlaybackViewingsView {
+        return try await send("POST", "/playback/viewings", body: body)
+    }
+
     /// 推送通道与设备覆盖
     /// `GET /push/channels`
     func pushChannelsList() async throws -> API.PushChannelsView {
@@ -2104,6 +2323,12 @@ nonisolated extension APIClient {
     /// `GET /push/me`
     func pushMeShow() async throws -> API.MyPushView {
         return try await send("GET", "/push/me")
+    }
+
+    /// 确认实时通知已显示（之后重连不再补发）
+    /// `POST /push/me/ack`
+    func pushMeAck(body: API.PushAckRequest) async throws -> API.PushAckView {
+        return try await send("POST", "/push/me/ack", body: body)
     }
 
     /// 恢复一部片的推送
@@ -2400,6 +2625,24 @@ nonisolated extension APIClient {
         return try await send("GET", "/search/torrents", query: query)
     }
 
+    /// 这台服务器的访问地址（内网 / 外网）
+    /// `GET /server/addresses`
+    func appAddressesList() async throws -> API.ServerAddressesView {
+        return try await send("GET", "/server/addresses")
+    }
+
+    /// 手动添加一个访问地址
+    /// `POST /server/addresses`
+    func appAddressesAdd(body: API.ServerAddressPayload) async throws -> API.ServerAddressesView {
+        return try await send("POST", "/server/addresses", body: body)
+    }
+
+    /// 删掉一个访问地址（学到的之后再有人用会重新出现）
+    /// `POST /server/addresses/remove`
+    func appAddressesRemove(body: API.ServerAddressRemovePayload) async throws -> API.ServerAddressesView {
+        return try await send("POST", "/server/addresses/remove", body: body)
+    }
+
     /// 最近会话列表（按最后活跃时间倒序）
     /// `GET /sessions`
     func sessionList(limit: Int? = nil, offset: Int? = nil) async throws -> [API.SessionSummary] {
@@ -2423,8 +2666,10 @@ nonisolated extension APIClient {
 
     /// 读取会话的完整轨迹
     /// `GET /sessions/{session_id}`
-    func sessionGetTranscript(sessionId: String) async throws -> API.SessionTranscriptView {
-        return try await send("GET", "/sessions/\(sessionId)")
+    func sessionGetTranscript(sessionId: String, view: String? = nil) async throws -> API.SessionTranscriptView {
+        var query: [URLQueryItem] = []
+        if let view { query.append(URLQueryItem(name: "view", value: "\(view)")) }
+        return try await send("GET", "/sessions/\(sessionId)", query: query)
     }
 
     /// 重命名会话
@@ -2694,6 +2939,30 @@ nonisolated extension APIClient {
         return try await send("GET", "/subscriptions/recent-arrivals", query: query)
     }
 
+    /// get_smart_defaults
+    /// `GET /subscriptions/smart-defaults`
+    func subscriptionsGetSmartDefaults() async throws -> API.SmartDefaultsView {
+        return try await send("GET", "/subscriptions/smart-defaults")
+    }
+
+    /// put_smart_defaults
+    /// `PUT /subscriptions/smart-defaults`
+    func subscriptionsSaveSmartDefaults(body: API.SmartDefaultsPayload) async throws -> API.SmartDefaultsView {
+        return try await send("PUT", "/subscriptions/smart-defaults", body: body)
+    }
+
+    /// get_smart_memory
+    /// `GET /subscriptions/smart-memory`
+    func subscriptionsGetSmartMemory() async throws -> API.SmartMemoryView {
+        return try await send("GET", "/subscriptions/smart-memory")
+    }
+
+    /// patch_smart_memory
+    /// `PATCH /subscriptions/smart-memory`
+    func subscriptionsUpdateSmartMemory(body: API.SmartMemoryPatch) async throws -> API.SmartMemoryView {
+        return try await send("PATCH", "/subscriptions/smart-memory", body: body)
+    }
+
     /// 预览订阅目标的季集、库存和现有订阅状态
     /// `POST /subscriptions/title-preview`
     func uiSubscriptionsPreviewTitle(body: API.SubscriptionTargetPreviewPayload) async throws -> API.PrepareView {
@@ -2879,6 +3148,18 @@ nonisolated extension APIClient {
         return try await send("GET", "/transcode-worker/status")
     }
 
+    /// 当前用户可见的插件网页与侧边栏入口（docs/design/plugin-web-pages.md）
+    /// `GET /ui/apps`
+    func uiAppsList() async throws -> [API.AppView] {
+        return try await send("GET", "/ui/apps")
+    }
+
+    /// 插件页面里没接住的报错：写进系统日志（按插件 id 可查）
+    /// `POST /ui/apps/{entry_id}/errors`
+    func uiAppsErrorsReport(entryId: String, body: API.AppErrorReport) async throws -> Void {
+        let _: API.JSONValue? = try await send("POST", "/ui/apps/\(entryId)/errors", body: body)
+    }
+
     /// 发现页展示编排（分区引用与呈现方式）
     /// `GET /ui/discovery/{media_type}`
     func uiDiscoveryGet(mediaType: API.MediaKind, provider: API.MediaSource? = nil) async throws -> API.DiscoveryPageView {
@@ -2932,6 +3213,7 @@ nonisolated extension APIClient {
 }
 
 // 未生成的接口（需在对应模块手写）：
+// - GET /api/v1/app/clients/{product}/apk（无响应模型：文件流/SSE 等，需手写）
 // - POST /api/v1/app/plugins/packages（multipart 表单上传，需手写）
 // - POST /api/v1/appearance/backdrops（multipart 表单上传，需手写）
 // - GET /api/v1/appearance/backdrops/{backdrop_id}（无响应模型：文件流/SSE 等，需手写）
@@ -2948,6 +3230,9 @@ nonisolated extension APIClient {
 // - POST /api/v1/libraries/{library_id}/cover（multipart 表单上传，需手写）
 // - GET /api/v1/libraries/{library_id}/items/{media_item_id}/artwork（无响应模型：文件流/SSE 等，需手写）
 // - GET /api/v1/members/{member_id}/avatar（无响应模型：文件流/SSE 等，需手写）
+// - GET /api/v1/offline/exports/{export_id}/content（无响应模型：文件流/SSE 等，需手写）
+// - GET /api/v1/offline/files/{file_id}/content（无响应模型：文件流/SSE 等，需手写）
+// - GET /api/v1/playback/files/{file_id}/bluray/{index}（无响应模型：文件流/SSE 等，需手写）
 // - GET /api/v1/playback/files/{file_id}/disc/{relative_path}（无响应模型：文件流/SSE 等，需手写）
 // - GET /api/v1/playback/files/{file_id}/fonts/{name}（无响应模型：文件流/SSE 等，需手写）
 // - GET /api/v1/playback/files/{file_id}/stream（无响应模型：文件流/SSE 等，需手写）
@@ -2957,7 +3242,10 @@ nonisolated extension APIClient {
 // - GET /api/v1/playback/sessions/{session_id}/master.m3u8（无响应模型：文件流/SSE 等，需手写）
 // - GET /api/v1/playback/sessions/{session_id}/sub{index}.m3u8（无响应模型：文件流/SSE 等，需手写）
 // - GET /api/v1/playback/sessions/{session_id}/{name}（无响应模型：文件流/SSE 等，需手写）
+// - GET /api/v1/plugins/{entry_id}/web（无响应模型：文件流/SSE 等，需手写）
+// - GET /api/v1/plugins/{entry_id}/web/{path}（无响应模型：文件流/SSE 等，需手写）
 // - GET /api/v1/push/images/{token}（无响应模型：文件流/SSE 等，需手写）
+// - GET /api/v1/push/me/stream（无响应模型：文件流/SSE 等，需手写）
 // - GET /api/v1/reels/clips/{file_id}/{start_ms}.mp4（无响应模型：文件流/SSE 等，需手写）
 // - GET /api/v1/search/torrents/stream（无响应模型：文件流/SSE 等，需手写）
 // - POST /api/v1/sessions/attachments（multipart 表单上传，需手写）

@@ -28,6 +28,7 @@ from movieclaw_sdk.events._base import (
     define,
 )
 from movieclaw_sdk.events.account import ACCOUNT_DEVICE_SIGNED_IN, DeviceSignedIn
+from movieclaw_sdk.events.agent import AGENT_RUN_FINISHED, RunFinished
 from movieclaw_sdk.events.download import (
     DOWNLOAD_COMPLETED,
     DOWNLOAD_IMPORTED,
@@ -37,6 +38,7 @@ from movieclaw_sdk.events.download import (
 )
 from movieclaw_sdk.events.library import (
     LIBRARY_FILE_DELETED,
+    LIBRARY_FILE_LOCAL_RELEASED,
     LIBRARY_FILE_PURGED,
     LIBRARY_FILE_RESTORED,
     LIBRARY_FILE_TRASHED,
@@ -58,6 +60,7 @@ from movieclaw_sdk.events.library import (
     ItemsArrived,
     ItemViewed,
     LibraryDeleted,
+    LocalReleased,
 )
 from movieclaw_sdk.events.playback import (
     PLAYBACK_COMPLETED,
@@ -72,6 +75,7 @@ from movieclaw_sdk.events.playback import (
 )
 from movieclaw_sdk.events.plugin import PLUGIN_EVENTS, PluginEventsApi, Publisher, plugin_event
 from movieclaw_sdk.events.subscription import (
+    SUBSCRIPTION_AWAITING_SUBTITLES,
     SUBSCRIPTION_CREATED,
     SUBSCRIPTION_DELETED,
     SUBSCRIPTION_DOWNLOAD_STARTED,
@@ -81,6 +85,7 @@ from movieclaw_sdk.events.subscription import (
     SUBSCRIPTION_MORE_EPISODES,
     SUBSCRIPTION_STATUS_CHANGED,
     SUBSCRIPTION_UPGRADED,
+    SubscriptionAwaitingSubtitles,
     SubscriptionChanged,
     SubscriptionDownloadStarted,
     SubscriptionDownloadStuck,
@@ -107,6 +112,7 @@ __all__ = [
     "Publisher",
     "plugin_event",
     "ACCOUNT_DEVICE_SIGNED_IN",
+    "AGENT_RUN_FINISHED",
     "DOWNLOAD_COMPLETED",
     "DOWNLOAD_IMPORTED",
     "LIBRARY_FILE_DELETED",
@@ -126,6 +132,7 @@ __all__ = [
     "ItemsArrived",
     "LibraryDeleted",
     "ItemMoved",
+    "LIBRARY_FILE_LOCAL_RELEASED",
     "LIBRARY_FILES_ADDED",
     "LIBRARY_ITEM_FAVORITED",
     "LIBRARY_ITEM_UNFAVORITED",
@@ -138,11 +145,13 @@ __all__ = [
     "PLAYBACK_STOPPED",
     "AddedFile",
     "FilesAdded",
+    "LocalReleased",
     "ItemFavorite",
     "ItemViewed",
     "Playback",
     "PlaybackMarked",
     "PlaybackStopped",
+    "SUBSCRIPTION_AWAITING_SUBTITLES",
     "SUBSCRIPTION_CREATED",
     "SUBSCRIPTION_DELETED",
     "SUBSCRIPTION_DOWNLOAD_STARTED",
@@ -152,6 +161,7 @@ __all__ = [
     "SUBSCRIPTION_MORE_EPISODES",
     "SUBSCRIPTION_STATUS_CHANGED",
     "SUBSCRIPTION_UPGRADED",
+    "SubscriptionAwaitingSubtitles",
     "SubscriptionChanged",
     "SubscriptionDownloadStarted",
     "SubscriptionDownloadStuck",
@@ -166,6 +176,7 @@ __all__ = [
     "AlertRaised",
     "AlertResolved",
     "DeviceSignedIn",
+    "RunFinished",
     "SubscriptionIdentitySkipped",
     "TipSuggested",
     "UpdateAvailable",

@@ -16,11 +16,31 @@ import (
 // knownNonGenerated 是唯二允许不生成命令的两类端点：x-cli-hidden（Web 基础
 // 设施，或语义由精选命令承担）与 x-cli-stream（SSE 流，精选层手写接入）。
 var knownNonGenerated = []string{
+	"llm.chatgpt.authorize",
+	"llm.chatgpt.complete",
+	// 智能体网页搜索的密钥：设置页的事。隐藏是为了不让对话式 Agent 经 mclaw 读到或改写密钥
+	"llm.web-search.show",
+	"llm.web-search.update",
+	"llm.web-search.clear",
+	"llm.web-search.test",
 	// 会话图片附件：二进制上传/下载是 Web 基础设施，CLI 场景无消费方
 	"session.attachments.upload",
 	"session.attachments.download",
 	// 技能清单：Web composer 数据源；Agent 侧技能走系统提示词注入
 	"skills.list",
+	// 插件网页（docs/design/plugin-web-pages.md）：侧边栏数据源与 iframe 加载的静态文件，
+	// 都是 Web 基础设施；命令行看插件网页走 app plugins pages list
+	// 网页主题（docs/design/theme-plugins.md）：前端加载器与设置页的数据源，CLI 场景无消费方
+	"ui.themes.list",
+	"ui.themes.stylesheet",
+	"ui.themes.file",
+	"ui.apps.list",
+	"ui.apps.root",
+	"ui.apps.file",
+	"ui.apps.errors.report",
+	// 插件市场的图标和截图：网页 <img> 用的二进制，命令行看市场走 app plugins market list / show
+	"app.plugins.market.icon",
+	"app.plugins.market.screenshot",
 	"auth.device.authorize",
 	"auth.device.token",
 	// 原生 App 的账号密码登录：客户端之间的协议端点，mclaw 走配对码
@@ -70,6 +90,8 @@ var knownNonGenerated = []string{
 	"ui.library.kind.summary",
 	"ui.library.kind.items",
 	"ui.library.kind.genres",
+	// 详情页的相似推荐行：网页呈现层，命令行查库走 search / libraries 命令
+	"ui.library.items.similar",
 	// 海报行选中展开用的批量展示信息（Apple TV 首页）：纯呈现层数据
 	"ui.library.showcase",
 	"playback.decide",
@@ -87,6 +109,9 @@ var knownNonGenerated = []string{
 	// 原盘目录直推（disc-direct-play.md）：目录清单与盘内文件的 Range 取流，只给播放引擎用
 	"playback.file.disc.list",
 	"playback.file.disc.file",
+	// 蓝光剪辑清单（disc-clip-play.md）：Android 统一引擎按剪辑取字节，只给播放引擎用
+	"playback.file.bluray",
+	"playback.file.bluray.clip",
 	"playback.file.subtitle",
 	"playback.file.fonts",
 	"playback.file.font",
@@ -96,6 +121,9 @@ var knownNonGenerated = []string{
 	"playback.metric.report",
 	// 清观看记录是 Web 个人数据入口（destructive，见 library-access.md 2.6），不进命令树
 	"playback.history.clear",
+	// 自动跳过的个人偏好（skip-intro.md §5）：播放器在用户跳过 / 撤回时写，不进命令树
+	"playback.auto-skip.set",
+	"playback.auto-skip.intro.set",
 	// 待处理事项 → Agent 诊断工单：Web 活动页专用，命令行用户直接开会话即可
 	"session.handoff.prompt",
 	"playback.client-log",
@@ -208,12 +236,25 @@ var knownNonGenerated = []string{
 	"push.me.stream",
 	"push.me.ack",
 	"push.images.get",
+	// Android 客户端自身更新：只给 App 查新版、经服务器下载 APK
+	"app.clients.latest",
+	"app.clients.apk",
 	// 使用提示（docs/design/tips.md）：各端界面内部的提示状态，CLI 无消费方
 	"tips.state.show",
 	"tips.state.reset",
 	"tips.events.donate",
 	"tips.displays.record",
 	"tips.invalidate",
+	// 离线下载（docs/design/offline-download.md）：App 后台下载会话与本机播放的协议端点，
+	// 产物是二进制或给本机存档用，CLI 无消费方
+	"offline.manifest",
+	"offline.profiles",
+	"offline.file.content",
+	"offline.exports.create",
+	"offline.exports.get",
+	"offline.exports.content",
+	"offline.exports.release",
+	"playback.viewings",
 }
 
 // TestNonGeneratedEndpointsAreAllKnown 强制新端点显式表态：进命令树，或登记豁免。
@@ -289,6 +330,8 @@ func TestDomainCommandSets(t *testing.T) {
 			"subscriptions.dismiss-episode-hint",
 			"subscriptions.download-selected-torrent",
 			"subscriptions.get",
+			"subscriptions.get-smart-defaults",
+			"subscriptions.get-smart-memory",
 			"subscriptions.get-smart-profile",
 			"subscriptions.list",
 			"subscriptions.list-active-downloads",
@@ -297,12 +340,14 @@ func TestDomainCommandSets(t *testing.T) {
 			"subscriptions.preview-download-routing",
 			"subscriptions.preview-removal",
 			"subscriptions.search-missing-resources",
+			"subscriptions.save-smart-defaults",
 			"subscriptions.save-smart-profile",
 			"subscriptions.set-follow-future",
 			"subscriptions.set-tracking-state",
 			"subscriptions.upgrade-run",
 			"subscriptions.unsubscribe",
 			"subscriptions.update",
+			"subscriptions.update-smart-memory",
 			"subscriptions.update-smart-wait",
 		},
 		"library": {
@@ -463,7 +508,10 @@ func TestDangerousAndLongTaskAnnotations(t *testing.T) {
 	}
 	for id, want := range map[string]string{
 		"library.items.delete":                     "destructive",
+		"playback.sync.import":                     "confirm",
+		"playback.sync.state":                      "confirm",
 		"site.boost-pool.cleanup":                  "destructive",
+		"site.proxy.request":                       "confirm",
 		"subscriptions.cleanup-seasons":            "confirm",
 		"subscriptions.delete":                     "confirm",
 		"subscriptions.unsubscribe":                "confirm",

@@ -84,8 +84,10 @@ test('sidebar collapse persists without changing navigation and search restores 
   h.A.session = null; h.A.focusSearch(); assert.equal(h.A.sidebarCollapsed, true);
 });
 
-test('sidebar renders library and account navigation without a collection container', () => {
+test('sidebar renders library, account and catalog navigation without a collection container', () => {
   const h = harness(), requested = [];
+  let catalogRefreshes = 0;
+  h.window.DesktopCatalog = { nav: () => catalogRefreshes++ };
   const getElement = h.context.document.getElementById;
   h.context.document.getElementById = id => {
     requested.push(id);
@@ -98,6 +100,7 @@ test('sidebar renders library and account navigation without a collection contai
   h.A.renderSidebar();
   assert.match(h.elements.get('libraryNav').innerHTML, /data-library-id="1"/);
   assert.match(h.elements.get('accountButton').innerHTML, /fixture/);
+  assert.equal(catalogRefreshes, 1);
   assert.deepEqual(requested, ['libraryNav', 'accountButton']);
 });
 

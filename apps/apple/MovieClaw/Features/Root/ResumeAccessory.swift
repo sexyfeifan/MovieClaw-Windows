@@ -48,7 +48,8 @@ final class ResumeBarStore {
     }
 }
 
-/// 附件的开关：iOS 26.1 起用 `isEnabled` 按需显示；26.0 不挂（见 `ResumeBarStore` 说明）
+/// 附件的开关：iOS 26.1 起用 `isEnabled` 按需显示；26.0 不挂（见 `ResumeBarStore` 说明）。
+/// 只承载跨页面的「接着看」；AI 快捷输入由「我的」页自己承载。
 struct ResumeAccessoryModifier: ViewModifier {
     let item: API.UpNextItemView?
     let enabled: Bool
@@ -57,7 +58,9 @@ struct ResumeAccessoryModifier: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 26.1, *) {
             content.tabViewBottomAccessory(isEnabled: enabled && item != nil) {
-                if let item { ResumeBar(item: item, onHide: onHide) }
+                if let item {
+                    ResumeBar(item: item, onHide: onHide)
+                }
             }
         } else {
             content

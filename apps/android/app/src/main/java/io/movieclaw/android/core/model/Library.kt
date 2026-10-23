@@ -215,6 +215,20 @@ data class LibraryItemDetailView(
     val totalSizeBytes: Long = 0,
     val seasons: List<Int> = emptyList(),
     val seriesName: String? = null,
+    /** 电影所属系列合集：只在这个库真的生成了那个合集时给（详情页「系列」一行据此拉 `collections/{id}/series`） */
+    val seriesCollectionId: Long? = null,
+    /** 外部词条（详情页底部「相关链接」）：没有就不出那一个 */
+    val tmdbId: Long? = null,
+    val imdbId: String? = null,
+    val doubanId: String? = null,
+    /** 该条目正在后台刮削元数据（⋯ 菜单据此点蓝点、禁掉「刷新元数据」） */
+    val scraping: Boolean = false,
+    /** 刮削当前阶段（只透传，文案由服务端给） */
+    val scrapingPhase: String? = null,
+    /** 章节场景图正在后台生成（禁掉「重新生成章节」） */
+    val chaptersPending: Boolean = false,
+    /** 整条目占的目录（删除整条时列这些；老服务端为空，退回文件路径列表） */
+    val entryDirs: List<String> = emptyList(),
 )
 
 @Serializable

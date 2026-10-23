@@ -61,7 +61,7 @@ CRASH_WINDOW = 600.0
 CRASH_LIMIT = 5
 BACKOFF_MAX = 60.0
 #: 子进程能看到的环境变量（其余一律不给）
-_ENV_KEEP = ("PATH", "LANG", "LC_ALL", "TZ", "HOME", "TMPDIR")
+_ENV_KEEP = ("PATH", "LANG", "LC_ALL", "TZ", "HOME", "TMPDIR", "SystemRoot")
 _UNSET: Any = object()
 
 NextFn = Callable[[Any], Awaitable[Any]]
@@ -74,6 +74,8 @@ process_entries: set[str] = set()
 config_descriptions: dict[str, dict[str, Any] | None] = {}
 #: 进程外插件的代码位置（目录、模块），校验设置时另起子进程用
 process_specs: dict[str, tuple[Path, str, str | None]] = {}
+#: 插件包的第三方依赖目录（plugin-dependencies.md §4）：运行器把它追加到 ``sys.path`` 最后
+dependency_paths: dict[str, Path] = {}
 
 
 class PluginProcessGone(RuntimeError):
@@ -105,7 +107,11 @@ class RemoteCallError(RuntimeError):
 def _child_env() -> dict[str, str]:
     import movieclaw_sdk
 
-    env = {k: v for k, v in os.environ.items() if k in _ENV_KEEP}
+    # Windows 环境变量名大小写不敏感（本进程里可能是 SystemRoot 也可能是 SYSTEMROOT），
+    # 按小写比对；SystemRoot 不传子进程会让 winsock 初始化失败（getaddrinfo 报
+    # WinError 10106），进程外插件在 Windows 上全部起不来。
+    keep = {k.lower() for k in _ENV_KEEP}
+    env = {k: v for k, v in os.environ.items() if k.lower() in keep}
     # 与宿主同一份代码（overlay 部署时是 overlay 里的那份）
     env["PYTHONPATH"] = str(Path(movieclaw_sdk.__file__).resolve().parent.parent)
     env["PYTHONUNBUFFERED"] = "1"
@@ -168,15 +174,17 @@ def _launch(entry_id: str, path: Path, module: str) -> Launch:
 
     env = _child_env()
     settings = iso.isolation()
+    deps = dependency_paths.get(entry_id)
     if not settings.enabled:
-        return Launch(path, env, [])
+        return Launch(path, env, ["--deps", str(deps)] if deps else [])
     src = iso.stage_source(Path(env["PYTHONPATH"]), __version__)
     code = iso.stage_plugin(entry_id, path, module)
     scratch = iso.scratch_dir(entry_id, settings)
     env.update(PYTHONPATH=str(src), HOME=str(scratch), TMPDIR=str(scratch))
+    args = ["--deps", str(iso.stage_dependencies(deps))] if deps else []
     if settings.uid == os.geteuid():
-        return Launch(code, env, [])
-    return Launch(code, env, ["--uid", str(settings.uid), "--gid", str(settings.gid)])
+        return Launch(code, env, args)
+    return Launch(code, env, [*args, "--uid", str(settings.uid), "--gid", str(settings.gid)])
 
 
 class Session:
@@ -789,6 +797,11 @@ def _contribution(session: Session, contribution: dict[str, Any]) -> tuple[Any, 
             job_type=item["job_type"],
             applies_to=frozenset(item.get("applies_to") or ("item", "file")),
         )
+    if registry == "drive-backends":
+        from movieclaw_api.services.plugin_drives import RemoteDriveBackend
+        from movieclaw_sdk.drives import DRIVE_BACKENDS
+
+        return DRIVE_BACKENDS, RemoteDriveBackend(session, cid, item)
     if registry == "downloader-adapters":
         from movieclaw_api.services.plugin_downloaders import RemoteDownloader
         from movieclaw_downloader.registry import DOWNLOADER_ADAPTERS, DownloaderAdapter
@@ -1149,6 +1162,17 @@ class _Net:
         from movieclaw_net import resolve_proxy_url
 
         return resolve_proxy_url(service) if service in own_services(self._entry_id) else None
+
+    async def pace(self) -> dict[str, Any] | None:
+        # 插件带着调用号回来：上下文是宿主发起这次网盘调用时的，限速器就在里面
+        from movieclaw_sdk import drives as dv
+        from movieclaw_sdk import net
+
+        try:
+            await net.pace()
+        except dv.DriveError as exc:
+            return dv.error_dict(exc)
+        return None
 
 
 class _Job:

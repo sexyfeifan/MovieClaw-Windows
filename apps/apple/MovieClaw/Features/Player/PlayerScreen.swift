@@ -319,6 +319,7 @@ private struct PlayerContent: View {
                         url: controller.overlaySubtitleURL,
                         style: controller.subtitleStyle,
                         videoSize: engine.videoSize,
+                        displayMode: controller.displayMode,
                         time: { Double(controller.originMs) / 1000 + (controller.engine?.currentTime ?? 0) },
                         session: controller.scope.api.session
                     )
@@ -392,6 +393,14 @@ private struct PlayerContent: View {
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
             }
+            // 放在共同父层：控制条可见时，两指也能在画面中央捏合；
+            // 原始触摸层遇到第二指会取消拖进度/倍速，不与捏合争抢。
+            .simultaneousGesture(MagnifyGesture(minimumScaleDelta: 0.08).onEnded { value in
+                // 系统设置菜单自行接管触摸，关闭后的标记可能晚于原生菜单消失。
+                guard !locked, !isModal, menu == .none || menu == .settings else { return }
+                let mode = controller.displayMode.pinched(scale: value.magnification)
+                if mode != controller.displayMode { controller.selectDisplayMode(mode) }
+            })
             .animation(.easeInOut(duration: 0.25), value: chromeVisible)
             .animation(.easeInOut(duration: 0.2), value: controller.notice)
             .animation(.easeInOut(duration: 0.25), value: controller.qualityOffer)
@@ -542,7 +551,19 @@ private struct PlayerContent: View {
                     .padding(.horizontal, PlayerLayout.edge)
                     .padding(.bottom, PlayerLayout.gap)
                 }
-                if let segment = controller.skipSegment {
+                // 自动跳过的提示和跳过按钮占同一个角落，提示优先（撤回后回到片头里，提示收起才轮到按钮）
+                if let notice = controller.skipNotice {
+                    HStack {
+                        Spacer()
+                        PlayerSkipNotice(notice: notice, undo: controller.undoAutoSkip, decline: controller.declineIntroAutoSkip)
+                    }
+                    .padding(.horizontal, PlayerLayout.edge)
+                    .padding(.bottom, PlayerLayout.gap)
+                    .task(id: notice.id) {
+                        try? await Task.sleep(for: .milliseconds(notice.durationMs))
+                        controller.expireSkipNotice(notice.id)
+                    }
+                } else if let segment = controller.skipSegment {
                     HStack {
                         Spacer()
                         PlayerSkipButton(segment: segment, action: controller.skipCurrentSegment)
@@ -617,7 +638,8 @@ private struct PlayerContent: View {
             case .none: EmptyView()
             case .audio: AudioMenu(controller: controller) { menu = .none }.transition(menuTransition(.audio))
             case .subtitles: SubtitleMenu(controller: controller) { menu = .none }.transition(menuTransition(.subtitles))
-            case .settings: SettingsMenu(controller: controller) { menu = .none }.transition(menuTransition(.settings))
+            // ⋯ 是系统菜单（PlayerSettingsMenu），自己弹出；这里只记着它开着，让控制层常显
+            case .settings: EmptyView()
             }
         }
         .animation(.spring(duration: 0.32, bounce: 0.18), value: menu)
@@ -691,7 +713,7 @@ private struct PlayerContent: View {
     /// 片段模式的「退出全屏」：先转回竖屏、转好了再关播放器回到刷片（刷片页从这里接着放这一段）。
     /// 直接关的话，转屏与收起两段动画叠在一起，中间会露出横着排的信息流
     private func exitClip(landscape: Bool) {
-        guard landscape else {
+        guard landscape, PlayerOrientation.appControlsRotation else {
             exit()
             return
         }
@@ -710,11 +732,12 @@ private struct PlayerContent: View {
         exit()
     }
 
-    /// 横屏时左上角是「退出横屏」，竖屏时才是「退出播放」（同 Web 的后退语义）；片段模式是「退出全屏」
+    /// 手机横屏时左上角是「退出横屏」，竖屏时才是「退出播放」（同 Web 的后退语义）；片段模式是「退出全屏」；
+    /// iPad 方向跟随设备，永远是「退出播放」
     private func back(landscape: Bool) {
         if controller.clip != nil {
             exitClip(landscape: landscape)
-        } else if landscape {
+        } else if landscape, PlayerOrientation.appControlsRotation {
             PlayerOrientation.request(landscape: false)
         } else {
             exit()

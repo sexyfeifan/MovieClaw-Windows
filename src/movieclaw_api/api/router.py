@@ -33,6 +33,7 @@ from movieclaw_api.api.routes.appearance import router as appearance_router
 from movieclaw_api.api.routes.auth import router as auth_router
 from movieclaw_api.api.routes.channels import router as channels_router
 from movieclaw_api.api.routes.channels_legacy import router as channels_legacy_router
+from movieclaw_api.api.routes.client_update import router as client_update_router
 from movieclaw_api.api.routes.cloud import router as cloud_router
 from movieclaw_api.api.routes.collections import router as collections_router
 from movieclaw_api.api.routes.discover import router as discover_router
@@ -41,6 +42,7 @@ from movieclaw_api.api.routes.discover import ui_router as discovery_ui_router
 from movieclaw_api.api.routes.download_sources import router as download_sources_router
 from movieclaw_api.api.routes.downloaders import router as downloaders_router
 from movieclaw_api.api.routes.downloaders import submit_router as download_submit_router
+from movieclaw_api.api.routes.drives import router as drives_router
 from movieclaw_api.api.routes.extension import router as extension_router
 from movieclaw_api.api.routes.features import router as features_router
 from movieclaw_api.api.routes.fs import router as fs_router
@@ -61,9 +63,12 @@ from movieclaw_api.api.routes.logs import router as logs_router
 from movieclaw_api.api.routes.mcp import router as mcp_router
 from movieclaw_api.api.routes.members import router as members_router
 from movieclaw_api.api.routes.network import router as network_router
+from movieclaw_api.api.routes.offline import router as offline_router
+from movieclaw_api.api.routes.offline import viewings_router as playback_viewings_router
 from movieclaw_api.api.routes.people import router as people_router
 from movieclaw_api.api.routes.playback import router as playback_router
 from movieclaw_api.api.routes.playback import stream_router as playback_stream_router
+from movieclaw_api.api.routes.playback_sync import router as playback_sync_router
 from movieclaw_api.api.routes.plugins import router as plugins_router
 from movieclaw_api.api.routes.push import admin_router as push_admin_router
 from movieclaw_api.api.routes.push import member_router as push_member_router
@@ -74,6 +79,7 @@ from movieclaw_api.api.routes.rule_sets import router as rule_sets_router
 from movieclaw_api.api.routes.scheduled_tasks import router as scheduled_tasks_router
 from movieclaw_api.api.routes.scrape_settings import router as scrape_settings_router
 from movieclaw_api.api.routes.search import router as search_router
+from movieclaw_api.api.routes.server_addresses import router as server_addresses_router
 from movieclaw_api.api.routes.shares import admin_router as shares_admin_router
 from movieclaw_api.api.routes.shares import public_router as shares_public_router
 from movieclaw_api.api.routes.sites import router as sites_router
@@ -82,9 +88,11 @@ from movieclaw_api.api.routes.storage import router as storage_router
 from movieclaw_api.api.routes.subscriptions import router as subscriptions_router
 from movieclaw_api.api.routes.subtitle_gen import router as subtitle_gen_router
 from movieclaw_api.api.routes.system_notices import router as system_notices_router
+from movieclaw_api.api.routes.themes import router as themes_router
 from movieclaw_api.api.routes.tips import router as tips_router
 from movieclaw_api.api.routes.transcode_worker import router as transcode_worker_router
 from movieclaw_api.api.routes.ui import router as ui_router
+from movieclaw_api.api.routes.web_search import router as web_search_router
 from movieclaw_api.api.routes.webhook import router as webhook_router
 
 api_router = APIRouter()
@@ -113,6 +121,9 @@ api_router.include_router(transcode_worker_router)
 
 # ---- 外观（读公开：登录页也要加载背景图；写在路由级挂 require_login）------
 api_router.include_router(appearance_router)
+# 网页主题（docs/design/theme-plugins.md §4.6）：样式免登录（登录页也按主题渲染），
+# 主题目录与外框组件（JS）在路由级要求登录
+api_router.include_router(themes_router)
 
 # ---- 成员区（挂载时统一注入登录鉴权；组内管理动作在路由级挂 require_admin）
 _MEMBER_ROUTERS = [
@@ -136,15 +147,24 @@ _MEMBER_ROUTERS = [
     collections_router,
     people_router,
     playback_router,
+    playback_sync_router,
     reels_router,
     # 我的通知（docs/design/cloud-push.md §7.3）：每个人只管自己的开关和设备；
     # App 登记只接受 App 类设备自己的凭证（服务层判定）
     push_member_router,
+    client_update_router,
     # 使用提示（docs/design/tips.md）：每个人自己的事件计数与提示展示/作废记录
     tips_router,
+    # 离线下载（docs/design/offline-download.md）：下载类接口另挂「下载影片到设备」开关；
+    # 观看记录补传只要登录（权限后来被关，已下的片照样能播、记录照样要回来）
+    offline_router,
+    playback_viewings_router,
     # 功能开关（docs/design/plugin-page-tiers.md §6）：各端都要知道哪些功能停用了好隐藏入口；
     # 切换在路由级挂 require_admin
     features_router,
+    # 访问地址簿（docs/design/server-addresses.md §3.2）：各端 App 登录后据此在内外网之间自动选；
+    # 增删在路由级挂 require_admin
+    server_addresses_router,
 ]
 for _router in _MEMBER_ROUTERS:
     api_router.include_router(_router, dependencies=[Depends(require_login)])
@@ -180,7 +200,10 @@ _ADMIN_ROUTERS = [
     # 排在下载器路由前：/downloaders/file-sources 不能被 /downloaders/{downloader_id} 先接走
     download_sources_router,
     downloaders_router,
+    # 网盘账号：持有网盘凭据，以账号的名义调网盘接口（cloud-storage.md §11）
+    drives_router,
     llm_router,
+    web_search_router,
     session_router,
     agent_skills_router,
     # 旧版 App 的通道接口（只为已发布的 App 保留，内部走通道中枢）

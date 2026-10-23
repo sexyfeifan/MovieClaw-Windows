@@ -672,6 +672,17 @@ export interface PlaybackSegment {
   to_end: boolean;
 }
 
+/**
+ * 自动跳过的个人设定（docs/design/skip-intro.md §5），跟账号走、随会话下发。
+ * 旧服务端与分享访客没有（undefined / null）：按默认（广告直接跳、片头只给按钮），也学不了片头。
+ */
+export interface PlaybackAutoSkip {
+  /** 总开关，默认开 */
+  enabled: boolean;
+  /** 这部剧学过片头（手动跳过过一次）：片头也自动跳 */
+  intro: boolean;
+}
+
 export interface PlaybackSession {
   decision: PlaybackDecision;
   /** 档 0 没有会话（原文件直出），此处为 null */
@@ -696,6 +707,8 @@ export interface PlaybackSession {
   chapters?: PlaybackChapterMark[];
   /** 片头 / 片尾 / 其他可跳过的段；剧集库开了「识别片头片尾」且这一季识别过才有 */
   segments?: PlaybackSegment[];
+  /** 自动跳过的个人设定；旧服务端、分享访客没有 */
+  auto_skip?: PlaybackAutoSkip | null;
   /** 本单元的观看状态快照（§6.10）。续播点已由服务端并入 start_ms，这里
    * 整份带回给前端预填时间轴、恢复字幕记忆——起播不再单独问 /resume */
   watch: PlaybackWatchState | null;
@@ -991,6 +1004,14 @@ export async function setPlaybackMarks(
   return response.data;
 }
 
+/** 记下 / 忘掉这部剧的片头自动跳（下一次开播随会话的 `auto_skip` 带回） */
+export async function setAutoSkipIntro(mediaItemId: number, enabled: boolean): Promise<void> {
+  await request<ApiEnvelope<unknown>>(`/playback/auto-skip/intro/${mediaItemId}`, {
+    method: "PUT",
+    body: JSON.stringify({ enabled }),
+  });
+}
+
 export interface PlaybackProgressBody extends PlaybackUnit {
   event: "start" | "progress" | "stop";
   /** 播到文件的哪个位置。**不报（undefined）视同播到结尾**，与报 0 不同。 */
@@ -1074,10 +1095,15 @@ export interface PlaybackPolicy {
   reel_clips_enabled: boolean;
   /** 片段预切进度（开关开着才有） */
   reel_clips_progress: ReelClipProgress | null;
+  /** 在外面播放网盘上的片子（docs/design/cloud-storage.md §7.2）；老服务器没有 */
+  cloud_stream_mode?: CloudStreamMode | null;
   /** 实测结果而非配置项——用户改不了自己有没有显卡 */
   hardware_available: boolean;
   hw_backends: string[];
 }
+
+/** 在外面播放网盘上的片子：自动 / 总是经家里转发 / 总是直连网盘 */
+export type CloudStreamMode = "auto" | "relay" | "direct";
 
 /** 片段预切进度：电影与剧集一共几部、切好了几部；state 为 paused 时是在给播放让路 */
 export interface ReelClipProgress {

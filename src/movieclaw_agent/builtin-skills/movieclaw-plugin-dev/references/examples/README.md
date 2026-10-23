@@ -12,6 +12,8 @@ CI 里 `tests/api/test_example_plugins*.py` 会把它们装进临时数据目录
 | `site_pack/` | 站点数据包：把一组自己适配的站点 YAML 打成插件分发 | 站点数据包注册表 `site-data-packs`（包形式的本地插件） |
 | `ntfy-channel/` | 第三方 IM 通道：在 ntfy App 里和 MovieClaw 对话、接收推送 | 通道注册表 `im-channels`（`movieclaw_sdk.channels`，见 `docs/design/plugin-channels.md`）；带清单，可直接 `mclaw plugin pack` 成插件包 |
 | `wecom-channel/` | 回调式 IM 通道：企业微信自建应用，平台把加密消息推到回调地址 | 通道驱动的 `webhook`（`Capabilities(webhook=True)`）、清单 `callbacks = ["webhook"]`、企业微信验签与 AES 解密、应用消息接口发回复、配对码绑定；带清单，可直接打包 |
+| `go-a2a-bridge/` | 非 Python 插件：用 Go 写的 A2A 桥，把外部 Agent 的请求转成一轮 MovieClaw AI 助手对话 | `runtime = "exec"`（包里的可执行文件 + `platforms`）、协议见 `$SRC/movieclaw_sdk/protocol/`、调用 AI 助手（`recipes.md` 第 15 节）；带清单，打包前先按服务器平台编译 |
+| `ocean-theme/` | 网页主题「海蓝」：深海蓝底、青色强调，在「设置 → 外观」里选用 | 清单 `[theme]` 段、`theme/theme.css` 只改公开变量与一个公开部件（`references/themes.md`）；纯 CSS，没有代码，可直接打包 |
 
 ## 装到自己的 MovieClaw 上
 
@@ -25,7 +27,7 @@ CI 里 `tests/api/test_example_plugins*.py` 会把它们装进临时数据目录
      grants: [subscriptions.delete, dl.torrent.delete]
    ```
 
-3. 重启。设置 → 更新与维护 →「模块」里能看到它，标着「本地插件」。
+3. 重启。设置 → 插件里能看到它，标着「本地插件」。
 
 插件读写文件一律经文件接口（`PLUGIN_FILES`），只能碰 `paths` 里批准过的目录（`docs/design/plugin-phase3.md` §6.2）：
 
@@ -98,7 +100,7 @@ paths = [{ path = "staging", mode = "read" }]
 
 ```bash
 mclaw plugin pack ./group-blocklist          # 打成 group-blocklist-0.1.0.mcplugin
-mclaw plugin dev  ./group-blocklist          # 连到服务器：一改就重新打包、上传、批准、加载
+mclaw plugin dev  ./group-blocklist          # 在服务器上重装：一改就重新打包、上传、批准、加载（不是本地进程连上去）
 mclaw app plugins packages upload --file group-blocklist-0.1.0.mcplugin   # 正式安装
 mclaw app plugins packages approve group-blocklist --version 0.1.0 \
     --operations-json '["search.titles"]' \

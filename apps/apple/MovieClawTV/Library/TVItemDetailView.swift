@@ -52,6 +52,8 @@ struct TVItemDetailView: View {
     @State private var watched: API.PlaybackStateView?
     /// 电影所属的作品系列（《哈利·波特》这种）：整个系列按上映顺序，库里没有的也在（置灰）。没有系列为 nil
     @State private var series: API.CollectionSeriesView?
+    /// 相似推荐（只在自己库里挑，见 `TVSimilarRow`）。没有、接口失败、旧服务端没有这个接口都是空，整行不出
+    @State private var similar: [API.LibraryItemView] = []
     @State private var favorite: Bool?
     @State private var marking = false
     /// 列表滚动距离：只给背景层读
@@ -196,7 +198,7 @@ struct TVItemDetailView: View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 0) {
                 // 首屏：Logo 最高 200（与首页同大），文字与按钮贴底排，下沿与首页一样在 y=918。剧集底下露出分集剧照的上沿——
-                // 整屏都是大图的话，用户不知道往下还有东西（2026-10-03 用户指出，同 Apple TV）；电影不露（见 lowerGap）
+                // 整屏都是大图的话，用户不知道往下还有东西（2026-10-03 用户指出，同 Apple TV）；电影露演职员（见 lowerGap）
                 TVScrollGate(scroll: scroll, showsWhenLower: false, threshold: lowerScroll) {
                 TVStageBlock(topInset: topInset, bottom: 918) {
                     TVStageInfo(
@@ -368,14 +370,9 @@ struct TVItemDetailView: View {
     private static let rangeTabsHeight: CGFloat = 76
     /// 首屏下沿（918）到下半截的距离，决定首屏底下露出多少（2026-10-04 用户改定）：
     /// - 剧集露分集剧照的上沿约 60 点，与首页「接下来继续」露出的一样多（此前露 120 多点，嫌太高）；
-    /// - 电影有系列时露系列一行：行标题「哈利·波特（系列） 已有 7 / 共 8」加海报上沿约 60 点，与首页「接下来继续」露法一样
-    ///   （海报是方角卡片，露一角好看，也一眼看出这部有前传续集）；
-    /// - 没有系列的电影什么都不露：下半截第一行是演职员，露出半截圆头像不好看。整块排到屏幕外（「演职员」标题从约 1100 起），
-    ///   往下按照样滑到下半截
-    private var lowerGap: CGFloat {
-        guard isMovie else { return 82 }
-        return series == nil ? 164 : 20
-    }
+    /// - 电影露演职员一行（2026-10-12 用户定）：行标题「演职员」加竖版人物卡的上沿约 60 点，与原先露系列一行同样多。
+    ///   人物卡换成方角竖版之后露一角好看（圆头像时露半截难看，才一度不露），也让人知道往下还有东西
+    private var lowerGap: CGFloat { isMovie ? 20 : 82 }
     /// 滑到下半截的滚动量：下半截静止时从屏幕 y=918 + `lowerGap` 排起，滚到它落在 `lowerScreenTop`
     private var lowerScroll: CGFloat { 918 + lowerGap - lowerScreenTop }
     private var hasSeasonTabs: Bool { !isMovie && (detail?.seasons.count ?? 0) > 1 }
@@ -392,13 +389,19 @@ struct TVItemDetailView: View {
                 // 有选季时它浮在上面，往上先到选季；没有选季时这一行就是下半截的顶，往上回首屏
                 episodeRow
             }
-            if let series {
-                TVSeriesRow(series: series, libraryId: libraryId, itemId: itemId) { backToStage() }
-                    .equatable()
-            }
+            // 分集 → 演职员 → 相似推荐 → 系列（2026-10-12 用户定）：系列部数少、一眼看完，放在相似推荐下面；
+            // 有系列时相似推荐排除了同系列的片，两行不重复
             let people = Self.castPeople(detail)
             if !people.isEmpty {
                 TVCastRow(people: people, itemId: itemId)
+                    .equatable()
+            }
+            if !similar.isEmpty {
+                TVSimilarRow(items: similar, libraryId: libraryId)
+                    .equatable()
+            }
+            if let series {
+                TVSeriesRow(series: series, libraryId: libraryId, itemId: itemId) { backToStage() }
                     .equatable()
             }
             if !otherCollections(detail).isEmpty {
@@ -567,18 +570,6 @@ struct TVItemDetailView: View {
         return detail.collections.filter { $0.id != seriesId }
     }
 
-    /// 读电影所属系列的整份清单（TMDB 档案 + 库里有哪几部）。只有一部、或拉不到上游档案（没配 TMDB、网络不通）
-    /// 时不出这一行——只剩自己一部的「系列」没有可看的
-    private func loadSeries(_ detail: API.LibraryItemDetailView) async {
-        guard detail.kind != "tv", let id = detail.seriesCollectionId,
-              let fresh = try? await api.collectionSeriesGet(collectionId: id),
-              fresh.available, fresh.parts.count > 1 else {
-            series = nil
-            return
-        }
-        series = fresh
-    }
-
     /// 下半截分集横排进来时落在哪一集：首屏讲的那一季是首屏那一集，别的季是那一季接着看的那一集（服务端锚点）
     private var seasonEntry: Int? {
         if browseSeason == season, let selectedEpisode { return selectedEpisode.episodeNumber }
@@ -742,6 +733,8 @@ struct TVItemDetailView: View {
     private func reload() async {
         do {
             let fresh = try await api.libraryItemsGet(libraryId: libraryId, mediaItemId: itemId)
+            // 相似推荐与系列和分集并行拉（规则见 `ItemRelated`）
+            async let related = ItemRelated.load(api: api, libraryId: libraryId, detail: fresh)
             if fresh.kind == "tv", season == nil {
                 // 在「接下来继续」里的剧打开接着看的那一季（首页大图正讲第 2 季第 6 集，按「详情」进来还是它）；
                 // 别的打开第一个有片源的季——综艺常只收了最新一季（《中餐厅》只有第 10 季），打开第 1 季就是一排缺集、
@@ -761,8 +754,10 @@ struct TVItemDetailView: View {
                     rowEpisode = selectedEpisode?.episodeNumber
                 }
             }
-            // 系列读完再出页面：首屏要按有没有系列决定底下露不露
-            await loadSeries(fresh)
+            // 两行读完再出页面：下半截排版一次定下来，不在眼前跳
+            let rows = await related
+            series = rows.series
+            similar = rows.similar
             detail = fresh
             failed = false
         } catch is CancellationError {
@@ -1023,7 +1018,8 @@ private struct TVCastRow: View, Equatable {
     var body: some View {
         TVShelf(title: "演职员") {
             ForEach(Array(people.enumerated()), id: \.offset) { index, person in
-                TVPersonCard(name: person.name, role: person.role, avatarURL: api.image(person.avatar, width: TVPersonCard.imageWidth())) {
+                TVPersonPortraitCard(name: person.name, role: person.role,
+                                     imageURL: api.image(person.avatar, width: ImageWidth.tvCard(TVPersonPortraitCard.width))) {
                     // 没有 TMDB 影人 id 的（NFO 里只有姓名的导演）没有影人页，按确认不跳转
                     guard let id = person.personId else { return }
                     router.push(.person(tmdbId: id, name: person.name, avatar: person.avatar, fromItem: itemId))
@@ -1032,12 +1028,12 @@ private struct TVCastRow: View, Equatable {
                 .accessibilityIdentifier(person.personId.map { "tv-cast-\($0)" } ?? "tv-cast-none")
             }
         }
-        // 电影（没有系列一行时）从按钮往下直接进这一行：落在第一位（导演）。这一行在首屏外，系统按几何就近挑会落到中间某一位
+        // 电影从按钮往下直接进这一行：落在第一位（导演）。这一行在首屏外，系统按几何就近挑会落到中间某一位
         .defaultFocus($focused, 0, priority: .userInitiated)
     }
 }
 
-/// 作品系列一行（2026-10-04 用户要求）：电影往下滑的第一行，整个系列按上映顺序排，标题旁写「已有 7 / 共 8」。
+/// 作品系列一行（2026-10-04 用户要求）：排在相似推荐下面，整个系列按上映顺序排，标题旁写「已有 7 / 共 8」。
 /// 这一部标「本片」，按下回首屏（播放按钮就在那）；库里没有的置灰标「未入库」，不能选中（同 Mac 版）。
 /// 往下进这一行落在「本片」上，看得出这一部排第几。焦点由这一行自己管（同 `TVCastRow`）
 private struct TVSeriesRow: View, Equatable {
@@ -1078,6 +1074,36 @@ private struct TVSeriesRow: View, Equatable {
             }
         }
         .defaultFocus($focused, series.parts.first { $0.mediaItemId == itemId }?.tmdbId, priority: .userInitiated)
+    }
+}
+
+/// 相似推荐一行（Web / iPhone 同名一行）：只推观看者自己库里有的片，按确认进那一部的详情。
+/// 往下进这一行落在第一张（最像的那部）。焦点由这一行自己管（同 `TVCastRow`）
+private struct TVSimilarRow: View, Equatable {
+    let items: [API.LibraryItemView]
+    let libraryId: Int
+
+    @Environment(\.api) private var api
+    @Environment(TVRouter.self) private var router
+    @FocusState private var focused: Int?
+
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.items == rhs.items && lhs.libraryId == rhs.libraryId }
+
+    var body: some View {
+        TVShelf(title: "相似推荐") {
+            ForEach(items, id: \.mediaItemId) { item in
+                TVPosterCard(
+                    title: item.title,
+                    subtitle: item.year.map(String.init),
+                    imageURL: api.image(item.posterUrl, width: ImageWidth.tvCard(TVMetrics.posterWidth))
+                ) {
+                    router.push(.item(libraryId: item.libraryId ?? libraryId, itemId: item.mediaItemId))
+                }
+                .focused($focused, equals: item.mediaItemId)
+                .accessibilityIdentifier("tv-similar-\(item.mediaItemId)")
+            }
+        }
+        .defaultFocus($focused, items.first?.mediaItemId, priority: .userInitiated)
     }
 }
 

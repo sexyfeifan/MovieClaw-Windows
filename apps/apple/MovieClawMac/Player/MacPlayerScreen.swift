@@ -52,6 +52,7 @@ private struct MacPlayerHost: View {
         }
         .ignoresSafeArea()
         .background(MacWindowReader { window.attach($0) })
+        .preference(key: MacWindowMinimumKey.self, value: window.minimumSize)
         .environment(\.colorScheme, .dark)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("mac-player")
@@ -294,30 +295,34 @@ private struct MacPlayerContent: View {
                     skip: { seek(by: $0, flashes: false) }, toggleFullScreen: toggleFullScreen
                 )
                 .overlay(alignment: .bottomTrailing) {
-                    panelView(maxHeight: max(160, min(380, size.height - 260)))
+                    // 面板从胶囊右上角往左上长：宽不超出窗口左边，高不顶出窗口（小窗口里列表自己滚）
+                    panelView(maxWidth: (size.width + panelWidth(size)) / 2 - 12,
+                              maxHeight: max(min(160, size.height - 190), min(380, size.height - 260)))
                         .offset(y: -(MacPlayerMetrics.panelHeight + 10))
                 }
-                .frame(width: max(360, min(size.width - MacPlayerMetrics.panelSideInset * 2, MacPlayerMetrics.panelMaxWidth)))
+                .frame(width: panelWidth(size))
                 .padding(.bottom, MacPlayerMetrics.panelBottom)
             }
         }
     }
 
+    /// 控制胶囊的宽：两侧留窗口宽的 5%（至多 48），最宽 720
+    private func panelWidth(_ size: CGSize) -> CGFloat {
+        max(0, min(size.width - min(MacPlayerMetrics.panelSideInset, size.width * 0.05) * 2, MacPlayerMetrics.panelMaxWidth))
+    }
+
     @ViewBuilder
-    private func panelView(maxHeight: CGFloat) -> some View {
+    private func panelView(maxWidth: CGFloat, maxHeight: CGFloat) -> some View {
         switch panel {
         case .tracks:
-            MacTracksPanel(controller: controller, maxHeight: maxHeight) { panel = nil }
-                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomTrailing)))
-        case .quality:
-            MacQualityPanel(controller: controller) { panel = nil }
+            MacTracksPanel(controller: controller, maxWidth: maxWidth, maxHeight: maxHeight) { panel = nil }
                 .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomTrailing)))
         case nil:
             EmptyView()
         }
     }
 
-    /// 右下角：换画质建议 / 跳过片头 / 下一集卡片（同一个角落，同时只出一个）。控制层出现时让到面板上方
+    /// 右下角：换画质建议 / 自动跳过的提示 / 跳过片头 / 下一集卡片（同一个角落，同时只出一个）。控制层出现时让到面板上方
     private var contextualCorner: some View {
         // 叠放而不是横排：换下来的那个淡出期间还占着位置，横排会把新来的挤出窗口右边
         ZStack(alignment: .bottomTrailing) {
@@ -326,6 +331,14 @@ private struct MacPlayerContent: View {
             if let offer = controller.qualityOffer {
                 MacQualityOfferCard(offer: offer, accept: controller.acceptQualityOffer, dismiss: controller.dismissQualityOffer)
                     .transition(Self.cornerTransition)
+            } else if let notice = controller.skipNotice {
+                // 提示优先于跳过按钮（撤回后回到片头里，提示收起才轮到按钮）
+                MacSkipNotice(notice: notice, undo: controller.undoAutoSkip, decline: controller.declineIntroAutoSkip)
+                    .transition(Self.cornerTransition)
+                    .task(id: notice.id) {
+                        try? await Task.sleep(for: .milliseconds(notice.durationMs))
+                        controller.expireSkipNotice(notice.id)
+                    }
             } else if let segment = controller.skipSegment {
                 MacSkipButton(segment: segment, action: controller.skipCurrentSegment)
                     .transition(Self.cornerTransition)
@@ -412,7 +425,7 @@ private struct MacPlayerContent: View {
     }
 
     private var cornerKey: String {
-        "\(controller.qualityOffer != nil)-\(controller.skipSegment?.type ?? "")-\(controller.showsUpNext)"
+        "\(controller.qualityOffer != nil)-\(controller.skipNotice?.id.uuidString ?? "")-\(controller.skipSegment?.type ?? "")-\(controller.showsUpNext)"
     }
 
     /// 调试驱动读的状态摘要（控件树里 mac-player-surface 的值）
@@ -548,11 +561,23 @@ private struct MacPlayerContent: View {
                 if once { toggleFullScreen() }
             } else if character == "m", modifiers.isEmpty {
                 if once { toggleMute() }
+            } else if character == "[" || character == "]", modifiers.isEmpty {
+                // 倍速逐档（同 Windows 版的 [ ]）：到头不再变
+                if once { stepRate(character == "]" ? 1 : -1) }
             } else {
                 return .ignored
             }
         }
         return .handled
+    }
+
+    private func stepRate(_ direction: Int) {
+        let all = PlaybackSpeed.all
+        let index = all.firstIndex(of: controller.rate) ?? all.firstIndex(of: 1) ?? 0
+        let next = all[min(max(0, index + direction), all.count - 1)]
+        guard next != controller.rate else { return }
+        controller.selectRate(next)
+        flash = MacPlayerFlash(symbol: direction > 0 ? "hare.fill" : "tortoise.fill", text: PlaybackSpeed.short(next))
     }
 
     private func debugLog(_ message: String) {

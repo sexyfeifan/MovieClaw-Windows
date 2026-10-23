@@ -9,6 +9,7 @@ from movieclaw_api.api.client_address import client_address
 from movieclaw_api.exceptions import AppException, ForbiddenException, UnauthorizedException
 from movieclaw_api.services import auth as auth_service
 from movieclaw_api.services.auth import Principal
+from movieclaw_api.services.server_addresses import AUTHENTICATED_SCOPE_KEY
 from movieclaw_api.settings.schemas import get_sync_setting
 from movieclaw_kernel import AGENT_MARK, Origin, current_origin
 
@@ -71,6 +72,11 @@ async def optional_login(
         principal = await auth_service.verify_bearer_token(bearer, ip=ip, user_agent=user_agent)
     if principal is not None:
         _attribute(principal)
+        human = principal.plugin is None and principal.kind not in ("agent", "mcp")
+        if principal.is_admin and human:
+            # 访问地址簿只从管理员用的客户端学：学到的地址会发给全家的 App 去连，Host /
+            # X-Forwarded-Host 又是请求方自己能写的（server-addresses.md §3.1）
+            connection.scope[AUTHENTICATED_SCOPE_KEY] = True
     return principal
 
 
@@ -271,4 +277,23 @@ async def require_direct_download_capability(
         return principal
     if principal.member is None or not principal.member.allow_direct_download:
         raise ForbiddenException("管理员未对你开放一键下载，请联系管理员开启")
+    return principal
+
+
+def can_download_video(principal: Principal) -> bool:
+    """下载影片到设备（docs/design/offline-download.md §9）。
+
+    管理员恒可；成员看 ``allow_video_download``。
+    """
+    if principal.is_admin:
+        return True
+    return principal.member is not None and principal.member.allow_video_download
+
+
+async def require_video_download_capability(
+    principal: Principal = Depends(require_login),
+) -> Principal:
+    """离线下载能力依赖：App 离线下载的全部接口都挂它。"""
+    if not can_download_video(principal):
+        raise ForbiddenException("管理员未对你开放下载影片到设备，请联系管理员开启")
     return principal

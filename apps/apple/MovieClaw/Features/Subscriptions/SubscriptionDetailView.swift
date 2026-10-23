@@ -15,6 +15,7 @@ import SwiftUI
 /// 取消订阅（成员 = 取消关注；管理员 = 带移除预览与删种删文件选项的彻底删除）。
 /// `openUpgradeRun` 为 true 时（媒体库「洗版」入口并轨到既有订阅）进入即打开洗一轮版。
 struct SubscriptionDetailView: View {
+    @Environment(\.cardMetrics) private var cards
     let subscriptionId: Int
     var openUpgradeRun: Bool = false
 
@@ -38,6 +39,8 @@ struct SubscriptionDetailView: View {
     @State private var forecastPolls = 0
     /// 带「返回 / 先不」取消键的确认框（同 Web cancelLabel）
     @State private var confirms = SubsConfirmCenter()
+    /// 「这次先下原版」之后追问看不看得懂这种语言（只问管理员）
+    @State private var askUnderstood: API.SmartSubtitleView?
 
     enum DetailSheet: Identifiable {
         case manage, adjust, upgradeRun, switchRule, cancel
@@ -106,7 +109,32 @@ struct SubscriptionDetailView: View {
             sheetContent(sheet).sheetFeedback()
         }
         .modifier(SubsConfirmHost(center: confirms))
+        .onReceive(NotificationCenter.default.publisher(for: .smartOriginalRequested)) { note in
+            guard note.object as? Int == subscriptionId, permissions.isAdmin,
+                  let subtitle = detail?.smartSubtitle, !subtitle.understood else { return }
+            askUnderstood = subtitle
+        }
+        .alert(
+            "已开始下载原版。你看得懂\(askUnderstood?.languageLabel ?? "")吗？",
+            isPresented: Binding(mcGet: { askUnderstood != nil }, set: { if !$0 { askUnderstood = nil } }),
+            presenting: askUnderstood
+        ) { subtitle in
+            Button("只这次", role: .cancel) {}
+            Button("看得懂") { Task { await markUnderstood(subtitle) } }
+        } message: { subtitle in
+            Text("选「看得懂」，以后的\(subtitle.languageLabel)作品都直接下原版。")
+        }
         .accessibilityIdentifier("subscription-detail")
+    }
+
+    private func markUnderstood(_ subtitle: API.SmartSubtitleView) async {
+        do {
+            let memory = try await api.subscriptionsGetSmartMemory()
+            _ = try await api.subscriptionsUpdateSmartMemory(body: .init(revision: memory.revision, language: subtitle.language, understood: true))
+            await reload()
+        } catch {
+            feedback.error(error)
+        }
     }
 
     // MARK: 数据
@@ -180,7 +208,7 @@ struct SubscriptionDetailView: View {
                 )
                 ActivityLogSection(activities: activities)
             }
-            .padding(.horizontal, Theme.pagePadding)
+            .padding(.horizontal, cards.edge)
             .padding(.top, 8)
             .padding(.bottom, 40)
         }
@@ -256,6 +284,9 @@ struct SubscriptionDetailView: View {
                 if detail.isSmart, let preferences = detail.smartPreferences {
                     fact("智能目标", preferences.targetLabel)
                     fact("后续洗版", preferences.allowUpgrade ? (isMovie ? "达标核验后停止" : "逐集达标核验后停止") : "关闭")
+                    if let subtitle = detail.smartSubtitle {
+                        fact("字幕", subtitle.understood ? "不需要" : subtitle.line.components(separatedBy: " · ").last ?? subtitle.line)
+                    }
                 } else if !detail.isSmart, permissions.canManageSubscriptions { fact("规则组", ruleSetFact(detail)) }
             }
             .padding(.vertical, 12)

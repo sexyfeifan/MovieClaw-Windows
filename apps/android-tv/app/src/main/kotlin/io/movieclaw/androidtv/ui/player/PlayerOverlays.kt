@@ -45,14 +45,15 @@ import androidx.tv.material3.Glow
 import androidx.tv.material3.Icon
 import androidx.tv.material3.Surface
 import io.movieclaw.androidtv.ui.components.Text
-import io.movieclaw.androidtv.core.model.generated.EpisodeView
-import io.movieclaw.androidtv.core.model.generated.PlaybackDecisionView
-import io.movieclaw.androidtv.core.model.generated.PlaybackSegmentView
-import io.movieclaw.androidtv.core.playback.Phase
-import io.movieclaw.androidtv.core.playback.PlayerState
-import io.movieclaw.androidtv.core.playback.PlayerFormat
-import io.movieclaw.androidtv.core.playback.QualitySuggestion
-import io.movieclaw.androidtv.core.playback.SkipSegments
+import io.movieclaw.core.model.generated.EpisodeView
+import io.movieclaw.core.model.generated.PlaybackDecisionView
+import io.movieclaw.core.model.generated.PlaybackSegmentView
+import io.movieclaw.core.playback.Phase
+import io.movieclaw.core.playback.PlayerState
+import io.movieclaw.core.playback.PlayerFormat
+import io.movieclaw.core.playback.QualitySuggestion
+import io.movieclaw.core.playback.SkipNotice
+import io.movieclaw.core.playback.SkipSegments
 import io.movieclaw.androidtv.ui.components.McIcons
 import io.movieclaw.androidtv.ui.components.RemoteImage
 import io.movieclaw.androidtv.ui.components.Spinner
@@ -130,6 +131,40 @@ fun SkipButton(segment: PlaybackSegmentView, onClick: () -> Unit, modifier: Modi
             Icon(McIcons.SkipForward, null, modifier = Modifier.size(38.pt))
             Text(SkipSegments.label(segment), style = McType.Headline)
         }
+    }
+}
+
+/**
+ * 自动跳过的提示（docs/design/skip-intro.md §5，同 Apple TV），占跳过按钮的位置：
+ * - 「已跳过片头 · 撤回」：整颗是按钮，出现时自动拿焦点，按确认撤回（返回键 = 不撤回，见 PlayerScreen）；
+ * - 「本剧以后自动跳过片头」「本剧不再自动跳过片头」：只是告知，不拿焦点。手机上学会时的「不用」
+ *   电视上不给——刚按完「跳过片头」焦点会落到它上面，连按一下就误点了；不想自动跳，下一集按「撤回」即可
+ */
+@Composable
+fun SkipNoticeView(notice: SkipNotice, onUndo: () -> Unit, modifier: Modifier = Modifier) {
+    if (notice.kind == SkipNotice.Kind.Skipped) {
+        GlassButton(onUndo, modifier) {
+            Row(
+                Modifier.padding(start = (12 + 28).pt, end = 16.pt, top = 16.pt, bottom = 16.pt),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.pt),
+            ) {
+                Text(notice.text, style = McType.Headline)
+                Text(
+                    "撤回",
+                    style = McType.Callout.copy(fontWeight = FontWeight.SemiBold),
+                    color = Color.Black,
+                    modifier = Modifier.background(Color.White, RoundedCornerShape(50)).padding(horizontal = 16.pt, vertical = 4.pt),
+                )
+            }
+        }
+    } else {
+        Text(
+            notice.text,
+            style = McType.Headline,
+            color = Color.White,
+            modifier = modifier.glassPanel(RoundedCornerShape(50)).padding(horizontal = 28.pt, vertical = 18.pt),
+        )
     }
 }
 
@@ -321,11 +356,21 @@ fun PlayerButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifie
 }
 
 /**
- * 控制层进度条上方的「下一集」「选集」（剧集才有，同手机端进度条上的工具行）：上键从画面把焦点交到这里（落在第一颗），
- * 左右换按钮、到头不出去，下键 [onLeave] 回到画面
+ * 控制层进度条上方的工具行：剧集有「下一集」「选集」（同手机端进度条上的工具行），任何片子都有「播放诊断」。
+ * 上键从画面把焦点交到这里（落在第一颗），左右换按钮、到头不出去，下键 [onLeave] 回到画面
  */
 @Composable
-fun EpisodeActions(next: EpisodeView?, onNext: () -> Unit, onEpisodes: () -> Unit, focus: FocusRequester, onLeave: () -> Unit, modifier: Modifier = Modifier) {
+fun EpisodeActions(
+    next: EpisodeView?,
+    onNext: () -> Unit,
+    onEpisodes: () -> Unit,
+    focus: FocusRequester,
+    onLeave: () -> Unit,
+    modifier: Modifier = Modifier,
+    episodic: Boolean = true,
+    diagnosticsOpen: Boolean = false,
+    onDiagnostics: () -> Unit = {},
+) {
     Row(
         modifier
             .focusRequester(focus)
@@ -343,8 +388,11 @@ fun EpisodeActions(next: EpisodeView?, onNext: () -> Unit, onEpisodes: () -> Uni
             .focusGroup(),
         horizontalArrangement = Arrangement.spacedBy(24.pt),
     ) {
-        if (next != null) ActionButton(McIcons.SkipForward, "下一集", onNext)
-        ActionButton(McIcons.Episodes, "选集", onEpisodes)
+        if (episodic) {
+            if (next != null) ActionButton(McIcons.SkipForward, "下一集", onNext)
+            ActionButton(McIcons.Episodes, "选集", onEpisodes)
+        }
+        ActionButton(McIcons.Info, if (diagnosticsOpen) "关闭诊断" else "播放诊断", onDiagnostics)
     }
 }
 
