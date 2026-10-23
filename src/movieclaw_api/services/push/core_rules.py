@@ -57,6 +57,21 @@ async def _stuck(_s: AsyncSession, _member: int, p: Any) -> AlertContent:
     )
 
 
+async def _awaiting_subtitles(_s: AsyncSession, _member: int, p: Any) -> AlertContent:
+    from movieclaw_api.services.push.labels import units_text
+
+    which = units_text([(u.season, u.episode) for u in p.units])
+    return AlertContent(
+        title=f"《{p.media.title}》{which}还没有字幕版",
+        body=(
+            f"等了 {p.waited_hours} 小时，还没有带{p.acceptable}字幕的版本，"
+            f"{p.language}原版已有 {p.originals} 个。可以继续等，也可以在订阅里先下原版。"
+        ),
+        open=f"/subscriptions/{p.subscription_id}",
+        thread=f"subscription:{p.subscription_id}",
+    )
+
+
 async def _more_episodes(_s: AsyncSession, _member: int, p: Any) -> AlertContent:
     where = "站点上出现了后面的集" if p.source == "site" else "豆瓣的集数更多"
     return AlertContent(
@@ -125,6 +140,22 @@ async def _tip(_s: AsyncSession, _member: int, p: Any) -> AlertContent | None:
     )
 
 
+async def _agent_finished(_s: AsyncSession, _member: int, p: Any) -> AlertContent | None:
+    # 只留最该看的：标题 = 哪个会话，正文 = 回答开头；出错时正文开头就说「没能完成」。
+    # 不写「AI 助手已回复」——来源有 App 图标交代，多个会话同时跑时靠标题区分（2026-10-13 用户定）
+    if p.status == "done":
+        body = p.answer or "已回复，点开查看"
+    else:
+        body = f"没能完成：{p.error or '原因未知'}"
+    return AlertContent(
+        title=p.title or "AI 助手",
+        body=body,
+        open=f"/sessions/{p.session_id}",
+        thread=f"agent:{p.session_id}",
+        source="server",
+    )
+
+
 def register_all() -> None:
     register(
         Aggregator(
@@ -158,6 +189,21 @@ def register_all() -> None:
             audience=Audience.subscribers("subscription_id"),
             render=_identity_skipped,
             collapse=lambda p: ("identity-skipped", str(p.subscription_id)),
+        )
+    )
+    register(
+        Rule(
+            event="subscription.awaiting_subtitles",
+            title="等不到字幕版",
+            description="智能订阅等到期仍没有你看得懂的字幕版本时；原版不会自动下载",
+            group="我的订阅",
+            default=True,
+            audience=Audience.subscribers("subscription_id"),
+            render=_awaiting_subtitles,
+            collapse=lambda p: (
+                "awaiting-subtitles",
+                f"{p.subscription_id}:" + ",".join(f"{u.season}x{u.episode}" for u in p.units),
+            ),
         )
     )
     register(
@@ -283,5 +329,23 @@ def register_all() -> None:
             audience=Audience.admins(),
             render=_tip,
             collapse=lambda p: ("tip", p.tip),
+        )
+    )
+    register(
+        Rule(
+            event="agent.run.finished",
+            title="AI 回复完成",
+            description=(
+                "AI 助手回答完你在 App、网页里的提问（或运行出错）时提醒，切到别的 App 也能知道；"
+                "在 IM 里聊的回复本来就在聊天里，不另外提醒"
+            ),
+            group="AI 助手",
+            default=True,
+            admin_only=True,
+            audience=Audience.member("member_id"),
+            render=_agent_finished,
+            when=lambda p: p.source == "app",
+            collapse=lambda p: ("agent-run", p.session_id),
+            to_im=False,
         )
     )

@@ -1,12 +1,27 @@
 // Server-enforced opt-in presence. This module runs inside the existing player.
 window.DesktopFriends = (() => {
   const base = '/plugins/watch-presence';
+  const usesWatchFriends = () => window.DesktopPlugins?.has('watch-friends') === true;
   const identity = () => JSON.stringify([API.baseUrl, App.session?.username || '', API.contextEpoch]);
   const storageKey = () => 'mc_friends:' + JSON.stringify([API.baseUrl, App.session?.username || '']);
   const enabled = () => localStorage.getItem(storageKey()) === 'true';
   const html = value => escapeHtml(value ?? '');
   const time = ms => Player.formatTime(Math.floor(Math.max(0, Number(ms) || 0) / 1000));
   let drawer, controller, timer, epoch = 0, owner, selectedMember, pendingPlay = false, loadSequence = 0;
+  let legacyOwner, legacyAvailable = false, discoverySequence = 0;
+  const available = () => usesWatchFriends() || (legacyOwner === identity() && legacyAvailable);
+  async function discover(api = API, signal) {
+    const sequence = ++discoverySequence;
+    const account = identity();
+    legacyOwner = account; legacyAvailable = false;
+    if (!usesWatchFriends()) {
+      try {
+        await api.request(base + '/preferences', {signal,timeoutMs:3000});
+        if (sequence === discoverySequence && account === identity()) legacyAvailable = true;
+      } catch (_) { /* An absent optional plugin never blocks the library. */ }
+    }
+    if (sequence === discoverySequence && account === identity()) refreshButton();
+  }
   const alive = token => token === epoch && owner === identity() && drawer && !drawer.hidden;
   const unwrap = result => result?.data ?? result;
   const label = row => row.media.title + (row.media.kind === 'tv' ? ` · 第 ${row.media.season_number} 季第 ${row.media.episode_number} 集` : '');
@@ -15,10 +30,10 @@ window.DesktopFriends = (() => {
   }
   function refreshButton() {
     const button = document.getElementById('btnPlayerFriends');
-    if (button) button.hidden = !enabled();
+    if (button) button.hidden = !available() || !enabled();
     const browse = document.getElementById('btnBrowseFriends');
-    if (browse) browse.hidden = !enabled();
-    if (!enabled()) close();
+    if (browse) browse.hidden = !available() || !enabled() || usesWatchFriends();
+    if (!available() || !enabled() || usesWatchFriends()) close();
   }
   function close() {
     epoch++; clearTimeout(timer); timer = null; controller?.abort(); controller = null;
@@ -119,7 +134,8 @@ window.DesktopFriends = (() => {
     }, 8000);
   }
   function open() {
-    if (!enabled() || !Player.activeEngine) return;
+    if (usesWatchFriends()) return window.DesktopPlugins.open('watch-friends');
+    if (!available() || !enabled() || !Player.activeEngine) return;
     if (drawer && !drawer.hidden) { close(); return; }
     Player.closeAnyPanel(); close(); owner = identity(); selectedMember = null;
     controller = new AbortController(); drawer = document.getElementById('playerFriendsPanel'); drawer.hidden = false;
@@ -128,7 +144,8 @@ window.DesktopFriends = (() => {
     Player.showControls(); Player.syncEmbeddedPlayerRect(); load(epoch);
   }
   function openHome() {
-    if (!enabled()) return;
+    if (usesWatchFriends()) return window.DesktopPlugins.open('watch-friends');
+    if (!available() || !enabled()) return;
     if (Player.activeEngine) { open(); return; }
     close(); owner = identity(); selectedMember = null;
     controller = new AbortController();
@@ -147,9 +164,19 @@ window.DesktopFriends = (() => {
     refreshButton();
   }
   function settings(host) {
+    host.querySelector('.friends-settings')?.remove();
     const card = document.createElement('div'); card.className = 'settings-card friends-settings';
     card.innerHTML = `<h3>好友与观看隐私</h3><p class="friends-muted">查看与公开互相独立。自己的其他设备无需开启共享；关闭公开共享不会影响自己查看。</p><div class="settings-row"><span>显示服务器好友列表<small class="friends-muted">开启后，从主界面侧栏或播放器左上角的“正在观看”查看自己的设备与已授权好友</small></span><label class="settings-toggle"><input id="setFriendsVisible" aria-label="显示服务器好友列表" type="checkbox" ${enabled() ? 'checked' : ''}><span class="toggle-slider"></span></label></div><div class="settings-row"><span>允许其他成员查看我的观看状态<small class="friends-muted">包括所选媒体库的当前播放和最近 7 天历史；按账号在服务器保存</small></span><label class="settings-toggle"><input id="setFriendsShare" aria-label="允许其他成员查看我的观看状态" type="checkbox" disabled><span class="toggle-slider"></span></label></div><fieldset class="friends-libraries"><legend>允许共享的媒体库</legend><p class="friends-muted">未勾选的库和新建的库默认保密。</p><div id="friendsLibraries"></div></fieldset><button class="btn-secondary" id="saveFriendsPrivacy" disabled>保存共享设置</button><p id="friendsPrivacyState" class="friends-muted" role="status">正在读取服务器隐私设置…</p>`;
     host.querySelector('.settings-body')?.insertBefore(card, host.querySelector('.settings-about'));
+    if (usesWatchFriends()) {
+      card.innerHTML = '<h3>映迹 · 好友与观看记录</h3><p class="friends-muted">已连接服务器上的映迹。在映迹中管理好友、观看记录及共享隐私。</p><button type="button" class="btn-secondary" id="openWatchFriends">打开映迹</button>';
+      card.querySelector('#openWatchFriends').onclick = () => window.DesktopPlugins.open('watch-friends');
+      return;
+    }
+    if (!available()) {
+      card.innerHTML = '<h3>好友与观看记录</h3><p class="friends-muted">服务器未提供当前账号可用的观看动态插件。安装并授权插件后，返回应用即可显示对应入口。</p>';
+      return;
+    }
     const help = document.createElement('details'); help.className = 'friends-help';
     const summary = document.createElement('summary'); summary.textContent = 'Web / Mac / 手机用户如何开启共享？';
     const explanation = document.createElement('p'); explanation.className = 'friends-muted';
@@ -196,5 +223,5 @@ window.DesktopFriends = (() => {
     }).catch(error => {if (valid() && error.name !== 'AbortError') status.textContent = message(error);});
   }
   document.addEventListener('DOMContentLoaded', init, {once:true});
-  return {init, enabled, settings, refreshButton, open, openHome, close, dispose, label};
+  return {init, enabled, available, discover, settings, refreshButton, open, openHome, close, dispose, label};
 })();

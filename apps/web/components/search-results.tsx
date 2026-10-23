@@ -61,7 +61,7 @@ import { cachedImageUrl, coverWidth, fullScreenImageWidth, screenImageWidth } fr
 import { layoutPosterGrid } from "@/lib/wall-window";
 import { usePermissions } from "@/lib/permissions";
 import { formatDateTime, formatRelativeTime } from "@/lib/time";
-import { useTheme } from "@/lib/ui-prefs";
+import { useLayout } from "@/lib/ui-prefs";
 import { useIsMobile } from "@/lib/use-media-query";
 import { useScrollRestoration } from "@/lib/use-scroll-restoration";
 
@@ -108,6 +108,12 @@ export interface SearchResultsProps {
   query: SearchQuery;
   /** 发起实时搜索（快照提示条的「重新搜索」按钮）；不传则不渲染该按钮。 */
   onResearch?: (keyword: string, scope: SearchScope, also?: string[]) => void;
+  /**
+   * 地址栏带着一次性 fresh=1（快照条「重新搜索」）：挂载时这次搜索不复用服务端刚跑完
+   * 的同一个搜索。由页面从 useSearchParams 读入——客户端跳转时新页面先渲染、地址栏后更新，
+   * 这里读 window.location 会读到上一页的地址。
+   */
+  fresh?: boolean;
   /** 手动选种模式（URL 的 for_sub 参数）：每条资源多一颗「投给订阅」按钮，
    *  点击直接投给该订阅（跳过规则组过滤，身份匹配照常）。 */
   grabForSubscriptionId?: number | null;
@@ -278,6 +284,22 @@ function readSortFromUrl(): SortState {
     return { key: key as SortKey, dir };
   }
   return fallback;
+}
+
+/**
+ * 抹掉地址栏的一次性 fresh=1（见 SearchResultsProps.fresh）：之后刷新/前进后退照常
+ * 接上这次搜索，而不是又重新打站。
+ */
+function stripFreshFlag() {
+  const params = new URLSearchParams(window.location.search);
+  if (!params.has("fresh")) return;
+  params.delete("fresh");
+  const qs = params.toString();
+  window.history.replaceState(
+    window.history.state,
+    "",
+    qs ? `${window.location.pathname}?${qs}` : window.location.pathname,
+  );
 }
 
 /** 结果展示视图：group=按作品分组（默认），list=平铺种子列表，poster=图览。 */
@@ -762,7 +784,12 @@ function collectEntities(items: TorrentHit[]): Map<string, EntityGroup> {
   return groups;
 }
 
-export function SearchResults({ query, onResearch, grabForSubscriptionId }: SearchResultsProps) {
+export function SearchResults({
+  query,
+  fresh: freshOnMount = false,
+  onResearch,
+  grabForSubscriptionId,
+}: SearchResultsProps) {
   // 保存位置记忆只对能一键下载的超管有意义：成员的落点弹窗不读写记忆（后端也只
   // 为超管记），记忆判失效还要拉下载器配置（超管接口），所以成员一律不拉
   const {
@@ -771,8 +798,8 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
     isAdmin: pageIsAdmin,
   } = usePermissions();
   // 银玻璃手机端：条件胶囊行 / 去掉关键词标题 / 站点详情走底部弹层（见文件头注释）
-  const isNf = useTheme().structural;
-  const silverMobile = useIsMobile() && !isNf;
+  const cinema = useLayout() === "cinema";
+  const panelMobile = useIsMobile() && !cinema;
   const scrollRef = useScrollRestoration(
     `search:torrent:${query.keyword}:${(query.also ?? []).join("|")}:${query.scope.label ?? "all"}:${query.scope.categories.join(",")}:${query.scope.siteIds.join(",")}:${query.snapshotId ?? "live"}`,
   );
@@ -825,6 +852,9 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
   const [exhausted, setExhausted] = useState(false);
   // 补充流（单站重试 / 加载更多）的中止句柄：新搜索发起时一并中止
   const auxAbortsRef = useRef<Set<AbortController>>(new Set());
+  // fresh=1 只对挂载时的那次搜索生效：记下它对应的 query，dev 下 StrictMode 把搜索
+  // effect 跑两遍（第一条流随即中止）时两遍都算 fresh，换了搜索就不再算
+  const freshQueryRef = useRef(freshOnMount ? query : null);
 
   // 视图态（排序 / 展示视图）实时同步进地址栏：让「点一下就变」的操作也能刷新保留、分享还原。
   // 用原生 replaceState 而非 router.replace——只改地址不触发 Next 路由/useSearchParams 更新，
@@ -847,6 +877,7 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
   }, [sort, view]);
 
   // 查询（关键词/范围）变化即重新发起流式搜索；用 AbortController 中断上一条流，避免竞态。
+  // 中断只是不再看：搜索在服务端后台跑完，同一个搜索再发起即接上它、从头回放（#920）。
   // 新搜索同时重置筛选条件——旧结果的筛选对新结果没有意义。
   // 依赖用 query 对象本身：app-shell 每次提交都会构造新对象，成员深比较无必要。
   useEffect(() => {
@@ -902,6 +933,9 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
       return () => controller.abort();
     }
 
+    const fresh = freshQueryRef.current === query;
+    if (fresh) stripFreshFlag();
+
     // 用最新事件更新单个站点的进度
     const patchSite = (siteId: string, patch: Partial<SiteProgress>) =>
       setSiteProgress((prev) =>
@@ -909,7 +943,7 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
       );
 
     streamSearchTorrents(
-      { keyword: query.keyword, also: query.also, scope: query.scope },
+      { keyword: query.keyword, also: query.also, scope: query.scope, fresh },
       (event) => {
         switch (event.type) {
           case "start":
@@ -971,7 +1005,13 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
     const controller = new AbortController();
     auxAbortsRef.current.add(controller);
     streamSearchTorrents(
-      { keyword: query.keyword, also: query.also, scope: { ...query.scope, siteIds: [siteId] } },
+      // fresh：重试就是要重新打这个站（典型是修完 Cookie 回来验证），不能接上刚跑完的结果
+      {
+        keyword: query.keyword,
+        also: query.also,
+        scope: { ...query.scope, siteIds: [siteId] },
+        fresh: true,
+      },
       (event) => {
         if (event.type === "site_result") {
           const d = event.data;
@@ -1139,7 +1179,7 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
       <header className={`relative z-20 shrink-0 pb-3 pt-4 page-inset max-md:pt-3`}>
         <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
           {/* 银玻璃手机不重复关键词与范围：顶栏的关键词胶囊与范围菜单已写着 */}
-          {!silverMobile && (
+          {!panelMobile && (
             <h1 className="text-on-image text-title-lg font-semibold tracking-[-0.01em] text-white">
               {/* 浏览模式（无关键词）标题落在动作上，具体范围由右边的分类药丸交代 */}
               {query.keyword ? `“${query.keyword}”` : "最新资源"}
@@ -1154,7 +1194,7 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
               另含 {alsoSearched.join(" · ")}
             </span>
           )}
-          {!silverMobile && query.scope.label && (
+          {!panelMobile && query.scope.label && (
             <span className="rounded-full bg-black/30 px-2.5 py-0.5 text-caption text-[var(--accent)] backdrop-blur-sm">
               {query.scope.label}
             </span>
@@ -1206,7 +1246,7 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
                 )}
               </>
             )}
-            {silverMobile && siteProgress.length > 0 && (
+            {panelMobile && siteProgress.length > 0 && (
               <ViewModeMenu view={view} onChange={setView} />
             )}
             <SiteStatusSummary
@@ -1214,7 +1254,7 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
               streaming={streaming}
               onRetrySite={snapshotAt ? undefined : retrySite}
               totalElapsedMs={totalElapsedMs}
-              asSheet={silverMobile}
+              asSheet={panelMobile}
             />
           </div>
         </div>
@@ -1223,7 +1263,7 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
             当前没有「已启用且验证通过」的站点，请先在设置里配置站点。
           </p>
         )}
-        {siteProgress.length > 0 && silverMobile && (
+        {siteProgress.length > 0 && panelMobile && (
           <ConditionChips
             sites={settledStatuses}
             facets={facets}
@@ -1234,7 +1274,7 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
             onSortChange={setSort}
           />
         )}
-        {siteProgress.length > 0 && !silverMobile && (
+        {siteProgress.length > 0 && !panelMobile && (
           <>
             <FilterToolbar
               sites={settledStatuses}

@@ -182,6 +182,17 @@ def test_floor_ignored_for_untracked_season_and_not_above_tmdb() -> None:
     ]
 
 
+def test_follow_floor_skips_seasons_before_aired_episode() -> None:
+    """issue #974：后面的季已经开播，前面未勾季的占位集是旧集，追新不纳入。"""
+    episodes = _episodes(2, 3) + _episodes(3, 2)
+    episodes[-2].air_date = utcnow().date() - timedelta(days=3)  # S3E1 已播
+    units = expected_units(MediaKind.TV, episodes, [3], True, {2: 5, 3: 4})
+    assert [(u.season_number, u.episode_number) for u in units if u.provisional] == [
+        (3, 3),
+        (3, 4),
+    ]
+
+
 def test_placeholder_is_searched_immediately() -> None:
     from movieclaw_api.services.subscription import schedule_for
 
@@ -442,6 +453,59 @@ async def test_declared_total_pack_covers_placeholders(db) -> None:
         await evaluate_and_dispatch(session, [pack], source="被动匹配")
         wanted = await _wanted(session, sub.id)
         assert all(w.status == WantedStatus.GRABBED for w in wanted.values())
+
+
+@pytest.mark.parametrize(
+    "attrs",
+    [
+        {"seasons": [1], "complete": True, "episodes_total": 5},
+        {"complete": True, "episodes_total": 5},
+    ],
+)
+async def test_declared_total_caps_pack_coverage(db, attrs) -> None:
+    """「全 N 集」也是上限：全 5 集的包不能满足 E06（真实现场：全 8 集
+    的同名剧整季包被展开到 13 集纪录片订阅的 E09～E13，智能投递对账空转）。"""
+    async with db.session() as session:
+        sub = await _service(session).create(MediaKind.TV, 640, selected_seasons=[1])
+        pack = await _torrent(session, "pack5", "Death Row Is Coming S01 全5集 1080p WEB-DL", attrs)
+        await evaluate_and_dispatch(session, [pack], source="被动匹配")
+        wanted = await _wanted(session, sub.id)
+        assert all(wanted[(1, n)].status == WantedStatus.GRABBED for n in range(1, 6))
+        assert wanted[(1, 6)].status == WantedStatus.WANTED
+
+
+async def test_same_name_pack_with_far_fewer_episodes_is_rejected(db) -> None:
+    """「全 3 集」的同名包，而本季 6 集早已播完：是另一部剧，不投递并留下原因。
+
+    真实现场：13 集纪录片订阅被「The Staircase S01 全8集」（2022 同名剧）仅凭
+    片名命中，8 集错片入库。
+    """
+    async with db.session() as session:
+        sub = await _service(session).create(MediaKind.TV, 640, selected_seasons=[1])
+        pack = await _torrent(
+            session,
+            "pack3",
+            "Death Row Is Coming S01 1080p WEB-DL",
+            {"seasons": [1], "complete": True, "episodes_total": 3},
+        )
+        await evaluate_and_dispatch(session, [pack], source="被动匹配")
+        wanted = await _wanted(session, sub.id)
+        assert all(w.status == WantedStatus.WANTED for w in wanted.values())
+        rejected = (
+            (
+                await session.execute(
+                    select(SubscriptionActivity).where(
+                        SubscriptionActivity.subscription_id == sub.id,
+                        SubscriptionActivity.type == "match_rejected",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(rejected) == 1
+        assert rejected[0].payload["reason_code"] == "identity_id_conflict"
+        assert "资源声明全 3 集，本条目第 1 季在其发布前已播出 6 集" in rejected[0].message
 
 
 async def test_undeclared_season_pack_leaves_placeholders(db) -> None:

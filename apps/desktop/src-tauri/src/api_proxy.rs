@@ -129,6 +129,18 @@ pub(crate) struct CookieSnapshot {
     base: Option<Url>,
 }
 impl CookieSnapshot {
+    pub(crate) fn requires_https(&self, logical: &Url) -> bool {
+        let mut secure=self.clone();
+        for jar in secure.store.values_mut() {jar.retain(|_,cookie|cookie.secure);}
+        secure.header(logical).is_some()
+    }
+    pub(crate) fn header_for_transport(&self, logical: &Url, wire: &Url) -> Option<String> {
+        let mut store = self.store.clone();
+        if wire.scheme() != "https" {
+            for jar in store.values_mut() { jar.retain(|_, cookie| !cookie.secure); }
+        }
+        cookie_header_for(&store, self.base.as_ref()?, logical)
+    }
     pub(crate) fn header(&self, url: &Url) -> Option<String> {
         cookie_header_for(&self.store, self.base.as_ref()?, url)
     }
@@ -404,8 +416,10 @@ async fn fetch(
         {
             return Err("服务器或账号已更改".into());
         }
+        let require_https = identity.is_none() && cookie_snapshot(&credential_base).requires_https(&url);
+        let response = crate::server_routes::send(&credential_base, &url, &method, require_https, |wire| {
         let mut req = client
-            .request(method.clone(), url.clone())
+            .request(method.clone(), wire.clone())
             .header(header::USER_AGENT, concat!("MovieClaw-Windows/", env!("CARGO_PKG_VERSION"), " (Windows)"))
             .timeout(Duration::from_secs(timeout));
         if matches!(kind, ResponseKind::Api) {
@@ -436,14 +450,14 @@ async fn fetch(
                     crate::native_auth::with_generation(epoch, || {
                         Ok(
                             if crate::native_auth::cookie_credentials_allowed(&credential_base) {
-                                cookie_header(&credential_base, &url)
+                                cookie_snapshot(&credential_base).header_for_transport(&url, &wire)
                             } else {
                                 None
                             },
                         )
                     })?
                 } else {
-                    cookie_header(&credential_base, &url)
+                    cookie_snapshot(&credential_base).header_for_transport(&url, &wire)
                 };
                 if let Some(value) = value {
                     req = req.header(header::COOKIE, value);
@@ -455,7 +469,9 @@ async fn fetch(
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(value.clone());
         }
-        let mut response = req.send().await.map_err(|e| format!("请求失败: {e}"))?;
+        Ok(req)
+        }).await?;
+        let mut response = response;
         let status = response.status().as_u16();
         if status == 401 && crate::connect::url_in_server_scope(&credential_base, &url) {
             if let Some(identity) = &identity {
@@ -480,7 +496,8 @@ async fn fetch(
                 if hop == 5 {
                     return Err("重定向次数过多".into());
                 }
-                let next = url.join(location).map_err(|_| "无效的重定向地址")?;
+                let next = response.url().join(location).map_err(|_| "无效的重定向地址")?;
+                let next = crate::server_routes::canonicalize(&credential_base, &next);
                 crate::connect::validate_http_url(next.as_str())?;
                 if !crate::connect::url_in_server_scope(&credential_base, &next)
                     && !matches!(method, Method::GET | Method::HEAD)
@@ -630,6 +647,19 @@ mod tests {
         assert!(cookie_domain_matches("www.example.com", ".EXAMPLE.com"));
         assert!(!cookie_domain_matches("badexample.com", ".example.com"));
         assert!(!cookie_domain_matches("127.0.0.1", "0.0.1"));
+    }
+
+    #[test]
+    fn a_verified_http_alias_still_cannot_receive_a_secure_cookie() {
+        let base = Url::parse("https://nas.example").unwrap();
+        let logical = base.join("/api/v1/auth/me").unwrap();
+        let mut snapshot = CookieSnapshot::test_cookie(&base,"session","private","/");
+        snapshot.store.get_mut("https://nas.example").unwrap().get_mut("session").unwrap().secure=true;
+        assert!(snapshot.requires_https(&logical));
+        assert!(snapshot.header_for_transport(&logical,&logical).is_some());
+        let http = Url::parse("http://192.168.0.2:3000/api/v1/auth/me").unwrap();
+        assert!(snapshot.header_for_transport(&logical,&http).is_none());
+        assert!(snapshot.header_for_transport(&Url::parse("https://other.example/api/v1/auth/me").unwrap(),&logical).is_none());
     }
 
     #[tokio::test]

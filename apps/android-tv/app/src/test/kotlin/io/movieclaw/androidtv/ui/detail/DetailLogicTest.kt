@@ -1,14 +1,14 @@
 package io.movieclaw.androidtv.ui.detail
 
-import io.movieclaw.androidtv.core.model.generated.ActorView
-import io.movieclaw.androidtv.core.model.generated.AudioStreamView
-import io.movieclaw.androidtv.core.model.generated.DirectorView
-import io.movieclaw.androidtv.core.model.generated.EpisodeView
-import io.movieclaw.androidtv.core.model.generated.LibraryFileView
-import io.movieclaw.androidtv.core.model.generated.LibraryItemDetailView
-import io.movieclaw.androidtv.core.model.generated.LocalMetaView
-import io.movieclaw.androidtv.core.model.generated.PersonCreditView
-import io.movieclaw.androidtv.core.model.generated.PersonView
+import io.movieclaw.core.model.generated.ActorView
+import io.movieclaw.core.model.generated.AudioStreamView
+import io.movieclaw.core.model.generated.DirectorView
+import io.movieclaw.core.model.generated.EpisodeView
+import io.movieclaw.core.model.generated.LibraryFileView
+import io.movieclaw.core.model.generated.LibraryItemDetailView
+import io.movieclaw.core.model.generated.LocalMetaView
+import io.movieclaw.core.model.generated.PersonCreditView
+import io.movieclaw.core.model.generated.PersonView
 import io.movieclaw.androidtv.ui.stage.StageBadge
 import io.movieclaw.androidtv.ui.stage.episodeLine
 import io.movieclaw.androidtv.ui.stage.episodeTitle
@@ -224,9 +224,9 @@ class DetailLogicTest {
 
     @Test
     fun lowerGeometry() {
-        assertEquals(82, DetailLogic.lowerGap(isMovie = false, hasSeries = false))
-        assertEquals(20, DetailLogic.lowerGap(isMovie = true, hasSeries = true))
-        assertEquals(164, DetailLogic.lowerGap(isMovie = true, hasSeries = false))
+        assertEquals(82, DetailLogic.lowerGap(isMovie = false))
+        // 电影露演职员一行的上沿（竖版人物卡，与原先露系列一行同样多）
+        assertEquals(20, DetailLogic.lowerGap(isMovie = true))
         assertEquals(330, DetailLogic.lowerScreenTop(true))
         assertEquals(250, DetailLogic.lowerScreenTop(false))
         assertEquals(330, DetailLogic.lowerScreenTop(false, hasRangeTabs = true))

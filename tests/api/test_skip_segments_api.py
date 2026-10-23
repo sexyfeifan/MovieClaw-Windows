@@ -74,6 +74,43 @@ def test_incomplete_audio_does_not_switch_without_suitable_alternative(reason: s
     assert skip_segments._complete_audio_index(streams, 2700) == 0
 
 
+def _audio_vivid_fixture() -> list[dict]:
+    """NAS 醉梦 E01 的真实 ffprobe 输出：第一轨 Audio Vivid（ffprobe 不给 codec_name）。"""
+    fixtures = Path(__file__).parents[1] / "playback/fixtures/skip_segments"
+    fixture = fixtures / "nas-audio-vivid-first.json"
+    return json.loads(fixture.read_text())["streams"]
+
+
+def test_undecodable_first_audio_selects_decodable_track() -> None:
+    """醉梦 E01～E03：ffmpeg 解不了第一轨 Audio Vivid，改用同语言的第二轨 EAC3。"""
+    streams = _audio_vivid_fixture()
+    assert skip_segments._complete_audio_index(streams, 2819) == 0
+    assert skip_segments._decodable_audio_index(streams, 0, 2819) == 1
+    # 解得了的轨不动
+    assert skip_segments._decodable_audio_index(streams, 3, 2819) == 3
+
+
+@pytest.mark.parametrize("reason", ["all_undecodable", "different_language", "short"])
+def test_undecodable_audio_kept_without_suitable_alternative(reason: str) -> None:
+    streams = _audio_vivid_fixture()
+    for stream in streams[1:]:
+        if reason == "all_undecodable":
+            stream.pop("codec_name")
+        elif reason == "different_language":
+            stream["tags"]["language"] = "eng"
+        else:
+            stream["duration"] = "2700"
+    assert skip_segments._decodable_audio_index(streams, 0, 2819) == 0
+
+
+def test_truehd_never_switches_to_undecodable_track() -> None:
+    streams = [
+        {"codec_name": "truehd", "duration": "2700", "tags": {"language": "chi"}},
+        {"duration": "2700", "tags": {"language": "chi"}},
+    ]
+    assert skip_segments._cheaper_audio_index(streams, 0, 2700) == 0
+
+
 def _truehd_streams() -> list[dict]:
     return [
         {"codec_name": "truehd", "duration": "2700", "tags": {"language": "eng"}},
@@ -112,6 +149,59 @@ def test_cheap_codecs_are_never_switched() -> None:
         {"codec_name": "aac", "duration": "2700", "tags": {"language": "eng"}},
     ]
     assert skip_segments._cheaper_audio_index(streams, 0, 2700) == 0
+
+
+def test_accurate_frame_decodes_single_threaded_and_lands_on_request(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """精确抽帧单线程解码（省掉帧并行多解的帧），仍从关键帧解到请求点；关键帧模式不受影响。"""
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("需要 ffmpeg 验证真实解码")
+    media = tmp_path / "gop.mp4"
+    # 只有 0 秒一个关键帧；5 秒起整屏变白，精确帧必须解码过去才看得到
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=black:s=96x54:r=10:d=8",
+            "-vf",
+            "drawbox=color=white:t=fill:enable='gte(t,5)'",
+            "-c:v",
+            "libx264",
+            "-g",
+            "1000",
+            "-sc_threshold",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            str(media),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+    calls: list[tuple] = []
+    spawn = asyncio.create_subprocess_exec
+
+    async def record(*args, **kwargs):
+        calls.append(args)
+        return await spawn(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", record)
+    before = asyncio.run(skip_segments._grab_frame(str(media), 4.5, True, width=96))
+    after = asyncio.run(skip_segments._grab_frame(str(media), 5.5, True, width=96))
+    keyframe = asyncio.run(skip_segments._grab_frame(str(media), 5.5, False, width=96))
+    assert before is not None and before[0].mean() < 30 and abs(before[1] - 4.5) < 0.15
+    assert after is not None and after[0].mean() > 200 and abs(after[1] - 5.5) < 0.15
+    assert keyframe is None  # 5.5 秒之后没有关键帧
+    accurate_args, _, keyframe_args = (list(a) for a in calls)
+    assert accurate_args[accurate_args.index("-threads") + 1] == "1"
+    assert accurate_args.index("-threads") < accurate_args.index("-i")
+    assert "-threads" not in keyframe_args
 
 
 _ADMIN = {"username": "admin", "password": "Sup3rSecret!"}
@@ -472,9 +562,12 @@ def _track_parallel_reads(monkeypatch, delay: float = 0.05) -> dict[str, int]:
 class _FakeTranscode:
     """转码会话管理器里的一路会话（只带 ``playback_load`` 看的字段）。"""
 
-    def __init__(self, *, transcoding: bool = True, remote: bool = False) -> None:
+    def __init__(
+        self, *, transcoding: bool = True, remote: bool = False, export_id: str | None = None
+    ) -> None:
         self.is_transcoding = transcoding
         self.remote = remote
+        self.export_id = export_id
         self.last_ping = time.monotonic()
 
 
@@ -559,7 +652,8 @@ def test_backfill_pauses_while_transcoding_and_resumes_after(
 
 
 def test_playback_load_tiers() -> None:
-    """转码 > 在看 > 空闲；外置 Worker 上的转码、本机直通都不算本机转码；没心跳的会话不算。"""
+    """转码 > 在看 > 空闲；外置 Worker 上的转码、本机直通都不算本机转码；没心跳的会话不算。
+    外置 Worker 上的离线导出什么都不算。"""
     manager = get_session_manager()
     activity.reset()
     cases = [
@@ -567,6 +661,9 @@ def test_playback_load_tiers() -> None:
         ([_FakeTranscode(transcoding=False)], skip_segments.PLAYING),
         ([_FakeTranscode(remote=True)], skip_segments.PLAYING),
         ([_FakeTranscode(transcoding=False), _FakeTranscode()], skip_segments.TRANSCODING),
+        # 离线导出：在转码器上转的没人在看、不占本机，不算负载；在本机转的照样算本机转码
+        ([_FakeTranscode(remote=True, export_id="e")], skip_segments.IDLE),
+        ([_FakeTranscode(export_id="e")], skip_segments.TRANSCODING),
     ]
     stale = _FakeTranscode()
     stale.last_ping -= 60
@@ -2348,3 +2445,24 @@ def test_jellyfin_maps_ad_and_preview_segments(client, tmp_path) -> None:
     guid = episode_guid(ids["show"], 1, 3)
     body = client.get(f"/MediaSegments/{guid}", params={"ApiKey": token}).json()
     assert [i["Type"] for i in body["Items"]] == ["Commercial", "Outro", "Preview"]
+
+
+def test_auto_skip_preferences_follow_account(client, tmp_path) -> None:
+    """自动跳过（§5）：总开关默认开，片头按剧记，随会话下发；只影响记下的那部剧。"""
+    ids = call(client, _seed, tmp_path, 3)
+    episode, film = ids["files"][0], ids["film"]
+    assert start_session(client, episode)["auto_skip"] == {"enabled": True, "intro": False}
+
+    resp = client.put(f"{_PB}/auto-skip/intro/{ids['show']}", json={"enabled": True})
+    assert resp.status_code == 200, resp.text
+    # 记两次也只记一份
+    client.put(f"{_PB}/auto-skip/intro/{ids['show']}", json={"enabled": True})
+    assert start_session(client, ids["files"][1])["auto_skip"] == {"enabled": True, "intro": True}
+    assert start_session(client, film)["auto_skip"]["intro"] is False
+
+    client.put(f"{_PB}/auto-skip", json={"enabled": False})
+    assert start_session(client, episode)["auto_skip"] == {"enabled": False, "intro": True}
+
+    client.put(f"{_PB}/auto-skip/intro/{ids['show']}", json={"enabled": False})
+    client.put(f"{_PB}/auto-skip", json={"enabled": True})
+    assert start_session(client, episode)["auto_skip"] == {"enabled": True, "intro": False}

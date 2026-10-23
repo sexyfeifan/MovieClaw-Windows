@@ -425,6 +425,7 @@ const App = {
       await (pairing.cancelPromise ||= API.cancelPairing(pairing.id));
     }
     window.DesktopCatalog?.reset();
+    window.DesktopPlugins?.reset();
     document.getElementById('accountPanel')?.remove();
     document.getElementById('cardMenu')?.remove();
     this._changingContext = true;
@@ -594,7 +595,6 @@ const App = {
           </form>
 
           ${!setup && API.nativeAuthStatus?.accounts?.length ? '<button class="text-button" id="loginChooseAccount">使用已保存账号</button>' : ''}
-          ${API.nativeAuthStatus?.mode === 'cookie' ? `<p class="login-subtitle">兼容登录 · ${escapeHtml(API.nativeAuthStatus.compatibility_reason || '服务器使用 Cookie 登录')}</p>` : ''}
           <button class="btn-secondary" id="loginChangeServer">更换服务器</button>
           ${addAccount ? '<button class="btn-secondary" id="cancelAddAccount">取消</button>' : ''}
         </div>
@@ -675,7 +675,7 @@ const App = {
     if (this._pairingStarting) return;
     const content = document.getElementById('content');
     if (!API.nativeAuthAvailable || !API.nativeAuthStatus?.pairing_supported) {
-      this.notice(API.nativeAuthStatus?.compatibility_reason || '服务器暂不支持 Windows 扫码登录，请升级服务器或使用账号密码登录。'); return;
+      this.notice(API.nativeAuthStatus?.compatibility_reason || '当前服务器不支持 Windows 扫码配对，请使用账号密码登录。'); return;
     }
     this._pairingStarting = true;
     try {
@@ -875,6 +875,10 @@ const App = {
       this.libraries = (libs?.data || libs || []).filter(lib => lib.viewer_access !== false && lib.kind !== 'photo');
       this.collections = colls?.data || colls || [];
       this.uiPreferences = prefs?.data || prefs || {};
+      await window.DesktopPlugins?.load(api, api.defaultSignal);
+      await window.DesktopFriends?.discover(api, api.defaultSignal);
+      if (epoch !== API.contextEpoch) return;
+      API.nativeCall('refresh_server_routes').catch(() => {});
       this.homeRows = HomeRows.build(this.uiPreferences.home?.rows || [], this.libraries, this.collections);
       console.log('Libraries:', this.libraries.length, 'Collections:', this.collections.length);
       this.renderSidebar();
@@ -905,6 +909,8 @@ const App = {
     });
 
     window.DesktopCatalog?.nav();
+    window.DesktopPlugins?.nav();
+    window.DesktopFriends?.refreshButton();
     const account = document.getElementById('accountButton');
     if (account) {
       const name = this.session?.nickname || this.session?.username || '账号';
@@ -946,7 +952,7 @@ const App = {
   async navigate(page, params = {}, pushHistory = true) {
     const started = window.performance?.now();
     if (this._authPending) return;
-    if (window.DesktopCatalog?.pages.has(page) && !window.DesktopCatalog.enabled(page)) { page = 'home'; params = {}; pushHistory = false; this.selectedTab = 'home'; }
+    if (window.DesktopCatalog?.pages.has(page) && !window.DesktopCatalog.canOpen(page,params)) { page = 'home'; params = {}; pushHistory = false; this.selectedTab = 'home'; }
     DesktopSelect.close();
     const previous = this.captureRoute();
     this._searchData = null;
@@ -2494,7 +2500,7 @@ const App = {
         <div class="settings-card settings-about">
           <div class="settings-product">
           <h3>关于</h3>
-          <p>MovieClaw Desktop</p>
+          <p>MovieClaw for Windows</p>
           <p class="settings-value" id="settingsVersion">正在读取版本…</p>
           </div>
           <div class="settings-actions">

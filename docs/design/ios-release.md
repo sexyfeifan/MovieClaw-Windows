@@ -1,7 +1,7 @@
 # iOS App 打包与上架
 
 > 2026-09-28 开发者账号开通后整理。首发路线：TestFlight 内部测试 → TestFlight 对外公开链接 → App Store。
-> 首版只上 iPhone；只有一个发行版本，所有用户功能相同。资源站点 / 下载器 / 自动入库 / 订阅规则这类服务器配置在网页端管理（与 Android 版一致）。
+> 首版只上 iPhone，2026-10-15 起同一个包也支持 iPad（[ipad.md](ipad.md)）；只有一个发行版本，所有用户功能相同。资源站点 / 下载器 / 自动入库 / 订阅规则这类服务器配置在网页端管理（与 Android 版一致）。
 > **要亲手做的事按顺序列在 [ios-release-checklist.md](ios-release-checklist.md)（含新机器搭环境）。**
 > 相关：App 设计 [ios-app.md](ios-app.md)，Mac 转码器的签名公证见 `macos/MovieClawTranscoder/README.md`。
 
@@ -42,7 +42,7 @@ App 里不提供「资源与下载」这组服务器配置（订阅规则、资�
    - App 隐私问卷：**不收集任何数据**（数据都在用户自己的服务器上，见隐私政策）；
    - 年龄分级：内容来自用户自己的服务器，按问卷如实填写（「不受限制的网络访问」选是）。
 6. **TestFlight 测试组**：内部测试组只能加团队成员（最多 100 人，免审）；朋友等外部测试员加进对外测试组
-   （邮箱或公开链接，最多 1 万人），组里第一个构建要过一次 Beta 审核（见 §4）。iPhone 上装 TestFlight App。
+   （邮箱或公开链接，最多 1 万人），组里第一个构建要过一次 Beta 审核（见 §4）。iPhone / iPad 上装 TestFlight App。
 
 ## 3. 打包与上传
 
@@ -57,13 +57,14 @@ scripts/release.sh --tv --upload            # Apple TV 版：同一条 App 记�
   - 营销版本号只有一处——`project.yml` 的 `MARKETING_VERSION`（首发 0.1.0），TestFlight、App Store、
     侧载 IPA 都读它；与服务器的 `pyproject.toml` / 发版 tag 无关，也不受「版本号三处一致」约束。
   - iPhone、Apple TV、Mac 三端共用这一个版本号（2026-10-05 定：同一份代码、同一个 Bundle ID，版本号对齐
-    才说得清「0.5.0」是哪套代码；构建号各平台各自递增）。Mac 版随服务器 Release 发的 zip 同样读它，
-    首个随发版的 Mac 包是 0.5.0。某个平台要单独发紧急修复时只给它提审补丁版本，下一个常规版本再对齐。
+    才说得清「0.5.0」是哪套代码；构建号各平台各自递增）。GitHub 上的
+    `ios-v` / `tvos-v` / `macos-v` Release 的 tag 都必须等于它；同一版本每个平台只能发一次，已发过就先
+    递增补丁号。v0.37.0 及更早，侧载 IPA 与 Mac 版 zip 随服务器 Release 发。某个平台要单独发紧急修复时只给它提审补丁版本，下一个常规版本再对齐。
   - 什么时候改：准备**提审**一个新版本时手动递增（App Store 要求新版本号大于已上架的）；
     同一版本号下反复传 TestFlight 不用改，靠构建号区分。
   - 构建号默认取 UTC 时间 `yyyyMMddHHmm`，天然递增，不用管。
-  - 随服务器 Release 附带的侧载 IPA 与 Mac 版 zip 是最近一次改动 App 时编的那个包，版本号就是当时的
-    `MARKETING_VERSION`，所以服务器 v0.28.0 里的 IPA 可能是 App 0.1.0，这是正常的。
+  - v0.37.0 及更早随服务器 Release 附带的侧载 IPA 与 Mac 版 zip 是最近一次改动 App 时编的那个包，
+    版本号就是当时的 `MARKETING_VERSION`，所以服务器 v0.28.0 里的 IPA 可能是 App 0.1.0，这是正常的。
 - 产物与日志在 `apps/apple/build-release/`（已被 git 忽略），归档约 5 分钟，DerivedData 约 0.7 GB，
   磁盘紧时打包完可删。
 - 不带 `--upload` 只在本机导出 `.ipa`，用于验证签名；首次导出时自动签名会在账号下创建
@@ -73,10 +74,10 @@ scripts/release.sh --tv --upload            # Apple TV 版：同一条 App 记�
 
 ### 侧载用的未签名 IPA
 
-发版时 release.yml 的 `ios-ipa` 作业在 macOS runner 上跑 `apps/apple/scripts/build-unsigned-ipa.sh`，
-把 `MovieClaw-iOS-unsigned.ipa` 附到 GitHub Release（可选附件，失败不拦转正）。自上一版以来 iPhone 版
-用到的代码（`apps/apple` 除 Apple TV 专属目录与测试）没改动时不重编，由 `carry-assets` 作业直接沿用
-上一个 Release 里的 IPA（判断规则见 `scripts/release-asset-plan.sh`）。Apple TV 版不出侧载包，只走 TestFlight。给不走 App Store /
+iPhone 版单独发 `ios-vX.Y.Z` GitHub Release（tag 等于 `MARKETING_VERSION`）：apple-release.yml 的
+`ios-ipa` 作业在 macOS runner 上跑 `apps/apple/scripts/build-unsigned-ipa.sh`，把
+`MovieClaw-iOS-unsigned.ipa` 附上（v0.37.0 及更早随服务器 Release 发）。Apple TV 版不出侧载包，只走
+TestFlight，它的 `tvos-vX.Y.Z` Release 只放更新说明。给不走 App Store /
 TestFlight 的用户：用 AltStore / SideStore / Sideloadly 以自己的 Apple ID 重签安装——免费 Apple ID
 签的包 7 天过期（AltStore / SideStore 可后台自动续签），付费开发者账号 1 年。
 
@@ -84,7 +85,7 @@ TestFlight 的用户：用 AltStore / SideStore / Sideloadly 以自己的 Apple 
 - 打包时去掉通知扩展（`MovieClawNotificationService`）和推送、App Group 的 entitlements，免费
   Apple ID 也能签（只占 1 个 App ID）。代价是侧载版**收不到推送**：免费 Apple ID 本来就没有推送能力，
   官方推送中继也只推商店版的 Bundle ID。App 发现自己没带通知扩展时不请求通知权限、不登记推送。
-- 文件名固定，`releases/latest/download/MovieClaw-iOS-unsigned.ipa` 长期指向最新版。
+- 文件名固定；最新版到 GitHub Releases 里最新的 `ios-vX.Y.Z` 下载（`releases/latest` 是服务器版本，里面没有 IPA）。
 - 附在服务器 Release 上而不单开 iOS Release：应用内更新按 GitHub 的 latest Release 判断服务器新版本，
   单独的 iOS Release 会被当成最新服务器版本，打乱更新检查。App 自己的版本号见 §3。
 - 本机也能打：`apps/apple/scripts/build-unsigned-ipa.sh`，产物在 `apps/apple/build-ipa/`（已被 git 忽略）。
@@ -100,17 +101,18 @@ TestFlight 的用户：用 AltStore / SideStore / Sideloadly 以自己的 Apple 
   媒体库只有开放授权的影片，另有一个只收开放授权影片的演示资源站和一个模拟下载器，搜索、下载、
   订阅、刷流、自动入库都能端到端跑通，不产生任何真实的 P2P 流量。
   审核员用部署环境里的**审核账号**（超管，不是登录页公布的公开只读账号），用户名密码填在
-  「App 审核信息 → 登录信息」，不写进备注。提审前用审核账号在 iPhone 上按 `demo/README.md`
+  「App 审核信息 → 登录信息」，不写进备注。提审前用审核账号在 iPhone 和 iPad 上各按 `demo/README.md`
   「App Store 审核」的清单走一遍；审核期间停掉演示站的每日还原，AI 助手接好真实模型。
 - **审核备注模板**（「App 审核信息 → 备注」，TestFlight 是「测试信息 → Beta 版 App 审核信息 → 备注」；
   纯文本、**上限 4000 字符**，粘贴前量一下，见下文；审核员看英文，界面是简体中文，按钮名后面括注英文）。
-  **iPhone、Apple TV、Mac 三端是同一条 App 记录，审核账号、备注和「Beta 版 App 描述」三端共用**：备注里要写清
-  每一端有什么、没有什么，Apple TV 与 Mac 只看片，不能让审核员照着 iPhone 的功能去电视或 Mac 上找
+  **iPhone / iPad、Apple TV、Mac 三端是同一条 App 记录，审核账号、备注和「Beta 版 App 描述」三端共用**：备注里要写清
+  每一端有什么、没有什么，Apple TV 与 Mac 只看片，不能让审核员照着 iPhone 的功能去电视或 Mac 上找；
+  iPad 与 iPhone 是同一个包、功能相同，但入口名字与位置不同（侧边栏、「首页」、「我的」显示账号名），备注里单独写一句
   （2026-10-05 Mac 版就是因为测试说明写了它没有的 AI 助手与订阅被拒）。各端更细的测试步骤写在每个构建自己的
   「测试内容」（What to Test）里，只写那一端真有的功能：
 
 ```text
-MovieClaw is the client for MovieClaw, a self-hosted media server that people install on their own hardware, such as a NAS. Source code: https://github.com/movieclaw/MovieClaw. One App Store record covers iPhone, Apple TV and Mac. The interface is in Simplified Chinese; English translations of labels are in parentheses.
+MovieClaw is the client for MovieClaw, a self-hosted media server that people install on their own hardware, such as a NAS. Source code: https://github.com/movieclaw/MovieClaw. One App Store record covers iPhone, iPad, Apple TV and Mac. The interface is in Simplified Chinese; English translations of labels are in parentheses.
 
 PREVIOUS REVIEWS (5.6)
 We are sorry. Last time we mistakenly supplied the read-only visitor account of our public demo site, and our Mac test notes mentioned an AI assistant and subscriptions that the Mac app does not have. Both were our mistakes, never an attempt to hide anything; nothing in any of the apps is hidden or remotely switched. This time the review account has full access, and the notes below say exactly what each app does.
@@ -124,20 +126,21 @@ Choose "连接服务器" (Connect to server), enter https://demo.movieclaw.io, c
 DEMO SERVER
 The library holds only Creative Commons Blender films. A demo resource site lists only CC-licensed Blender films (Elephants Dream, Charge and Wing It! are not in the library yet) and a demo download client simulates transfers; no peer-to-peer traffic happens. Seeding figures and household playback in Activity are simulated.
 
-IPHONE
+IPHONE AND IPAD (same app, same features)
+On iPad, tabs are in a sidebar (along the top in portrait): "媒体库" (Library) is "首页" (Home), libraries are listed under "媒体库", and "我的" (Me) shows the account name; switch accounts via the people icon at its top right.
 1. Play: "媒体库" (Library), open a film, tap play.
 2. Download: magnifier at top right, search "Elephants", "站点资源" (Site results), tap the result, "下载" (Download), "下载到「电影」" (Download to Movies). It shows in "活动" (Activity), then in Library about a minute later.
 3. Subscribe: search "Charge", open it under "影视" (Titles), "订阅追踪" (Subscribe), "确认订阅" (Confirm). Within minutes it is downloaded and shows as completed in "订阅" (Subscriptions).
 4. Seeding: "活动" (Activity) → "刷流做种" (Seeding).
 5. AI assistant: "我的" (Me) → "新会话" (New session). Before the first message the app explains that messages and looked-up library data go from the user's server to the AI provider its owner configured, and asks for consent.
-6. "我的 → 服务器设置" (Me → Server settings): members, devices, notifications, playback. One-time setup (download sources, download clients, import rules) is in the server's web console on every platform: sign in at https://demo.movieclaw.io in Safari with the review account, not the public visitor accounts listed there. It is locked on the demo.
+6. "我的 → 服务器设置" (Me → Server settings): members, devices, notifications, playback. One-time setup (download sources, download clients, import rules) is in the server's web console: sign in at https://demo.movieclaw.io in Safari with the review account, not the public visitor accounts listed there. It is locked on the demo.
 7. Accounts: no public sign-up; the server owner creates and deletes accounts in Server settings → "成员" (Members). Optional MovieClaw Cloud (Server settings → MovieClaw Cloud) creates an account on our website; that page links to "管理或删除 MovieClaw 账号" (Manage or delete account).
 
 APPLE TV AND MAC
-These apps are for watching: browse and search the library, play, mark watched, add favourites. They have no resource search, downloads, subscriptions, seeding, AI assistant or settings, and contain no screens for them; the server is managed from iPhone or the web console. Apple TV sidebar: "搜索" (Search), "首页" (Home). Mac sidebar: "搜索" (Search), "首页" (Home), "我的收藏" (Favorites) and each library.
+These apps are for watching: browse and search the library, play, mark watched, add favourites. They have no resource search, downloads, subscriptions, seeding, AI assistant or settings, and contain no screens for them; the server is managed from iPhone, iPad or the web console. Apple TV sidebar: "搜索" (Search), "首页" (Home). Mac sidebar: "搜索" (Search), "首页" (Home), "我的收藏" (Favorites) and each library.
 
 TECHNICAL
-Arbitrary loads: home servers often use plain HTTP on the LAN. Background audio (iPhone): playback and Picture in Picture.
+Arbitrary loads: home servers often use plain HTTP on the LAN. Background audio (iPhone, iPad): playback and Picture in Picture.
 ```
 
 - **回复审核（Resolution Center）**：被拒后重新提交时，在拒审消息下回复。上次是 5.6，用下面这段；
@@ -193,6 +196,11 @@ If anything is unclear, we would be glad to explain on a call.
   - 截图用演示服务器的开放授权内容截，搜索、下载、订阅的画面也用演示资源站里的开放授权影片；
     「发现」页的商业影片海报不要出现在截图里（5.2.2）。
   - 6.9 英寸 iPhone（1320×2868 或 1290×2796）至少 3 张。
+  - 13 英寸 iPad（2064×2752 竖屏或 2752×2064 横屏）至少 3 张：支持 iPad 后提审必填（TestFlight 不需要）。
+    横屏截侧边栏展开的首页、条目详情、海报墙最能体现 iPad 版式。
+- **其他平台的分发开关**（「定价与销售范围」）：支持 iPad 后，App 会默认提供给 Apple Vision Pro
+  （按 iPad 应用运行）；没有在 Vision Pro 上测过就先关掉。同一条记录里已有原生 Mac 版，Apple 芯片 Mac 上
+  不会再提供 iPad 版，提审前看一眼确认。
 - **年龄分级与隐私标签**：
   - 年龄分级：App 播放与显示的内容来自用户自己的服务器，开发者无法控制，问卷里涉及「不受限内容」
     的项如实勾选；
@@ -220,7 +228,7 @@ If anything is unclear, we would be glad to explain on a call.
 - **5.2.3（不得便利非法文件共享）**：App 有资源搜索、下载与订阅（遥控用户自己的服务器），这是这类
   App 最常被追问的条款。应对：备注里讲清内容来源与责任归属（§4），演示站只放开放授权影片、下载与
   做种都是模拟的。若仍被拒，在 Resolution Center 按审核意见逐条说明，必要时申请电话沟通。
-- **最低系统 iOS 26**：只有 iOS 26 及以上的 iPhone 能在商店里看到它。
+- **最低系统 iOS 26**：只有 iOS / iPadOS 26 及以上的 iPhone、iPad 能在商店里看到它。
 - **CI 的 Xcode 比本机旧**：GitHub macos-26 runner 目前最高 Xcode 26.x，本机开发常用更新的版本。
   新 Xcode 能推断通过的写法在旧版上会编译失败甚至让编译器崩溃（v0.28.0 发版因此缺过 IPA）。
   规矩：以 PR 上的 `ios` 检查（`.github/workflows/ios.yml`，普通 PR 编 Debug，发版 PR 编 Release）为准；不写 `Binding(get:set:)`，
@@ -231,5 +239,5 @@ If anything is unclear, we would be glad to explain on a call.
 
 与 iOS 共用同一个开发者账号，但证书不同：需要在 developer.apple.com → Certificates 新建
 **Developer ID Application** 证书（只有账号持有人能建），导出成 `.p12` 后按
-`.github/workflows/release.yml` worker-macos 作业的注释配置仓库密钥；公证复用 §2 的 API 密钥。
-配好后每次发版的 `MovieClawTranscoder-macos-arm64.zip` 自动签名、公证、钉票据，用户双击即可打开。
+`.github/workflows/apple-release.yml` transcoder 作业的注释配置仓库密钥；公证复用 §2 的 API 密钥。
+配好后每次转码器发版（`transcoder-vX.Y.Z`）的 `MovieClawTranscoder-macos-arm64.zip` 自动签名、公证、钉票据，用户双击即可打开。

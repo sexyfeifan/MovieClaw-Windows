@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "movieclaw"
-version = "0.36.0"
+version = "0.42.0"
 description = "Best-practice Python HTTP service template powered by FastAPI."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -121,12 +121,20 @@ movieclaw_api = ["data/spec.json"]
 movieclaw_agent = ["builtin-skills/**/*"]
 # 随应用携带的插件包（docs/design/plugin-channels.md §7）：清单是加载与打包的依据
 movieclaw_plugins = ["*/movieclaw-plugin.toml"]
+# 网页主题的 CSS 契约表（docs/design/theme-plugins.md §4.4）
+movieclaw_sdk = ["theme_css.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-q"
 asyncio_mode = "auto"
+# 通过的用例当场删掉自己的 tmp_path，只留失败现场：一套 API 用例每轮会建几十个
+# 各 1.5 MB 的隔离库，默认还会保留最近几轮。临时根目录收进仓库内 .tmp-pytest/
+# 见 tests/conftest.py（CI 想换位置可覆盖 MOVIECLAW_TEST_TMP）。
+# 清理发生在用例的 teardown，用例自己打的补丁可能还没还原：Linux 的 shutil.rmtree
+# 按 fd 调 os.scandir，补丁 os.scandir 的包装器要放过整数参数。
+tmp_path_retention_policy = "failed"
 markers = [
   "integration: 依赖真实网络或 cookie 的集成测试，CI 中可用 -m 'not integration' 跳过",
   "real_password_hash: 使用生产 Argon2 参数的专项测试，不启用低成本测试 hasher",

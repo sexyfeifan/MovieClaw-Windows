@@ -50,7 +50,7 @@ BUILTIN_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     ("订阅", ("subscription",)),
     ("媒体库", ("library.", "media.", "enrich.")),
-    ("播放与字幕", ("playback.", "subtitle.", "jellyfin.", "strm-prefetch")),
+    ("播放与字幕", ("playback.", "subtitle.", "jellyfin.", "strm-prefetch", "drives.")),
     (
         "通知与推送",
         (
@@ -139,6 +139,7 @@ BUILTIN_MANIFEST: tuple[Entry, ...] = tuple(
         domains.downloads,
         domains.boost,
         domains.subscription,
+        domains.search_runs,
         domains.library_core,
         domains.media_scrape,
         domains.subtitle_gen,
@@ -160,6 +161,8 @@ BUILTIN_MANIFEST: tuple[Entry, ...] = tuple(
         playback.pgs_warm,
         library.skip_segments_recovery,
         playback.remote_workers,
+        playback.drive_sources,
+        playback.drive_uploads,
         playback.transcode,
     )
 )

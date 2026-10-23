@@ -27,7 +27,7 @@ const session = body => {
   return { session_id: sid, stream_url: state.hls ? '/test-media/index.m3u8' : '/fixture.mp4', timeline: 'session', start_ms: body.start_ms ?? 300000,
     decision: { outcome: 'plan', tier: 1, audio_tracks: [], subtitles: [], source_duration_ms: 3600000 },
     source: { file_id: body.file_id || body.media_item_id, container: 'mkv', video_codec: 'hevc', duration_ms: 3600000 },
-    subtitle_urls: [], chapters: [], segments: [], watch: { position_ms: 300000, duration_ms: 3600000 } };
+    subtitle_urls: [], chapters: [], segments: state.segments || [], auto_skip: state.autoSkip || {enabled:true,intro:false}, watch: { position_ms: 300000, duration_ms: 3600000 } };
 };
 async function bodyOf(req) {
   const chunks = []; for await (const chunk of req) chunks.push(chunk);
@@ -67,10 +67,11 @@ http.createServer(async (req, res) => {
       state.updateRequests ||= []; state.updateRequests.push({ command, args });
       if (command === 'check_for_updates') {
         if (state.updateCheckFailure) return json(res, { code: 'UPDATE_NETWORK', message: '更新服务暂不可用' }, 503);
-        if (state.updateCurrent) return json(res, {has_update:false,current_version:'1.0.0',latest_version:'desktop-v1.0.0',message:'已是最新版本 (1.0.0)',release_notes:state.updateNotes || ''});
-        if (state.updateSameVersion) return json(res, {has_update:true,current_version:'1.0.0',latest_version:'desktop-v1.0.0',message:'发现 1.0.0 的新构建 bbbbbbbb（当前 aaaaaaaa）',release_notes:'Windows 10/11 x64；安装后输入服务器地址。'});
-        return json(res, { has_update: true, current_version: '0.2.111', latest_version: 'desktop-v0.2.112',
-          message: '发现新版本 desktop-v0.2.112', release_notes: state.updateNotes || '修复播放与账号体验。' });
+        if (state.updateAlignedVersion) return json(res, {has_update:true,current_version:'0.1.1',latest_version:'windows-v0.1.2',message:'发现新版本 0.1.2',release_notes:'原服务端直接登录，无需补丁。'});
+        if (state.updateCurrent) return json(res, {has_update:false,current_version:'1.0.0',latest_version:'windows-v1.0.0',message:'已是最新版本 (1.0.0)',release_notes:state.updateNotes || ''});
+        if (state.updateSameVersion) return json(res, {has_update:true,current_version:'1.0.0',latest_version:'windows-v1.0.0',message:'发现 1.0.0 的新构建 bbbbbbbb（当前 aaaaaaaa）',release_notes:'Windows 10/11 x64；安装后输入服务器地址。'});
+        return json(res, { has_update: true, current_version: '0.2.111', latest_version: 'windows-v0.2.112',
+          message: '发现新版本 windows-v0.2.112', release_notes: state.updateNotes || '修复播放与账号体验。' });
       }
       if (command === 'download_update') {
         const entry = state.updateDownloads?.[fixtureDownloadId];
@@ -105,7 +106,7 @@ http.createServer(async (req, res) => {
       const status = () => ({ mode: state.nativeAuth === 'cookie' ? 'cookie' : 'device', initialized: state.initialized,
         session: state.authenticated ? { username: state.username || 'fixture', role: state.role || 'admin', capabilities: state.capabilities || {} } : null,
         accounts: state.savedAccounts || [{ username: state.username || 'fixture', nickname: '当前账号', active: state.authenticated, authenticated: state.authenticated }],
-        pairing_supported: state.nativeAuth !== 'cookie', compatibility_reason: state.nativeAuth === 'cookie' ? '服务器尚不支持 Windows 设备登录，请升级服务器。' : null, context_generation: 1 });
+        pairing_supported: state.nativeAuth !== 'cookie', compatibility_reason: state.nativeAuth === 'cookie' ? '请使用原服务端的账号密码登录。' : null, context_generation: 1 });
       if (command === 'native_auth_status') return json(res, status());
       if (command === 'native_password_login') {
         if (state.loginDelay) await new Promise(resolve => setTimeout(resolve, state.loginDelay));
@@ -223,7 +224,15 @@ http.createServer(async (req, res) => {
       }
       return json(res, {}, state.libraryCovers === 'protected' ? 401 : 404);
     }
-    if (route === '/ui/preferences') return json(res, ok({ home: { rows: state.homeRows || [] } }));
+    if (route === '/ui/apps') return json(res, ok(state.pluginApps || []));
+    if (route === '/playback/auto-skip' || route.startsWith('/playback/auto-skip/intro/')) {
+      if (state.autoSkipDelay) await new Promise(resolve=>setTimeout(resolve,state.autoSkipDelay));
+      if (state.autoSkipError) return json(res,{code:'SAVE_FAILED',message:'设置保存失败'},503);
+      state.autoSkip ||= {enabled:true,intro:false};
+      state.autoSkip[route.includes('/intro/') ? 'intro' : 'enabled']=!!body.enabled;
+      return json(res,ok(null));
+    }
+    if (route === '/ui/preferences') return json(res, ok({ home: { rows: state.homeRows || [] },nav:state.nav || {} }));
     if (/^\/libraries\/kinds\/\w+\/genres$/.test(route)) return json(res, ok([{ value: '28', label: '动作', count: 120, cover_url: null }, { value: '18', label: '剧情', count: 125, cover_url: null }]));
     if (route === '/collections') return json(res, ok([{ id: 8, name: '测试合集', library_id: 1, hidden: false, item_count: state.itemCount || 245 }]));
     if (/^\/(libraries\/1|libraries\/kinds\/\w+|collections\/8)\/items$/.test(route) || route === '/playback/favorites') {
@@ -252,6 +261,7 @@ http.createServer(async (req, res) => {
       return json(res, ok({ played: false, is_favorite: false, unplayed_count: 2, ...state.marks[key] }));
     }
     if (route === '/playback/resume') return json(res, ok({ season_number: 3, episode_number: 2, position_ms: 300000, duration_ms: 3600000 }));
+    if (/^\/playback\/items\/\d+$/.test(route)) return json(res,ok(item(Number(route.split('/').pop()))));
     if (/^\/libraries\/1\/items\/\d+$/.test(route)) {
       const n = Number(route.split('/').pop());
       return json(res, ok({ ...item(n), files: state.mediaFiles?.[n] || [file(n)], local_meta: { plot: '测试简介', genres: [], runtime_minutes: 60, actors: [{ name: '测试演员', tmdb_person_id: 9, thumb_url: state.images ? '/fixture-images/good.png' : null }] }, collections: [] }));

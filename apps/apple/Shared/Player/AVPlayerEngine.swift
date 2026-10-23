@@ -1,5 +1,6 @@
 import AVFoundation
 import AVKit
+import AetherCore
 #if canImport(UIKit)
 import UIKit
 #else
@@ -55,6 +56,18 @@ final class AVPlayerEngine: NSObject, PlayerEngine {
     }
 
     var view: NativeView { layerView }
+
+    var displayMode: PlayerDisplayMode = .fit {
+        didSet {
+            #if canImport(UIKit)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layerView.playerLayer.videoGravity = displayMode == .stretch ? .resize : (displayMode == .fill ? .resizeAspectFill : .resizeAspect)
+            CATransaction.commit()
+            #endif
+        }
+    }
+
 
     override init() {
         super.init()
@@ -524,6 +537,7 @@ final class PlayerLayerView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .black
+        clipsToBounds = true
     }
 
     @available(*, unavailable)

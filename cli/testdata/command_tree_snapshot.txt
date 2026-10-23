@@ -1,3 +1,6 @@
+app addresses add
+app addresses list
+app addresses remove
 app features list
 app features set
 app plugins bundled restore
@@ -8,17 +11,25 @@ app plugins callbacks rotate
 app plugins dead-letters dismiss
 app plugins dead-letters replay
 app plugins list
+app plugins market install
+app plugins market list
+app plugins market refresh
+app plugins market show
 app plugins packages approve
 app plugins packages discard
 app plugins packages list
+app plugins packages retry-dependencies
 app plugins packages rollback
 app plugins packages uninstall
 app plugins packages upload
+app plugins pages list
 app plugins safe-mode exit
 app plugins settings show
 app plugins settings update
 app plugins show
 app plugins switch
+app plugins web revoke
+app plugins web update
 app port set
 app restart
 app set
@@ -99,6 +110,20 @@ dl torrent replace
 dl types list
 dl update
 dl verify
+drives accounts cookie
+drives accounts delete
+drives accounts dirs
+drives accounts form
+drives accounts list
+drives accounts refresh
+drives accounts update
+drives backends list
+drives logins cancel
+drives logins start
+drives logins status
+drives settings get
+drives settings update
+drives status
 extension cookies push
 extension ping
 extension sites list
@@ -188,6 +213,7 @@ library update
 llm defaults show
 llm defaults update
 llm models
+llm models discover
 llm presets
 llm providers create
 llm providers delete
@@ -226,6 +252,9 @@ playback device revoke
 playback history
 playback stats qoe
 playback stats watch
+playback sync catalog
+playback sync import
+playback sync state
 rules create
 rules default
 rules delete
@@ -264,6 +293,7 @@ site catalog
 site delete
 site list
 site protection set
+site proxy request
 site ratio-boost pause
 site ratio-boost set
 site show
@@ -278,6 +308,8 @@ subscriptions delete
 subscriptions dismiss-episode-hint
 subscriptions download-selected-torrent
 subscriptions get
+subscriptions get-smart-defaults
+subscriptions get-smart-memory
 subscriptions get-smart-profile
 subscriptions list
 subscriptions list-active-downloads
@@ -286,11 +318,13 @@ subscriptions list-today-arrivals
 subscriptions preview-download-routing
 subscriptions preview-removal
 subscriptions search-missing-resources
+subscriptions save-smart-defaults
 subscriptions save-smart-profile
 subscriptions set-follow-future
 subscriptions set-tracking-state
 subscriptions unsubscribe
 subscriptions update
+subscriptions update-smart-memory
 subscriptions update-smart-wait
 subscriptions upgrade-run
 transcode config set

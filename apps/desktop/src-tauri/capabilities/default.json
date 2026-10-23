@@ -28,6 +28,8 @@
     "allow-open-release-page",
     "allow-open-server-ai-settings",
     "allow-open-catalog-link",
+    "allow-open-plugin-page",
+    "allow-refresh-server-routes",
     "allow-proxy-api",
     "allow-get-server-url",
     "allow-has-embedded-player",

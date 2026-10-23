@@ -16,7 +16,8 @@
     [permissions]
     operations = ["search.titles"]  # 宿主操作；危险操作必须逐个列出
 
-依赖只能随包携带（``vendor/`` 目录，运行时加入导入路径），安装时不联网、不跑 pip（§9 决策 2）。
+依赖可以随包携带（``vendor/`` 目录，运行时加入导入路径）；带本机代码的第三方包在 ``[dependencies]``
+里声明锁文件，经管理员批准后由主程序下载安装（docs/design/plugin-dependencies.md）。
 
 目录与状态::
 
@@ -68,6 +69,15 @@ _ID = re.compile(r"^[a-z][a-z0-9-]{1,38}[a-z0-9]$")
 #: 旧格式（带命名空间点）：只认已经装上的插件包——代码里写死了这个 id，宿主不能替它改名
 _LEGACY_ID = re.compile(r"^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9_-]*)+$")
 ID_RULE = "小写字母开头，只用小写字母、数字和连字符，3～40 位，不含点，如 group-blocklist"
+
+#: 插件网页入口（docs/design/plugin-web-pages.md）：包里有它就带网页
+WEB_INDEX = "web/index.html"
+#: 网页主题（docs/design/theme-plugins.md §3）：外观必需，外框组件可选
+THEME_CSS = "theme/theme.css"
+THEME_JS = "theme/index.js"
+#: 主题契约名（movieclaw_sdk.theme）：带外框组件的主题须在 [requires] 里声明
+THEME_CONTRACT = "ui.theme"
+_HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 _VERSION = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 _MODULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -121,8 +131,8 @@ class _Plugin(BaseModel):
     @model_validator(mode="after")
     def _runtime_fields(self) -> _Plugin:
         if self.runtime != "exec":
-            if not self.entry:
-                raise ValueError("entry 必填（入口模块名，如 group_blocklist）")
+            # entry 留空 = 纯网页插件（只有 web/，docs/design/plugin-web-pages.md）：
+            # 包里有没有 web/index.html 在 read_archive 里查
             return self
         parts = (self.command or "").split("/")
         if not self.command or any(not p or p in (".", "..") for p in parts):
@@ -160,16 +170,77 @@ class _Permissions(BaseModel):
         return value
 
 
+class _Dependencies(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lock: str
+    """包内的锁文件路径（pip requirements 格式，全部 == 钉死、每行带 --hash）。"""
+
+    @field_validator("lock")
+    @classmethod
+    def _lock(cls, value: str) -> str:
+        parts = value.split("/")
+        if not value or value.startswith("/") or any(p in ("", ".", "..") for p in parts):
+            raise ValueError("lock 须是包内的相对路径（如 requirements.lock）")
+        return value
+
+
+class _ThemePreview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bg: str
+    accent: str
+
+    @field_validator("bg", "accent")
+    @classmethod
+    def _color(cls, value: str) -> str:
+        if not _HEX_COLOR.match(value):
+            raise ValueError("须是 #rrggbb 颜色")
+        return value
+
+
+class _Theme(BaseModel):
+    """清单的 ``[theme]`` 段：主题的静态事实（docs/design/theme-plugins.md §3）。
+
+    主题 id 就是插件 id；名称、预览色、状态栏色、版式、玻璃都在这里，内核不执行主题代码就能
+    列出、校验、展示主题，首帧也只靠这些。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(min_length=1, max_length=20)
+    description: str = Field(default="", max_length=80)
+    preview: _ThemePreview
+    theme_color: str = "#000000"
+    """浏览器地址栏 / PWA 状态栏颜色"""
+    layout: Literal["panel", "cinema"] = "panel"
+    """版式：panel = 侧栏 + 居中面板；cinema = 顶栏 + 满出血（须带外框组件提供顶栏）"""
+    glass: bool = True
+    """是否用液态玻璃（WebGL 画布与玻璃材质）"""
+
+    @field_validator("theme_color")
+    @classmethod
+    def _theme_color(cls, value: str) -> str:
+        if not _HEX_COLOR.match(value):
+            raise ValueError("须是 #rrggbb 颜色")
+        return value
+
+
 class Manifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     plugin: _Plugin
     requires: dict[str, str] = Field(default_factory=dict)
     permissions: _Permissions = Field(default_factory=_Permissions)
+    dependencies: _Dependencies | None = None
+    """第三方依赖（plugin-dependencies.md §1）：只给独立进程运行的插件。"""
     events: list[dict[str, Any]] = Field(default_factory=list)
     """插件自己的事件（domain-events.md §7.2）：``{name, title}``，名字以插件 id 开头。"""
     notifications: list[dict[str, Any]] = Field(default_factory=list)
     """插件事件对应的通知规则：``{event, title, body, audience, level, default, open}``。"""
+    theme: _Theme | None = None
+    """网页主题（docs/design/theme-plugins.md）：有这一段就是主题包，
+    包里须有 ``theme/theme.css``。"""
 
     def declarations(self) -> Any:
         """解析事件 / 通知 / 敏感事件声明；不合规抛 ``DeclarationError``。"""
@@ -226,7 +297,16 @@ def read_archive(data: bytes) -> tuple[Manifest, zipfile.ZipFile]:
         raise PackageError(f"{MANIFEST} 的 {where} 不合规：{first['msg']}") from exc
     entry = manifest.plugin.entry
     names = set(archive.namelist())
-    if manifest.plugin.runtime == "exec":
+    check_theme(manifest, names)
+    if manifest.plugin.runtime != "exec" and not entry:
+        if WEB_INDEX not in names and manifest.theme is None:
+            raise PackageError(
+                f"entry 必填（入口模块名，如 group_blocklist）；只带网页的插件须有 {WEB_INDEX}，"
+                f"主题包须有 [theme] 段与 {THEME_CSS}"
+            )
+        if manifest.dependencies is not None:
+            raise PackageError("只带网页或主题的插件（entry 留空）不能声明第三方依赖")
+    elif manifest.plugin.runtime == "exec":
         if manifest.plugin.command not in names:
             raise PackageError(f"插件包里找不到可执行文件 {manifest.plugin.command}")
         here = current_platform()
@@ -235,7 +315,35 @@ def read_archive(data: bytes) -> tuple[Manifest, zipfile.ZipFile]:
             raise PackageError(f"插件包只支持 {supported}，这台服务器是 {here}")
     elif f"{entry}.py" not in names and f"{entry}/__init__.py" not in names:
         raise PackageError(f"插件包里找不到入口模块 {entry}.py 或 {entry}/__init__.py")
+    if manifest.dependencies is not None:
+        read_lock(manifest, archive)
     return manifest, archive
+
+
+def read_lock(manifest: Manifest, source: zipfile.ZipFile | Path) -> Any:
+    """读出并校验插件声明的锁文件（``source`` 是压缩包或已解开的目录）；没有依赖返回 None。"""
+    from movieclaw_sdk import deps
+
+    if manifest.dependencies is None:
+        return None
+    if manifest.plugin.runtime != "process":
+        raise PackageError(
+            '只有独立进程运行（runtime = "process"）的插件能声明第三方依赖：'
+            "在主进程里运行会改动主程序自己的环境"
+        )
+    name = manifest.dependencies.lock
+    try:
+        raw = (source / name).read_bytes() if isinstance(source, Path) else source.read(name)
+    except (KeyError, FileNotFoundError) as exc:
+        raise PackageError(f"插件包里找不到锁文件 {name}（[dependencies] lock）") from exc
+    try:
+        lock = deps.parse_lock(raw.decode("utf-8"))
+        deps.check_host(lock, deps.host_packages())
+    except UnicodeDecodeError as exc:
+        raise PackageError(f"锁文件 {name} 不是 UTF-8 文本") from exc
+    except deps.LockError as exc:
+        raise PackageError(f"锁文件 {name} 不合规：{exc}") from exc
+    return lock
 
 
 def current_platform() -> str:
@@ -249,6 +357,7 @@ def current_platform() -> str:
 
 def check_compat(manifest: Manifest, *, reserved: set[str], operations: set[str]) -> None:
     """兼容性与权限声明检查：SDK、契约、条目 id 冲突、宿主操作是否存在。"""
+    import movieclaw_sdk.theme  # noqa: F401  # 登记 ui.theme 契约，主题包的 requires 按它检查
     from movieclaw_sdk import SDK_VERSION
 
     plugin = manifest.plugin
@@ -291,6 +400,37 @@ def check_compat(manifest: Manifest, *, reserved: set[str], operations: set[str]
             raise PackageError(f"宿主操作 {pattern} 不存在")
 
 
+def lock_record(manifest: Manifest, lock: Any) -> dict[str, Any] | None:
+    """安装记录里的依赖授权：锁文件路径、内容哈希、包与版本（升级时据此列出增删改）。"""
+    if lock is None or manifest.dependencies is None:
+        return None
+    return {
+        "lock": manifest.dependencies.lock,
+        "digest": lock.digest,
+        "packages": [{"name": p.name, "version": p.version} for p in lock.packages],
+    }
+
+
+def check_theme(manifest: Manifest, names: set[str]) -> None:
+    """主题包的文件与声明要对得上（docs/design/theme-plugins.md §4.6）。
+
+    ``names`` 是包内相对路径。"""
+    has_css = THEME_CSS in names
+    if manifest.theme is None:
+        if has_css or THEME_JS in names:
+            raise PackageError("包里有 theme/ 目录，清单却没有 [theme] 段")
+        return
+    if not has_css:
+        raise PackageError(f"主题包须有 {THEME_CSS}")
+    has_js = THEME_JS in names
+    if has_js and THEME_CONTRACT not in manifest.requires:
+        raise PackageError(
+            f'带外框组件（{THEME_JS}）的主题须在 [requires] 里声明 "{THEME_CONTRACT}"'
+        )
+    if manifest.theme.layout == "cinema" and not has_js:
+        raise PackageError(f"cinema 版式要由主题提供顶栏，须带外框组件 {THEME_JS}")
+
+
 # ---------------------------------------------------------------------- 状态
 @dataclass
 class Installed:
@@ -314,6 +454,12 @@ class Installed:
     """批准订阅的敏感事件（清单 ``[permissions] events``）。"""
     members_allowed: bool = False
     """用户批准了通知到普通成员。"""
+    dependencies: dict[str, Any] | None = None
+    """批准的第三方依赖（plugin-dependencies.md §2）：``{lock, digest, packages}``。
+    授权按锁文件内容哈希认，升级时锁文件没变就不再问。"""
+    web: dict[str, Any] | None = None
+    """用户对插件网页的同意（docs/design/plugin-web-pages.md §5）：``{nav, members}``；
+    没有网页或没同意为空。"""
     previous: dict[str, Any] | None = None
     """上一版的安装记录（version、title、entry、runtime、operations），回滚用。"""
     bad: list[str] = field(default_factory=list)
@@ -334,6 +480,8 @@ class Installed:
             "notifications": [dict(n) for n in self.notifications],
             "sensitive": list(self.sensitive),
             "members_allowed": self.members_allowed,
+            "dependencies": self.dependencies,
+            "web": self.web,
         }
 
 
@@ -437,6 +585,15 @@ def _failing(entry_id: str, reason: str) -> Plugin:
     return Plugin(name=entry_id, title=f"插件包 {entry_id}", apply=apply, disableable=True)
 
 
+def web_only(entry_id: str, title: str) -> Plugin:
+    """只带网页的插件：没有后端代码，挂一个空插件占位（诊断、停用、卸载与别的插件一样）。"""
+
+    async def apply(ctx: Any) -> None:
+        return None
+
+    return Plugin(name=entry_id, title=title, apply=apply, disableable=True)
+
+
 def _inline(path: Path, package: Installed) -> Plugin:
     """进程内运行（用户单独批准过）：按包目录导入，模块名带条目 id 前缀避免与别的包重名。"""
     import dataclasses
@@ -510,7 +667,10 @@ def entry_for(settings: object, package: Installed) -> Entry:
     declare(package)
     path = version_dir(settings, package.id, package.version)
     try:
-        if package.runtime == "inline":
+        _bind_dependencies(settings, package)
+        if not package.entry and package.runtime != "exec":
+            plugin = web_only(package.id, package.title)
+        elif package.runtime == "inline":
             plugin = _inline(path, package)
         else:
             from movieclaw_api.services.plugin_runtime import describe, remote_plugin
@@ -535,8 +695,27 @@ def entry_for(settings: object, package: Installed) -> Entry:
     return Entry(package.id, plugin, source=SOURCE)
 
 
+def _bind_dependencies(settings: object, package: Installed) -> None:
+    from movieclaw_api.services import plugin_deps, plugin_runtime
+
+    plugin_runtime.dependency_paths.pop(package.id, None)
+    if not package.dependencies:
+        return
+    ready = plugin_deps.ready_dir(settings, package.dependencies["digest"])
+    if ready is None:
+        raise PackageError("第三方依赖还没装好（插件页「重试安装依赖」）")
+    plugin_runtime.dependency_paths[package.id] = ready
+
+
 def load_package_entries(settings: object) -> list[Entry]:
-    packages = installed(settings)
+    """已安装的插件包 → 内核条目；依赖还没就绪的跳过，由 ``plugin_deps.resume`` 装好后挂载。"""
+    from movieclaw_api.services import plugin_deps
+
+    packages = {
+        k: p
+        for k, p in installed(settings).items()
+        if not p.dependencies or plugin_deps.ready_dir(settings, p.dependencies["digest"])
+    }
     if not packages:
         return []
     entries = [entry_for(settings, p) for p in packages.values()]

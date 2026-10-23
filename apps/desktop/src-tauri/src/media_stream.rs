@@ -441,7 +441,7 @@ async fn pipe_playlist(
     id: &str,
     origin: Option<&str>,
 ) -> Result<(), String> {
-    let playlist = response.url().clone();
+    let playlist = crate::server_routes::canonicalize(&lease.base,response.url());
     let mut body = Vec::new();
     while let Some(chunk) = response
         .chunk()
@@ -475,14 +475,14 @@ async fn upstream(
 ) -> Result<reqwest::Response, String> {
     let mut url = lease.target.clone();
     for hop in 0..=5 {
-        let mut request = CLIENT.request(
-            if method == "HEAD" {
+        let method = if method == "HEAD" {
                 Method::HEAD
             } else {
                 Method::GET
-            },
-            url.clone(),
-        );
+            };
+        let require_https = lease.identity.is_none() && lease.cookies.requires_https(&url);
+        let response = tokio::time::timeout(Duration::from_secs(30), crate::server_routes::send(&lease.base, &url, &method, require_https, |wire| {
+        let mut request = CLIENT.request(method.clone(),wire.clone());
         for name in [
             "range",
             "if-range",
@@ -497,11 +497,12 @@ async fn upstream(
         if connect::url_in_server_scope(&lease.base, &url) {
             if let Some(identity) = &lease.identity {
                 request = request.bearer_auth(&identity.token);
-            } else if let Some(cookie) = lease.cookies.header(&url) {
+            } else if let Some(cookie) = lease.cookies.header_for_transport(&url,&wire) {
                 request = request.header(header::COOKIE, cookie);
             }
         }
-        let response = tokio::time::timeout(Duration::from_secs(30), request.send())
+        Ok(request)
+        }))
             .await
             .map_err(|_| "media response timeout")?
             .map_err(|_| "media upstream failed")?;
@@ -519,7 +520,8 @@ async fn upstream(
                 .get(header::LOCATION)
                 .and_then(|v| v.to_str().ok())
                 .ok_or("invalid media redirect")?;
-            let next = url.join(location).map_err(|_| "invalid media redirect")?;
+            let next = response.url().join(location).map_err(|_| "invalid media redirect")?;
+            let next = crate::server_routes::canonicalize(&lease.base,&next);
             connect::validate_http_url(next.as_str())?;
             if url.scheme() == "https" && next.scheme() != "https" {
                 return Err("media HTTPS downgrade refused".into());

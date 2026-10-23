@@ -7,6 +7,7 @@ import SwiftUI
 /// 视图切换（分组 / 列表 / 图览）在顶栏右上角（`TorrentViewModeMenu`，由 `SearchResultsView` 挂）。
 /// 行点按打开资源操作面板（下载 / 投给订阅 / 浏览图片 / 站点详情页）。
 struct TorrentResultsView: View {
+    @Environment(\.cardMetrics) private var cards
     @Bindable var model: TorrentSearchModel
     /// 手动选种模式：目标订阅（id + 标题）
     let grabTarget: (id: Int, title: String)?
@@ -22,7 +23,10 @@ struct TorrentResultsView: View {
 
     var body: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 10, pinnedViews: []) {
+            // 头部（横幅、状态行、条件胶囊）不进懒加载，只有结果走 LazyVStack：头部和结果同在一个
+            // LazyVStack 里时，甩到底的回弹会停在离底约 500pt 处，最后几行怎么滑都到不了（模拟器实测，
+            // 分组 / 列表都有，结果行高度是稳的）；头部挪出来后回弹正常停在底部
+            VStack(alignment: .leading, spacing: 10) {
                 if let grabTarget {
                     grabBanner(grabTarget)
                 }
@@ -39,9 +43,11 @@ struct TorrentResultsView: View {
                 if model.streaming {
                     progressBar
                 }
-                results
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    results
+                }
             }
-            .padding(.horizontal, Theme.pagePadding)
+            .padding(.horizontal, cards.edge)
             .padding(.bottom, 40)
         }
         .scrollDismissesKeyboard(.immediately)
@@ -203,7 +209,7 @@ struct TorrentResultsView: View {
                     conditionLabel(Label("清空", systemImage: "xmark").labelStyle(.titleAndIcon), active: false, chevron: false)
                 }
                 .buttonStyle(.plain)
-                .padding(.leading, Theme.pagePadding)
+                .padding(.leading, cards.edge)
                 .padding(.vertical, 4)
                 .transition(.move(edge: .leading).combined(with: .opacity))
                 .accessibilityLabel("清空全部筛选条件")
@@ -218,8 +224,8 @@ struct TorrentResultsView: View {
                         }
                     }
                     // 左边钉着「清空」时只留胶囊间距，胶囊横滑时从它右侧滑进滑出
-                    .padding(.leading, clearing ? 8 : Theme.pagePadding)
-                    .padding(.trailing, Theme.pagePadding)
+                    .padding(.leading, clearing ? 8 : cards.edge)
+                    .padding(.trailing, cards.edge)
                     .padding(.vertical, 4)
                 }
             }
@@ -228,7 +234,7 @@ struct TorrentResultsView: View {
         }
         .animation(.snappy, value: clearing)
         // 横滑出页边距：胶囊能滑到屏幕边缘再消失，而不是在 16pt 页边距处被一刀切掉
-        .padding(.horizontal, -Theme.pagePadding)
+        .padding(.horizontal, -cards.edge)
     }
 
     /// 排序胶囊：写当前键与方向；菜单分「常规 / 智能」，点当前项翻转升降序（同 Web SortDropdown）

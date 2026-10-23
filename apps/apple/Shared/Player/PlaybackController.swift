@@ -70,7 +70,19 @@ final class PlaybackController {
 
     // MARK: 引擎
 
-    private(set) var engine: (any PlayerEngine)?
+    private(set) var engine: (any PlayerEngine)? {
+        didSet { engine?.displayMode = displayMode }
+    }
+    /// 只属于本次播放器；同剧换集、换版本和换引擎保留，换影片恢复完整显示。
+    var displayMode: PlayerDisplayMode = .fit {
+        didSet { engine?.displayMode = displayMode }
+    }
+
+    func selectDisplayMode(_ mode: PlayerDisplayMode) {
+        displayMode = mode
+        noteUserActivity()
+        flash(mode.label)
+    }
     /// 当前会话在服务端的 id（自研引擎直出原文件时会立即释放服务端会话，此时为 nil）
     private(set) var activeSessionId: String?
     private(set) var playsOriginalFile = false
@@ -82,6 +94,12 @@ final class PlaybackController {
     private var nativeRetries = NativeRetryBudget()
     /// 存储写满后重开：本单元往后都用最小的分片窗口、不开片源字节缓存（`NativeStoragePlan.minimal`）
     private var forceMinimalStorage = false
+    /// 服务端说这个文件只在网盘上（会话 `source.onDrive`，cloud-storage.md §7.5）。只有这时取原文件才带
+    /// `fallback=1` 声明「直连失败会改走转发」（服务端「自动」模式才肯给直链），失败才改走转发；
+    /// 本地库的文件地址与失败处理和没有网盘功能时完全一样
+    private var sourceOnDrive = false
+    /// 只在网盘上的文件直连网盘失败过：本单元往后取原文件都带 `relay=1` 由家里转发（cloud-storage.md §7.2）
+    private var cloudRelay = false
     /// 探片源取不取得到用的地址（原文件 / 镜像的取流地址，原盘目录里第一个文件），见 `SourceProbe`
     private var sourceProbeURL: URL?
     /// 正在处理上一次失败（探片源、等片源回来）：这期间引擎再报的失败、看门狗再判的都不再处理，新请求发出时清掉
@@ -115,6 +133,10 @@ final class PlaybackController {
     private(set) var quality: Int?
     /// 画质是这次打开时从记忆里取的、用户还没动过：开播提示要点明
     private var qualityFromMemory = false
+    /// 用户选的倍速（菜单里那一档）：按这部片记（`SpeedMemory`），换集、换引擎都带着；长按 2 倍速只是临时盖住它
+    private(set) var rate: Float = 1
+    /// 倍速是这次打开时从记忆里取的、用户还没动过：开播提示要点明
+    private var rateFromMemory = false
     /// 开播提示「已沿用上次的选择」只在打开播放器后第一次出画时判一次（自动连播下一集不再提示）
     private var memoryNoticeChecked = false
     /// 播放时的网络环境（在家直连 / 在外面），画质记忆按它分开
@@ -218,6 +240,22 @@ final class PlaybackController {
     /// stop 先到、进度后到，服务端会把刚结束的会话「复活」，还多开一行永远不收口的播放日志
     private var reportQueue: Task<Void, Never>?
     private var terminationObserver: NSObjectProtocol?
+    #if os(iOS)
+    /// 正在放的本机副本（docs/design/offline-download.md §6）：有它时不建服务端会话、进度记观看记录
+    private var localUnit: OfflineUnit?
+    private var viewing: OfflineViewingRecorder?
+    /// 冷启动直达播放时本机目录可能还没读完：第一次起播先等它（只等一次）
+    private var awaitedOfflineStore = false
+    #endif
+
+    /// 正在放 iPhone 上的副本
+    var playsLocalCopy: Bool {
+        #if os(iOS)
+        localUnit != nil
+        #else
+        false
+        #endif
+    }
 
     init(request: PlayRequest, api: APIClient, requestedAt: ContinuousClock.Instant? = nil) {
         self.request = request
@@ -236,6 +274,11 @@ final class PlaybackController {
         } else {
             quality = request.shareSlug == nil ? QualityMemory.quality(mediaItemId: request.mediaItemId, network: network) : nil
             qualityFromMemory = quality != nil
+            // 倍速同样按片记、访客不记；片段模式从正常速度起
+            if request.shareSlug == nil, let remembered = SpeedMemory.rate(mediaItemId: request.mediaItemId) {
+                rate = remembered
+                rateFromMemory = true
+            }
         }
     }
 
@@ -353,6 +396,25 @@ final class PlaybackController {
     }
 
     private func loadInfo() async {
+        #if os(iOS)
+        // 离线时条目信息从本机取；在线取不到（连不上）而本机有副本时同样回落，不因此停掉本机播放
+        if scope.shareSlug == nil { await OfflineStore.shared.waitUntilLoaded() }
+        if scope.shareSlug == nil, let local = OfflineStore.shared.items[request.mediaItemId],
+           ServerReachability.shared.isOffline || OfflineStore.shared.downloadedItemIds.contains(request.mediaItemId) {
+            let localInfo = API.PlaybackItemView(mediaItemId: local.mediaItemId, libraryId: local.libraryId, kind: local.kind,
+                                                 title: local.title, year: local.year, posterUrl: local.posterUrl)
+            if ServerReachability.shared.isOffline {
+                info = localInfo
+                nowPlaying.update(controller: self)
+                await loadEpisodes()
+                return
+            }
+            info = (try? await scope.item(request.mediaItemId)) ?? localInfo
+            nowPlaying.update(controller: self)
+            await loadEpisodes()
+            return
+        }
+        #endif
         do {
             info = try await scope.item(request.mediaItemId)
             nowPlaying.update(controller: self)
@@ -374,6 +436,19 @@ final class PlaybackController {
 
     private func loadEpisodes() async {
         guard unit.isEpisode else { episodes = []; return }
+        #if os(iOS)
+        // 离线（或连不上）：分集取本机存档，「在库」= 本机有，下一集只在本机有的集里找
+        let store = OfflineStore.shared
+        if scope.shareSlug == nil, store.downloadedItemIds.contains(unit.mediaItemId) {
+            if !ServerReachability.shared.isOffline, let remote = try? await scope.episodes(unit.mediaItemId, season: unit.season) {
+                episodes = remote
+            } else if let local = await store.season(itemId: unit.mediaItemId, season: unit.season) {
+                episodes = store.offlineSeason(local, itemId: unit.mediaItemId).episodes
+            }
+            nowPlaying.update(controller: self)
+            return
+        }
+        #endif
         episodes = (try? await scope.episodes(unit.mediaItemId, season: unit.season)) ?? []
         nowPlaying.update(controller: self)
     }
@@ -383,6 +458,7 @@ final class PlaybackController {
     /// 开始播放一个单元（首次进入、上一集/下一集）
     func startUnit(_ next: PlaybackUnit) {
         let seasonChanged = next.season != unit.season
+        if next.mediaItemId != unit.mediaItemId { displayMode = .fit }
         endRecord()
         if engine != nil || session != nil { leaveUnit() }
         unit = next
@@ -406,11 +482,15 @@ final class PlaybackController {
         nextDismissed = false
         autoNextCancelled = false
         autoNextProgress = 0
+        skipHandled = []
+        skipNotice = nil
         qualitySuggestion = QualitySuggestion()
         dismissQualityOffer()
         nativeFailed = false
         nativeRetries.reset()
         forceMinimalStorage = false
+        sourceOnDrive = false
+        cloudRelay = false
         sourceProbeURL = nil
         failedTiers = []
         failureCount = 0
@@ -446,6 +526,15 @@ final class PlaybackController {
     private func leaveUnit() {
         pingTask?.cancel()
         progressTask?.cancel()
+        #if os(iOS)
+        if let viewing {
+            viewing.finish(positionMs: positionMs, completed: phase == .ended)
+            self.viewing = nil
+            reportedStart = false
+            NotificationCenter.default.post(name: .playbackStopReported, object: nil, userInfo: ["mediaItemId": unit.mediaItemId])
+        }
+        localUnit = nil
+        #endif
         if reportedStart {
             reportedStart = false
             let unit = self.unit, position = positionMs, audio = audioMemory, subtitle = subtitleMemory, duration = durationMs
@@ -558,11 +647,104 @@ final class PlaybackController {
         return SkipSegments.active(session?.segments, at: positionMs)
     }
 
-    /// 点「跳过」：直接跳到这一段结束处
+    /// 点「跳过」：直接跳到这一段结束处。片头是这部剧第一次手动跳，就记下来、以后自动跳（§5），
+    /// 同时给「本剧以后自动跳过片头 · 不用」；服务端记不住（旧版本）就不学、不给这句话
     func skipCurrentSegment() {
         noteUserActivity()
         guard let segment = skipSegment else { return }
         seek(toFileMs: segment.endMs, source: .button)
+        if segment.type == "intro", autoSkipEnabled, canLearnIntro, !introAutoSkip, !scope.isShare {
+            setIntroAutoSkip(true)
+            skipNotice = SkipNotice(kind: .learned)
+        }
+    }
+
+    // MARK: 自动跳过（docs/design/skip-intro.md §5）
+
+    /// 跳过按钮那个角落的提示
+    struct SkipNotice: Equatable {
+        enum Kind: Equatable {
+            /// 「已跳过片头 · 撤回」
+            case skipped(API.PlaybackSegmentView)
+            /// 「本剧以后自动跳过片头 · 不用」
+            case learned
+            /// 「本剧不再自动跳过片头」
+            case forgot
+        }
+
+        let id = UUID()
+        let kind: Kind
+
+        var durationMs: Int { kind == .forgot ? SkipSegments.infoNoticeMs : SkipSegments.skipNoticeMs }
+    }
+
+    private(set) var skipNotice: SkipNotice?
+    /// 自动跳过总开关（跟账号走，随会话下发；旧服务端没有就按默认开）。播放器里不给开关：
+    /// 片头靠记忆、跳了能撤回，用不着再关
+    private(set) var autoSkipEnabled = true
+    /// 这部剧的片头自动跳
+    private(set) var introAutoSkip = false
+    /// 服务端能不能记住片头选择：会话带回了 `auto_skip` 才能；旧服务端没有，学了下一集也带不回来
+    private var canLearnIntro = false
+    /// 本集已经决定过的段（按起点记）：自然播进去自动跳一次；用户拖进去、跳回去、撤回过的只给按钮
+    private var skipHandled: Set<Int> = []
+    /// 本次播放里改过的片头选择：保存请求还没落库时下一集的会话可能带回旧值，以这里为准
+    private var introAutoSkipOverride: Bool?
+
+    /// 进度推进时调用：自然播进了区间、这一段还没决定过，就按 `SkipSegments.autoSkips` 跳或只给按钮
+    private func evaluateAutoSkip() {
+        guard phase == .playing, !paused,
+              let segment = skipSegment, !skipHandled.contains(segment.startMs) else { return }
+        skipHandled.insert(segment.startMs)
+        guard SkipSegments.autoSkips(segment, enabled: autoSkipEnabled, introLearned: introAutoSkip) else { return }
+        seek(toFileMs: segment.endMs, source: .auto, marksSkipHandled: false)
+        skipNotice = SkipNotice(kind: .skipped(segment))
+    }
+
+    /// 落点所在的段算「用户自己去的」：不自动跳，只给按钮
+    private func markSkipHandled(at fileMs: Int) {
+        guard let segment = session?.segments?.first(where: { fileMs >= $0.startMs && fileMs < $0.endMs }) else { return }
+        skipHandled.insert(segment.startMs)
+    }
+
+    /// 「撤回」：回到这一段起点接着看；撤回的是片头就忘掉这部剧的片头自动跳
+    func undoAutoSkip() {
+        noteUserActivity()
+        guard case let .skipped(segment) = skipNotice?.kind else { return }
+        seek(toFileMs: segment.startMs, source: .button)
+        if segment.type == "intro", introAutoSkip {
+            setIntroAutoSkip(false)
+            skipNotice = SkipNotice(kind: .forgot)
+        } else {
+            skipNotice = nil
+        }
+    }
+
+    /// 学会时的「不用」：这部剧的片头还是只给按钮
+    func declineIntroAutoSkip() {
+        noteUserActivity()
+        setIntroAutoSkip(false)
+        skipNotice = nil
+    }
+
+    /// 提示到时间收起（id 对得上才收：期间换了新提示就不动）
+    func expireSkipNotice(_ id: UUID) {
+        if skipNotice?.id == id { skipNotice = nil }
+    }
+
+    private func setIntroAutoSkip(_ enabled: Bool) {
+        introAutoSkip = enabled
+        introAutoSkipOverride = enabled
+        let api = scope.api, item = unit.mediaItemId
+        Task { try? await api.playbackAutoSkipIntroSet(mediaItemId: item, body: API.PlaybackAutoSkipRequest(enabled: enabled)) }
+    }
+
+    /// 新会话带回的设定；本次播放里改过的片头选择优先
+    private func applyAutoSkip(_ view: API.PlaybackAutoSkipView?) {
+        canLearnIntro = view != nil
+        guard let view else { return }
+        autoSkipEnabled = view.enabled
+        introAutoSkip = introAutoSkipOverride ?? view.intro
     }
 
     // MARK: - 起播（决策 / 降档 / 换会话）
@@ -582,6 +764,26 @@ final class PlaybackController {
         trace.begin()
         startTask?.cancel()
         negotiationTask?.cancel()
+        #if os(iOS)
+        if scope.shareSlug == nil, clip == nil, !OfflineStore.shared.loaded, !awaitedOfflineStore {
+            // 本机目录还没读完就判「没有副本」，离线冷启动直达播放会去连服务器、报错
+            awaitedOfflineStore = true
+            startTask = Task { [weak self] in
+                await OfflineStore.shared.waitUntilLoaded()
+                guard let self, myAttempt == self.attempt, !self.closed else { return }
+                self.request(startMs: startMs, phase: next)
+            }
+            return
+        }
+        // 这一集（这部电影）在 iPhone 上有下完的副本：直接放本机文件，不建服务端会话（docs/design/offline-download.md §6）
+        if !nativeFailed, scope.shareSlug == nil, clip == nil,
+           let local = OfflineStore.shared.playableUnit(mediaItemId: unit.mediaItemId, season: unit.season, episode: unit.episode),
+           let file = OfflineStore.shared.mediaURL(local), FileManager.default.fileExists(atPath: file.path) {
+            startTask = Task { [weak self] in await self?.startLocal(local, file: file, startMs: startMs, attempt: myAttempt) }
+            return
+        }
+        localUnit = nil
+        #endif
         // 请求内容在这里（主线程）一次算好，网络往返交给独立任务立刻发出、在后台整段跑完：
         // 播放器刚弹出时主线程忙着排版和转场，等主线程空出来再发请求要多排队一两百毫秒
         let inputs = negotiationInputs(startMs: startMs)
@@ -696,9 +898,74 @@ final class PlaybackController {
         }
     }
 
+    #if os(iOS)
+    /// 本机副本起播：按本机存的播放数据拼一个与服务端会话同形的会话，交给同一段装载逻辑
+    private func startLocal(_ local: OfflineUnit, file: URL, startMs: Int?, attempt myAttempt: Int) async {
+        let store = OfflineStore.shared
+        let spec = await store.spec(local)
+        guard myAttempt == attempt, !closed, let dir = store.unitDir(local) else { return }
+        let subtitles = spec?.subtitles ?? []
+        var progress = store.localProgress(itemId: local.mediaItemId, season: local.season, episode: local.episode)
+        if startMs == nil, let fresh = await serverResume(for: local) {
+            // 在线：续播点以服务器为准（别的设备可能看到了更后面）；本机有没发出去的观看记录时仍用本机的
+            progress = OfflineProgress(positionMs: fresh.positionMs, played: fresh.played, durationMs: fresh.durationMs, updatedAt: Date())
+            store.recordProgress(itemId: local.mediaItemId, season: local.season, episode: local.episode,
+                                 positionMs: fresh.positionMs, played: fresh.played, durationMs: fresh.durationMs)
+        }
+        guard myAttempt == attempt, !closed else { return }
+        let resume = startMs ?? progress.map { $0.played && $0.positionMs == 0 ? 0 : $0.positionMs } ?? 0
+        let decision = API.PlaybackDecisionView(
+            outcome: "plan", tier: 0, fileId: local.fileId, container: spec?.container, video: nil,
+            audio: API.AudioPlanView(action: "copy", trackRef: spec?.defaultAudio, codec: nil, channels: nil, downmix: false),
+            audioTracks: spec?.audioTracks ?? [],
+            subtitles: subtitles.map {
+                API.SubtitlePlanView(trackRef: $0.ref, kind: $0.kind, language: $0.language, isDefault: $0.isDefault,
+                                     isAi: $0.isAi, title: $0.title, isForced: $0.isForced)
+            },
+            degradedFrom: nil, disc: nil, discPlaylist: nil, costHint: nil, canSelfEnable: nil,
+            settingNamespace: nil, settingKey: nil, reason: "播放 \(ClientPlatform.deviceName) 上的副本", suggestion: nil
+        )
+        let session = API.PlaybackSessionView(
+            decision: decision, sessionId: nil, streamUrl: file.absoluteString, progressiveSegments: false,
+            startMs: resume, timeline: "file",
+            subtitleUrls: subtitles.map { dir.appending(path: "subs/\($0.fileName)").absoluteString },
+            masterUrl: nil, hwBackend: nil,
+            watch: API.PlaybackStateView(positionMs: resume, played: progress?.played ?? false, playCount: 0,
+                                         durationMs: spec?.durationMs, audioTrack: nil, subtitleTrack: nil, endedByAdmin: false),
+            source: API.PlaybackSourceView(container: spec?.container, resolution: spec?.resolution, videoCodec: spec?.videoCodec,
+                                           hdr: nil, bitRate: nil, frameRate: nil, sizeBytes: Int(local.receivedBytes)),
+            chapters: spec?.chapters ?? [], segments: spec?.segments, matroskaCues: nil
+        )
+        localUnit = local
+        record?.event("local", "播放本机副本（\(local.profileLabel)）")
+        await handleSession(session, useNative: true, requestedStartMs: startMs, localFile: file)
+    }
+
+    /// 在线时问一下服务器的续播点（最多等 2 秒，问不到就用本机的）
+    private func serverResume(for local: OfflineUnit) async -> API.PlaybackStateView? {
+        let reachability = ServerReachability.shared
+        guard !reachability.isOffline, reachability.status != .unreachable, let key = OfflineStore.shared.key,
+              !OfflineViewingUploader.shared.hasPending(ownerKey: key, itemId: local.mediaItemId, season: local.season, episode: local.episode)
+        else { return nil }
+        let api = scope.api
+        let season = unit.isEpisode ? local.season : nil, episode = unit.isEpisode ? local.episode : nil
+        let itemId = local.mediaItemId
+        return await withTaskGroup(of: API.PlaybackStateView?.self) { group in
+            group.addTask { try? await api.playbackResume(mediaItemId: itemId, seasonNumber: season, episodeNumber: episode) }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(2))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+    }
+    #endif
+
     private func handleSession(
         _ session: API.PlaybackSessionView, useNative: Bool, requestedStartMs: Int?,
-        preparedAsset: AVURLAsset? = nil
+        preparedAsset: AVURLAsset? = nil, localFile: URL? = nil
     ) async {
         startupDiag("会话处理开始")
         let decision = session.decision
@@ -744,20 +1011,27 @@ final class PlaybackController {
         }
 
         // 3. 决定地址与时间轴
+        sourceOnDrive = session.source?.onDrive == true
         var url: URL?
         var original = false
         // 申报了全解码却拿到非档 0 的计划：服务端没有单个原文件可拉（多剪辑原盘之类），照它给的 HLS 放
         let noSingleFile = useNative && decision.tier != 0
         // 光盘直推（docs/design/disc-direct-play.md）：自研引擎申报了读光盘，服务端才会带这个标记
         let discKind = useNative ? decision.disc : nil
-        if useNative, !noSingleFile, discKind == "folder" {
+        if let localFile {
+            // 本机副本：文件就在手机上，没有服务端会话
+            url = localFile
+            original = true
+            activeSessionId = nil
+        } else if useNative, !noSingleFile, discKind == "folder" {
             // 原盘目录直推：地址是目录清单，引擎按清单逐个文件取字节，服务端不起任何进程
             url = scope.streamURL(session.streamUrl)
             original = true
             activeSessionId = nil
         } else if useNative, !noSingleFile, let token = PlaybackAPI.token(in: session.streamUrl) {
             // 自研引擎直出原文件：服务端为 remux/音频转码起的会话用不上，立刻释放
-            url = scope.streamURL("/api/v1/playback/files/\(fileId)/stream?token=\(token)")
+            let drive = sourceOnDrive ? (cloudRelay ? "&relay=1" : "&fallback=1") : ""
+            url = scope.streamURL("/api/v1/playback/files/\(fileId)/stream?token=\(token)\(drive)")
             original = true
             if let sid = session.sessionId { let scope = self.scope; Task { await scope.stop(sid) } }
             activeSessionId = nil
@@ -792,6 +1066,7 @@ final class PlaybackController {
         if requestedStartMs == nil || positionMs == 0 { positionMs = session.startMs }
         if let duration = session.watch?.durationMs { durationMs = duration }
         self.session = session
+        applyAutoSkip(session.autoSkip)
 
         // 4. 轨道
         subtitles = SubtitleTracks.plan(decision.subtitles, urls: session.subtitleUrls)
@@ -875,6 +1150,8 @@ final class PlaybackController {
             self.handleEngineEvent(event)
         }
         newEngine.applySubtitleStyle(subtitleStyle)
+        // 新引擎从正常速度起：换集、换档、重开都把选的倍速带过去（长按中换的也回到所选那档）
+        if rate != 1 { newEngine.setRate(rate) }
         resetWatchdogs()
         let startSeconds = Double(max(0, positionMs - originMs)) / 1000
         // 起播音轨：用户这次选过、或服务端挑的不是容器默认轨（记着的、沿用上一集的、默认轨策略挑的原声）
@@ -899,7 +1176,15 @@ final class PlaybackController {
             // 自研引擎要在装载前交代：明确要的轨由引擎按序号直接起播，免得首帧后再重载一次
             newEngine.selectInitialAudio(embeddedIndex: initialAudio.index, explicit: initialAudio.explicit)
         }
-        if let native = newEngine as? NativeEngine, original {
+        if let native = newEngine as? NativeEngine, original, localFile != nil {
+            // 本机文件直读，不经片源字节缓存；外挂字幕是本机文件
+            native.storagePlan = NativeStoragePlan.make(
+                freeBytes: NativeStoragePlan.temporaryFreeBytes, bitrateBps: nil, forceMinimal: forceMinimalStorage
+            )
+            sourceProbeURL = nil
+            native.prepareExternalSubtitles(subtitles.options.filter { $0.ref.hasPrefix("external:") }
+                .compactMap { option in URL(string: option.path).map { (ref: option.ref, url: $0, language: option.language) } })
+        } else if let native = newEngine as? NativeEngine, original {
             native.sourceCacheKey = Self.sourceCacheKey(fileId: fileId, size: session.source?.sizeBytes)
             // MKV 精简索引（引擎补丁 P58）：服务端缓存里有就随会话下发，起播时不必再下原索引
             native.matroskaCues = session.matroskaCues.flatMap { cues in
@@ -930,7 +1215,7 @@ final class PlaybackController {
         } else {
             sourceProbeURL = nil
         }
-        if let native = newEngine as? NativeEngine, original {
+        if let native = newEngine as? NativeEngine, original, localFile == nil {
             // 外挂字幕交给引擎画：取服务端的原文件（编码归一成 UTF-8、不转格式），ASS 定位保留，画中画也有字幕
             native.prepareExternalSubtitles(subtitles.options.filter { !$0.path.isEmpty && $0.ref.hasPrefix("external:") }
                 .compactMap { option in scope.streamURL(option.path).map { (ref: option.ref, url: $0, language: option.language) } })
@@ -1014,6 +1299,27 @@ final class PlaybackController {
 
     /// 自研引擎在本机放不了（连引擎自己的软解也不行）：本单元改走服务端 HLS + 系统播放器
     private func nativeFallback(reason: String) {
+        #if os(iOS)
+        if let local = localUnit {
+            // 本机副本放不了：标成损坏；在线时改从服务器放，离线时说明
+            var damaged = local
+            damaged.damaged = true
+            OfflineStore.shared.upsert(damaged)
+            if let viewing {
+                // 本机这次播放到此为止；改从服务器放的部分走实时上报，不能接着记在本机观看记录里
+                viewing.finish(positionMs: positionMs, completed: false)
+                self.viewing = nil
+                reportedStart = false
+            }
+            localUnit = nil
+            if ServerReachability.shared.isOffline {
+                fail("\(ClientPlatform.deviceName) 上的这份副本放不了", suggestion: "文件可能已损坏。连上服务器后删除并重新下载。（\(reason)）", category: "decode")
+                return
+            }
+            request(startMs: positionMs, phase: .degrading)
+            return
+        }
+        #endif
         record?.noteFallback(reason: reason)
         #if DEBUG
         print("[EngineFallback] 自研引擎 → 服务端流：\(reason)")
@@ -1134,15 +1440,21 @@ final class PlaybackController {
             // 换会话 / 降档时控制器自己按的暂停（request 里的 engine.pause）不上报：那不是用户暂停
             if reportedStart, !phase.isBusy { sendProgress(paused: true) }
         case .buffering:
+            let wasPlaying = phase == .playing
             if phase == .playing {
                 phase = .buffering
                 // seek 造成的等待是「跳转耗时」，不是卡顿（同 Web qoe.ts 口径）
                 if seekStartedAt == nil { qoe.beginRebuffer() }
             }
-            if holdSpeedActive, (engine?.bufferedEnd ?? 0) - (engine?.currentTime ?? 0) < 1 {
+            let starved = (engine?.bufferedEnd ?? 0) - (engine?.currentTime ?? 0) < 1
+            if holdSpeedActive, starved {
                 // 倍速吃光了前向缓冲：退回原速
                 endHoldSpeed()
                 flash("缓冲跟不上，已退出 2 倍速")
+            } else if rate > 1, starved, wasPlaying, seekStartedAt == nil {
+                // 菜单选的加速也一样：线路或转码供不上这个速度，退回正常速度（并记下，下一集不再卡）
+                selectRate(1)
+                flash("缓冲跟不上，已回到正常速度")
             }
         case .ended:
             guard [.buffering, .playing].contains(phase) else { return }
@@ -1248,6 +1560,16 @@ final class PlaybackController {
             "tier": session.decision.tier.map { .int($0) } ?? .null,
         ])
         let nativeOriginal = engine?.kind == .native && playsOriginalFile
+        if nativeOriginal, sourceOnDrive, sourceProbeURL?.isFileURL == false, !cloudRelay,
+           cause == .network || cause == .sourceMissing {
+            // 只在网盘上的文件，取原文件可能被 302 到了网盘直链（服务端「自动」/「总是直连」模式）：直连不通
+            // （网盘不认这个出口地址、链接失效）先改走家里转发再试一次
+            cloudRelay = true
+            log("cloud-relay-fallback", ["reason": .string(reason)])
+            record?.event("cloud_relay", "直连网盘失败，改走家里转发：\(reason)")
+            request(startMs: positionMs, phase: .sessionStarting)
+            return
+        }
         let response = FailurePolicy.decide(FailurePolicy.Input(
             engine: engine?.kind ?? .avPlayer,
             cause: cause,
@@ -1309,7 +1631,8 @@ final class PlaybackController {
         Task { [weak self] in
             var backoff = ReconnectBackoff()
             while true {
-                let verdict = await SourceProbe.check(probeURL)
+                // 出门 / 回家换了地址：每轮都按这台服务器当前的地址去探
+                let verdict = await SourceProbe.check(ServerRoutes.shared.rewrite(probeURL))
                 guard let self, myAttempt == self.attempt, !self.closed else { return }
                 switch verdict {
                 case .reachable:
@@ -1402,11 +1725,13 @@ final class PlaybackController {
     }
 
     /// 跳到文件时间（毫秒）。`source` 进播放记录（按键 / 拖动 / 锁屏……分开看哪种慢）
-    func seek(toFileMs raw: Int, exact: Bool = true, source: PlaybackRecord.SeekSource = .unknown) {
+    /// `marksSkipHandled`：落点所在的可跳过段算「用户自己去的」，不再自动跳（自动跳过自己的跳转不算）
+    func seek(toFileMs raw: Int, exact: Bool = true, source: PlaybackRecord.SeekSource = .unknown, marksSkipHandled: Bool = true) {
         // 先夹进片长之内：越过片尾的落点会开出一个什么也转不出来的会话
         var target = max(0, raw)
         if let durationMs, durationMs > 1000 { target = min(target, durationMs - 1000) }
         if let clip { target = Self.clamp(target, into: clip) }
+        if marksSkipHandled { markSkipHandled(at: target) }
         scrubFollowTask?.cancel()
         let buffered = bufferedEndMs.map { target >= positionMs && target <= $0 } ?? false
         guard let engine, session != nil, phase != .sessionStarting, phase != .deciding, phase != .degrading else {
@@ -1448,6 +1773,8 @@ final class PlaybackController {
     func scrubFollow(toFileMs raw: Int) {
         guard let engine, session != nil, [.playing, .buffering, .ended].contains(phase) else { return }
         let target = clip.map { Self.clamp(raw, into: $0) } ?? raw
+        // 拖动途中画面跟到哪段里，哪段就是用户自己去的：别在手指还没松开时自动跳走
+        markSkipHandled(at: target)
         // 连续拖动的跳转耗时以第一次拖动为起点（松手那次 seek 结束计时）
         record?.noteScrubActivity()
         let reachable = target >= originMs
@@ -1475,6 +1802,21 @@ final class PlaybackController {
         }
     }
 
+    // MARK: 倍速
+
+    /// 菜单选倍速：按这部片记下（访客、片段模式不记）。长按 2 倍速期间只改记着的那档，松手后回到它
+    func selectRate(_ value: Float) {
+        rate = value
+        rateFromMemory = false
+        if !holdSpeedActive {
+            engine?.setRate(value)
+            // 从加速降下来时视频还要丢几秒帧才追平（同 endHoldSpeed）：这段不判掉帧
+            frameDrops.reset()
+            frameDropGraceUntil = Date().addingTimeInterval(8)
+        }
+        if scope.shareSlug == nil, clip == nil { SpeedMemory.remember(value, mediaItemId: unit.mediaItemId) }
+    }
+
     // MARK: 长按 2 倍速
 
     /// 现在能不能起长按倍速（同 Web canHoldSpeed：暂停时不行，松手按轻点处理）
@@ -1491,7 +1833,7 @@ final class PlaybackController {
     func endHoldSpeed() {
         guard holdSpeedActive else { return }
         holdSpeedActive = false
-        engine?.setRate(1)
+        engine?.setRate(rate)
         // 倍速期间视频被音频甩在后面，回到原速后引擎还要丢几秒帧才追平（真机 4K 60 帧约 6 秒）：
         // 这段不判掉帧，宽限期过后从头统计
         frameDrops.reset()
@@ -1848,6 +2190,14 @@ final class PlaybackController {
 
     /// 报「开始播放」并开始 10 秒一次的进度上报（每个单元一次）
     private func reportStart() {
+        #if os(iOS)
+        if let localUnit {
+            // 本机播放：记观看记录（先落盘，能连上就发），不走实时进度上报
+            reportedStart = true
+            viewing = OfflineViewingRecorder(unit: localUnit, startPositionMs: positionMs, durationMs: durationMs, api: scope.api)
+            return
+        }
+        #endif
         reportedStart = true
         let unit = self.unit, audio = audioMemory, subtitle = subtitleMemory, fileId = reportedFileId
         let scope = self.scope
@@ -1897,6 +2247,12 @@ final class PlaybackController {
 
     private func sendProgress(paused: Bool?) {
         guard reportedStart else { return }
+        #if os(iOS)
+        if let viewing {
+            viewing.checkpoint()
+            return
+        }
+        #endif
         let unit = self.unit, position = positionMs, audio = audioMemory, subtitle = subtitleMemory, duration = durationMs
         let fileId = reportedFileId
         let scope = self.scope
@@ -1919,6 +2275,14 @@ final class PlaybackController {
     private func reportTermination() {
         // 播放记录先落盘（进程马上要退出，发送留给下次启动补发）
         endRecord(terminating: true)
+        #if os(iOS)
+        if let viewing {
+            viewing.finishBeforeTermination(positionMs: positionMs)
+            self.viewing = nil
+            reportedStart = false
+            return
+        }
+        #endif
         guard reportedStart else { return }
         reportedStart = false
         scope.stopBeforeTermination(unit, positionMs: positionMs, durationMs: durationMs, audio: audioMemory, subtitle: subtitleMemory,
@@ -1973,10 +2337,14 @@ final class PlaybackController {
         paused = engine.isPaused
         if phase == .playing, !engine.isPaused { qoe.tickWatched() } else { qoe.pauseWatched() }
         if let clip, phase == .playing, !engine.isPaused, positionMs >= clip.endMs { reachClipEnd() }
+        evaluateAutoSkip()
     }
 
     private func tickSecond() {
         guard let engine else { return }
+        #if os(iOS)
+        viewing?.tick(positionMs: positionMs, playing: phase == .playing && !engine.isPaused, durationMs: durationMs)
+        #endif
         let stats = engine.stats()
         speedLabel = Self.formatLoadingSpeed(stats.loadingBps)
         // 带宽估计另记：申报给服务端的 downlink_bps 要的是线路能力，缓冲满了也保持上次实测值
@@ -2065,8 +2433,8 @@ final class PlaybackController {
             return
         }
         // 长按 2 倍速时引擎按音频节奏主动丢帧跟上（4K 60 帧就是每秒 120 帧），掉帧是预期内的，不能判成
-        // 「直通放不动」——真机实测一按倍速 3 秒就被判掉帧、白白换成了服务端转码
-        guard copying, phase == .playing, !engine.isPaused, seekStartedAt == nil, !holdSpeedActive,
+        // 「直通放不动」——真机实测一按倍速 3 秒就被判掉帧、白白换成了服务端转码。菜单选的加速同理
+        guard copying, phase == .playing, !engine.isPaused, seekStartedAt == nil, !holdSpeedActive, rate <= 1,
               let dropped = stats.droppedFrames, let total = stats.totalFrames else { return }
         if let ratio = frameDrops.sample(dropped: dropped, total: total), ratio >= FrameDropTracker.ratio {
             frameDrops.reset()
@@ -2133,7 +2501,7 @@ final class PlaybackController {
 
     // MARK: - 提示
 
-    /// 这次沿用了哪些**不是默认**的记忆（画质、音轨、字幕），拼成开播提示；都是默认的返回 nil。
+    /// 这次沿用了哪些**不是默认**的记忆（画质、音轨、字幕、倍速），拼成开播提示；都是默认的返回 nil。
     ///
     /// 服务端每次进度上报都会把正在放的轨记下来，「记着」不等于「用户选过」：记着的和默认挑选一致就不提
     private func rememberedChoiceNotice() -> String? {
@@ -2156,7 +2524,8 @@ final class PlaybackController {
                 subtitle = "关闭"
             }
         }
-        return RememberedChoices.notice(quality: qualityLimit, network: network, audio: audio, subtitle: subtitle)
+        return RememberedChoices.notice(quality: qualityLimit, network: network, audio: audio, subtitle: subtitle,
+                                        rate: rateFromMemory ? rate : nil)
     }
 
     // MARK: - 播放记录（docs/design/playback-qoe.md）

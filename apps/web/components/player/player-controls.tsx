@@ -13,6 +13,7 @@ import { ActivityIcon, CheckIcon, ExpandIcon, MoreIcon, ShrinkIcon } from "@/com
 import type { PlaybackChapterMark } from "@/lib/api/playback";
 import type { AudioOption } from "@/lib/player/audio-tracks";
 import { SUBTITLE_OFFSET_STEP, clampSubtitleOffset } from "@/lib/player/subtitles";
+import { DISPLAY_MODES, type DisplayMode } from "@/lib/player/display-mode";
 import { QUALITY_OPTIONS } from "@/lib/player/quality";
 import {
   SCRUB_INPUT_STEP_MS,
@@ -28,6 +29,7 @@ import {
   livePositionMs,
   progressRatio,
   shownPositionMs,
+  type SkipSegment,
 } from "@/lib/player/timeline";
 import { type TrickplayIndex, tileAt } from "@/lib/player/trickplay";
 
@@ -292,6 +294,8 @@ export interface PlayerControlsProps {
   systemSubtitles: boolean;
   /** 画质上限（max_height）；null = 自动 */
   quality: number | null;
+  displayMode: DisplayMode;
+  onSelectDisplayMode: (mode: DisplayMode) => void;
   onSelectQuality: (maxHeight: number | null) => void;
   /** 菜单展开时要顶住控制条的自动隐藏，否则菜单会连着控制条一起淡掉 */
   onMenuOpenChange: (open: boolean) => void;
@@ -299,6 +303,8 @@ export interface PlayerControlsProps {
   trickplay: TrickplayIndex | null;
   /** 章节刻度（文件毫秒）。空表 = 这个文件没有内嵌章节，轨道保持干净 */
   chapters: PlaybackChapterMark[];
+  /** 可跳过的段（片头、广告等，文件毫秒）：轨道上标成琥珀色，一集两三段，拖动时一眼看出哪截是片头 */
+  skipSegments: readonly SkipSegment[];
   /**
    * iOS 伪横屏（整个容器 rotate(90deg)）。
    *
@@ -340,10 +346,13 @@ export function PlayerControls(props: PlayerControlsProps) {
     onToggleFullscreen,
     systemSubtitles,
     quality,
+    displayMode,
+    onSelectDisplayMode,
     onSelectQuality,
     onMenuOpenChange,
     trickplay,
     chapters,
+    skipSegments,
     fakeLandscape,
   } = props;
 
@@ -770,6 +779,20 @@ export function PlayerControls(props: PlayerControlsProps) {
               data-player-played=""
               className="absolute inset-y-0 left-0 w-0 bg-[var(--player-accent)]"
             />
+            {/* 可跳过的段（docs/design/skip-intro.md §5，同 App）：画在已播放部分之上，琥珀色，播过了也看得见 */}
+            {durationMs
+              ? skipSegments.map((seg) => (
+                  <div
+                    key={seg.start_ms}
+                    data-testid="skip-segment-mark"
+                    className="absolute inset-y-0 bg-[rgb(245_184_82/0.9)]"
+                    style={{
+                      left: `${Math.min(100, (seg.start_ms / durationMs) * 100)}%`,
+                      width: `${Math.max(0.2, Math.min(100, ((seg.end_ms - seg.start_ms) / durationMs) * 100))}%`,
+                    }}
+                  />
+                ))
+              : null}
             {/* 轨道上不画章节刻度（2026-09-27）：按每章起点切暗色竖条，章节一多整条就像断成了十几截；
                 电影的章节多是按编号随手分的，位置不对应剧情，刻度没有信息量。章节名只在气泡里显示
                 （hoverChapter），见 player-feel.md §2.C1 */}
@@ -1035,6 +1058,17 @@ export function PlayerControls(props: PlayerControlsProps) {
                 </IconButton>
                 {menu === "settings" ? (
                   <MenuPanel title="设置" onClose={() => openMenu("none")}>
+                    <div className="px-4 pb-1 pt-0.5 text-[12px] font-medium text-white/45">画面缩放</div>
+                    {DISPLAY_MODES.map((option) => (
+                      <MenuItem key={option.id} active={displayMode === option.id} onClick={() => {
+                        onSelectDisplayMode(option.id);
+                        openMenu("none");
+                      }}>
+                        {option.label}
+                        <span className="ml-2 text-[12px] text-white/40">{option.hint}</span>
+                      </MenuItem>
+                    ))}
+                    <div className="my-1.5 h-px bg-white/10" />
                     {/* 画质：语义是上限——源不超所选档就照常直通（无损），
                         超了才转码降下去。弱网选低档换低带宽（§10）。 */}
                     <div className="px-4 pb-1 pt-0.5 text-[12px] font-medium text-white/45">画质</div>

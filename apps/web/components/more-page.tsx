@@ -16,11 +16,11 @@ import {
   UsersIcon,
 } from "@/components/icons";
 import { NoticeCenter } from "@/components/notice-center";
-import { reloadAfterAccountChange } from "@/lib/account-reload";
-import { logout } from "@/lib/api/auth";
+import { usePluginNavItems } from "@/components/sidebar";
+import { signOut } from "@/lib/account-reload";
 import { useAgentConversations } from "@/lib/agent-conversations";
 import { usePageChrome } from "@/lib/page-chrome";
-import { accessiblePathFor, roleLabel, usePermissions } from "@/lib/permissions";
+import { roleLabel, usePermissions } from "@/lib/permissions";
 import { useSession } from "@/lib/session";
 import type { TaskActivityBadge } from "@/lib/task-activity";
 
@@ -40,7 +40,7 @@ import type { TaskActivityBadge } from "@/lib/task-activity";
  * 新会话与 AI 会话是 Agent 能力，管理员专属——与侧栏的 memberNavItems 同口径
  * （安全边界在后端 require_admin，这里是界面裁剪）。
  *
- * Netflix 主题有自己的「我的」页（themes/netflix/pages/my-page），会覆盖本页。
+ * Netflix 主题有自己的「我的」页（plugins/netflix/src/pages/my-page），会覆盖本页。
  */
 export function MorePage() {
   const router = useRouter();
@@ -49,6 +49,8 @@ export function MorePage() {
   const { conversations, hasMore, loadingMore, loadMore } = useAgentConversations();
   const { forkConversation, renameConversation, removeConversation } = useConversationActions();
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  // 手机没有侧边栏：插件网页（docs/design/plugin-web-pages.md）的入口放在这里
+  const pluginItems = usePluginNavItems();
 
   // 手机顶栏标题「我的」（同 App：这一页是正文字号的行内标题，不是大字标题）
   const setTopBarTitle = usePageChrome()?.setTopBarTitle;
@@ -74,13 +76,7 @@ export function MorePage() {
    * 没有了才去登录页；整页跳转重置全部前端状态（与侧栏用户菜单同一套流程）。
    */
   const handleLogout = async () => {
-    let next: Awaited<ReturnType<typeof logout>> = null;
-    try {
-      next = await logout();
-    } catch {
-      // 即使请求失败（网络断开），也照常跳登录页；会话在后端仍会自然过期
-    }
-    await reloadAfterAccountChange(next ? accessiblePathFor(next, "/") : "/login", next != null);
+    await signOut();
   };
 
   return (
@@ -115,6 +111,19 @@ export function MorePage() {
           <MoreRow Icon={GearIcon} label="设置" onClick={() => router.push("/settings" as Route)} />
           <AppUpdateEntry collapsed={false} onOpen={() => router.push("/settings/app" as Route)} />
         </MoreGroup>
+
+        {pluginItems.length > 0 && (
+          <MoreGroup label="插件页面">
+            {pluginItems.map((item) => (
+              <MoreRow
+                key={item.id}
+                Icon={item.icon}
+                label={item.label}
+                onClick={() => router.push(item.href as Route)}
+              />
+            ))}
+          </MoreGroup>
+        )}
 
         <MoreGroup label="账号">
           <MoreRow Icon={UsersIcon} label="切换账号" onClick={() => setSwitcherOpen(true)} />

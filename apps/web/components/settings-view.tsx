@@ -2,7 +2,7 @@
 
 import type { Route } from "next";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { LiquidGlassButton } from "@/components/liquid-glass";
 
@@ -26,6 +26,8 @@ import { McpSection } from "@/components/mcp-section";
 import { MembersSection } from "@/components/members-section";
 import { AiSettingsSection } from "@/components/ai-settings-section";
 import { LlmConfigSection } from "@/components/llm-config-section";
+import { CloudStreamModeSection } from "@/components/cloud-stream-mode-section";
+import { DrivesSection } from "@/components/drives-section";
 import { ImPushSection } from "@/components/im-push-section";
 import { NetworkConfigSection } from "@/components/network-config-section";
 import { NotificationsSection } from "@/components/notifications-section";
@@ -65,12 +67,17 @@ import { listLoginDevices } from "@/lib/api/devices";
 import { clearPlaybackHistory } from "@/lib/api/playback";
 import { DEFAULT_UI_PREFS } from "@/lib/api/ui";
 import { HttpError } from "@/lib/http";
-import { normalizeThemeId, THEMES } from "@/lib/themes";
+import { catalogTheme, subscribeThemeCatalog, themeCatalogVersion } from "@/lib/theme-catalog";
+import { refreshThemeCatalog } from "@/lib/theme-catalog-sync";
+import { ensureThemeStylesheet, loadTheme, themeLoadError } from "@/lib/theme-runtime";
+import { availableThemes, normalizeThemeId } from "@/lib/themes";
 import { useSession } from "@/lib/session";
+import { appNavId, isAppNavId, pruneAppNavIds } from "@/lib/plugin-apps";
+import { usePluginApps } from "@/lib/plugin-apps-context";
 import { applyNavOrder, mergeNavOrder, sameNavOrder } from "@/lib/sidebar-nav";
 import { settingsSectionGroupsFor, settingsSections } from "@/lib/mock-data";
-import { useTheme, useUiPrefs } from "@/lib/ui-prefs";
-import { useIsMobile } from "@/lib/use-media-query";
+import { useActiveExtensionPoints } from "@/lib/use-extension-points";
+import { useIsPhone, useLayout, useUiPrefs } from "@/lib/ui-prefs";
 import { useResolvedTheme } from "@/themes/registry";
 import { useTabParam } from "@/lib/use-tab-param";
 
@@ -88,7 +95,8 @@ export function SettingsSidebar({ active, onSelect, onBack }: SettingsSidebarPro
   const { backdrop } = useBackdrop();
   // 成员只看到「账号」组（个人信息/设备/通知/外观）；管理分区后端一律 403，前端不给入口
   const { session } = useSession();
-  const sectionGroups = settingsSectionGroupsFor(session.role);
+  const extensionPoints = useActiveExtensionPoints(session.role === "admin");
+  const sectionGroups = settingsSectionGroupsFor(session.role, extensionPoints);
   // 与工作台侧栏共用同一份用户偏好（透明度/明暗）；外观分区拖动滑杆时，
   // 这块面板就是实时预览的对象。
   const { prefs } = useUiPrefs();
@@ -171,8 +179,8 @@ export function SettingsPanel({ active, item }: SettingsPanelProps) {
   // 内容列在设置 main 区（右侧分区菜单之后的剩余空间）内水平居中，两主题一致；
   // 银玻璃无分区菜单，居中即全宽居中（mx-auto px-6）。分区菜单固定 300px 宽
   // （见 app-shell 的设置分支），列不与菜单重叠
-  const isNf = useTheme().structural;
-  const allowed = settingsSectionGroupsFor(session.role).flatMap((g) => g.items);
+  const cinema = useLayout() === "cinema";
+  const allowed = settingsSectionGroupsFor(session.role, "all").flatMap((g) => g.items);
   const section =
     allowed.find((s) => s.id === active) ?? allowed[0] ?? settingsSections[0];
   const Icon = section.icon;
@@ -199,7 +207,7 @@ export function SettingsPanel({ active, item }: SettingsPanelProps) {
           路径映射对照表，同给 3xl；其余表单类分区维持 2xl 的舒适阅读宽度 */}
       <div
         className={`w-full pb-20 pt-12 max-md:pb-12 max-md:pt-6 ${
-          isNf ? "mx-auto pl-12 pr-12 max-md:px-4" : "mx-auto px-6 max-md:px-4"
+          cinema ? "mx-auto pl-12 pr-12 max-md:px-4" : "mx-auto px-6 max-md:px-4"
         } ${
           section.id === "logs" || section.id === "mcp"
             ? "max-w-4xl"
@@ -252,6 +260,8 @@ export function SettingsPanel({ active, item }: SettingsPanelProps) {
           <ScrapeSettingsSection />
         ) : section.id === "playback" ? (
           <PlaybackSection />
+        ) : section.id === "drives" ? (
+          <DrivesSection />
         ) : section.id === "llm" ? (
           <LlmConfigSection />
         ) : section.id === "ai" ? (
@@ -692,6 +702,7 @@ function PlaybackSection() {
           <ReelClipsToggleRow />
         </SettingsList>
       </SettingsSection>
+      <CloudStreamModeSection />
       <RemoteTranscodeSection
         onOpenDevices={() => router.push("/settings/devices" as Route)}
       />
@@ -756,11 +767,12 @@ function AppearanceSection() {
 }
 
 /**
- * 「仅银玻璃主题生效」的置灰壳：Netflix 主题下包住背景图 / 界面质感两组设置。
+ * 「仅银玻璃主题生效」的置灰壳：停用玻璃的主题下包住背景图 / 界面质感两组设置。
  * 置灰 + 挡指针（不只是禁用单个控件——整组交互都无意义），对应偏好字段保留，
  * 切回银玻璃后原样恢复可调。
  */
 function DisabledGlassGroup({ label, children }: { label: string; children: React.ReactNode }) {
+  const themeLabel = useResolvedTheme().meta.label;
   return (
     <div>
       {/* inert 而不是只有 pointer-events-none：后者只挡鼠标，键盘 Tab 照样能
@@ -770,7 +782,7 @@ function DisabledGlassGroup({ label, children }: { label: string; children: Reac
         {children}
       </div>
       <p className="mt-2.5 px-1 text-caption text-[var(--text-faint)]">
-        {label}仅「银玻璃」主题生效——Netflix 主题是纯色平铺设计，没有背景大图与玻璃质感。
+        {label}仅「银玻璃」主题生效——{themeLabel} 主题是纯色平铺设计，没有背景大图与玻璃质感。
       </p>
     </div>
   );
@@ -785,7 +797,8 @@ function DisabledGlassGroup({ label, children }: { label: string; children: Reac
  *
  * **按当前设备语境设置**（2026-09-24 用户拍板：UI 不分「桌面端 / 移动端」两组）：
  * 在桌面端打开设置，改的就是桌面端主题（theme_desktop）；在移动端改的就是
- * 移动端主题（theme_mobile）。解析规则见 lib/ui-prefs.tsx 的 resolveThemeId；
+ * 移动端主题（theme_mobile）。「移动端」指手机设备类，含横过来拿的手机（判据见
+ * lib/themes.ts 的 PHONE_THEME_QUERY）。解析规则见 lib/ui-prefs.tsx 的 resolveThemeId；
  * 组内高亮的是当前端实际生效的主题——没单独设置过时跟随通用 theme 字段
  * （升级前老账号的唯一数据），点了卡才落当前端的覆盖字段。
  *
@@ -794,12 +807,16 @@ function DisabledGlassGroup({ label, children }: { label: string; children: Reac
  */
 function ThemeGroup() {
   const { savedPrefs, savePrefs, loading } = useUiPrefs();
-  const isMobile = useIsMobile();
-  // 在哪个版式上设置，就落哪个端的覆盖字段
-  const field = isMobile ? ("theme_mobile" as const) : ("theme_desktop" as const);
+  const phone = useIsPhone();
+  // 在哪个设备类上设置，就落哪个端的覆盖字段
+  const field = phone ? ("theme_mobile" as const) : ("theme_desktop" as const);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const current = normalizeThemeId(savedPrefs[field] ?? savedPrefs.theme);
+  // 打开外观设置就重拉一次主题目录：刚在插件页装上的主题立刻出卡
+  useEffect(() => {
+    refreshThemeCatalog().catch(() => {});
+  }, []);
 
   /** 选定当前端的主题。已是该值时跳过（比较覆盖字段本身而非生效值——生效值
    *  可能来自通用字段的回落，点了卡才真正落覆盖）。 */
@@ -808,6 +825,16 @@ function ThemeGroup() {
     setBusyId(id);
     setError(null);
     try {
+      // 带外框组件的主题先加载、成功了再保存：切换是原子的，不会出现「新配色 + 旧外框」，
+      // 加载失败就留在原主题（docs/design/theme-plugins.md §4.3）
+      const entry = catalogTheme(id);
+      // 用户主动选：之前失败过的也再试一次（网络抖动、慢盘超时不该让它永远选不上）
+      if (entry?.script && !(await loadTheme(id, entry.script, { retry: true }))) {
+        setError(`主题「${entry.label}」加载失败：${themeLoadError(id) ?? "未知原因"}`);
+        return;
+      }
+      // 本页加载后才装的主题不在聚合样式表里：先挂上样式，不画出「有外框没样式」的一帧
+      if (entry?.css) await ensureThemeStylesheet(entry.css);
       await savePrefs({ ...savedPrefs, [field]: id });
     } catch (err) {
       setError(err instanceof HttpError ? err.message : "保存失败，请稍后重试");
@@ -820,7 +847,7 @@ function ThemeGroup() {
     <SettingsSection
       title="主题"
       footnote={`主题跟随账号保存，所有设备同步；切换立即生效。当前设置的是${
-        isMobile ? "移动端" : "桌面端"
+        phone ? "移动端" : "桌面端"
       }的主题，两端可分别设置。`}
     >
       <ThemeCards
@@ -846,9 +873,11 @@ function ThemeCards({
   busyId: string | null;
   onPick: (id: string) => void;
 }) {
+  // 已装主题的目录变了（拉到服务端的整表）就重画：内置主题之外，装了的插件主题也出卡
+  useSyncExternalStore(subscribeThemeCatalog, themeCatalogVersion, () => 0);
   return (
     <div className="grid grid-cols-2 gap-3 max-[420px]:grid-cols-1">
-      {THEMES.map((theme) => {
+      {availableThemes().map((theme) => {
         const active = theme.id === current;
         const busy = busyId === theme.id;
         return (
@@ -1229,6 +1258,15 @@ function InterfaceTextureGroup() {
 function NavOrderGroup() {
   const { savedPrefs, savePrefs, setPreview, loading } = useUiPrefs();
   const items = useVisibleNavItems();
+  // 还装着的插件网页项（含没加到侧边栏的）：保存时据此清掉已卸载插件留下的 id
+  const { apps } = usePluginApps();
+  const knownAppIds = useMemo(
+    () =>
+      apps === null
+        ? null
+        : new Set(apps.flatMap((app) => app.entries.map((_, index) => appNavId(app.id, index)))),
+    [apps],
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // 拖拽中的行下标；null = 没在拖
@@ -1249,9 +1287,13 @@ function NavOrderGroup() {
     [itemsKey],
   );
   const [draft, setDraft] = useState(savedOrder);
+  // 移出侧边栏的插件网页项（内置项不能移出，docs/design/plugin-web-pages.md §4.2）
+  const savedHidden = useMemo(() => savedPrefs.nav.hidden ?? [], [savedPrefs.nav.hidden]);
+  const [hiddenDraft, setHiddenDraft] = useState<string[]>(savedHidden);
 
   // 已保存值变化（首次拉取完成 / 保存成功）时把草稿对齐到最新落库值
   useEffect(() => setDraft(savedOrder), [savedOrder]);
+  useEffect(() => setHiddenDraft(savedHidden), [savedHidden]);
   // 离开外观分区时撤销未保存的预览，侧栏顺序回到已保存状态
   useEffect(() => () => setPreview(null), [setPreview]);
 
@@ -1259,13 +1301,20 @@ function NavOrderGroup() {
   const rows = draft.map((id) => byId.get(id)).filter((item) => item != null);
 
   /** 顺序落到草稿并即时预览（未落库）。不可见项的 id 在这里一并保留。 */
-  const apply = (nextOrder: string[]) => {
+  const apply = (nextOrder: string[], nextHidden: string[] = hiddenDraft) => {
     setDraft(nextOrder);
+    setHiddenDraft(nextHidden);
     setPreview({
       ...savedPrefs,
-      nav: { order: mergeNavOrder(nextOrder, savedPrefs.nav.order) },
+      nav: { order: mergeNavOrder(nextOrder, savedPrefs.nav.order), hidden: nextHidden },
     });
   };
+
+  const toggleHidden = (id: string) =>
+    apply(
+      draft,
+      hiddenDraft.includes(id) ? hiddenDraft.filter((h) => h !== id) : [...hiddenDraft, id],
+    );
 
   const move = (from: number, to: number) => {
     if (to < 0 || to >= draft.length || from === to) return;
@@ -1281,7 +1330,10 @@ function NavOrderGroup() {
     try {
       await savePrefs({
         ...savedPrefs,
-        nav: { order: mergeNavOrder(nextOrder, savedPrefs.nav.order) },
+        nav: {
+          order: pruneAppNavIds(mergeNavOrder(nextOrder, savedPrefs.nav.order), knownAppIds),
+          hidden: pruneAppNavIds(hiddenDraft, knownAppIds),
+        },
       });
     } catch (err) {
       setError(err instanceof HttpError ? err.message : "保存失败，请稍后重试");
@@ -1294,29 +1346,33 @@ function NavOrderGroup() {
    *  调整、或新增导航入口时，没自定义过的人自动跟随新的默认排布。 */
   const reset = () => {
     setDraft(defaultOrder);
-    setPreview({ ...savedPrefs, nav: { order: [] } });
+    setHiddenDraft([]);
+    setPreview({ ...savedPrefs, nav: { order: [], hidden: null } });
     setBusy(true);
     setError(null);
-    savePrefs({ ...savedPrefs, nav: { order: [] } })
+    savePrefs({ ...savedPrefs, nav: { order: [], hidden: null } })
       .catch((err) => setError(err instanceof HttpError ? err.message : "保存失败，请稍后重试"))
       .finally(() => setBusy(false));
   };
 
-  const dirty = !sameNavOrder(draft, savedOrder);
-  const isDefault = sameNavOrder(draft, defaultOrder);
+  const dirty =
+    !sameNavOrder(draft, savedOrder) || !sameNavOrder([...hiddenDraft].sort(), [...savedHidden].sort());
+  const isDefault = sameNavOrder(draft, defaultOrder) && hiddenDraft.length === 0;
   const disabled = loading || busy;
 
   return (
     // 页签名就是标题：页签下直接是说明 + 行组，不再套同名小节
     <div>
       <p className="mb-3 px-1 text-sub leading-5 text-[var(--text-muted)]">
-        调整左侧栏主导航的排列次序：拖动条目，或用右侧的上下按钮。待处理与更新入口有事才出现，位置固定，不参与排序。
+        调整左侧栏主导航的排列次序：拖动条目，或用右侧的上下按钮。插件页面可以移出侧边栏，移出后仍能从插件详情打开。待处理与更新入口有事才出现，位置固定，不参与排序。
       </p>
       <div className="overflow-hidden rounded-xl">
         <SettingsList>
           <ul className="divide-y divide-[var(--line)]">
             {rows.map((item, index) => {
               const Icon = item.icon;
+              const removable = isAppNavId(item.id);
+              const hidden = removable && hiddenDraft.includes(item.id);
               return (
                 <li
                   key={item.id}
@@ -1337,10 +1393,27 @@ function NavOrderGroup() {
                   } ${disabled ? "opacity-50" : "cursor-grab active:cursor-grabbing"}`}
                 >
                   <GripIcon className="size-4 shrink-0 text-[var(--text-faint)]" />
-                  <Icon className="size-[18px] shrink-0 text-[var(--text-muted)]" />
-                  <span className="flex-1 truncate text-ui font-medium text-[var(--text)]">
+                  <Icon
+                    className={`size-[18px] shrink-0 text-[var(--text-muted)] ${hidden ? "opacity-40" : ""}`}
+                  />
+                  <span
+                    className={`flex-1 truncate text-ui font-medium ${
+                      hidden ? "text-[var(--text-faint)]" : "text-[var(--text)]"
+                    }`}
+                  >
                     {item.label}
+                    {hidden && <span className="ml-2 text-caption font-normal">已移出</span>}
                   </span>
+                  {removable && (
+                    <button
+                      type="button"
+                      disabled={disabled}
+                      onClick={() => toggleHidden(item.id)}
+                      className="shrink-0 rounded-md px-2 py-1 text-caption text-[var(--text-muted)] transition hover:bg-[var(--glass-fill-hover)] hover:text-[var(--text)] disabled:opacity-25"
+                    >
+                      {hidden ? "放回侧边栏" : "移出"}
+                    </button>
+                  )}
                   <span className="tnum shrink-0 text-caption text-[var(--text-faint)]">
                     {index + 1}
                   </span>

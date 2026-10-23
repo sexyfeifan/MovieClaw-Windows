@@ -62,7 +62,8 @@
       </div>
 
       <div class="sidebar-footer">
-        <div id="catalogNav" class="catalog-nav" hidden aria-label="可选页面入口"></div>
+        <div id="pluginNav" hidden></div>
+    <div id="catalogNav" class="catalog-nav" hidden aria-label="可选页面入口"></div>
         <button id="btnBrowseFriends" class="nav-item" hidden aria-haspopup="dialog" title="正在观看：我的设备与服务器好友">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M21 20v-2a6 6 0 0 0-4-5"/></svg>
           <span>正在观看</span>
@@ -213,7 +214,8 @@
       <div class="player-speed-option" data-speed="2">2x</div>
     </div>
     <!-- 跳过片头/片尾按钮 -->
-    <button class="player-skip-btn" id="playerSkipBtn" hidden>跳过片头</button>
+    <div id="autoSkipFeedback" class="player-skip-feedback" role="status" hidden></div>
+      <button class="player-skip-btn" id="playerSkipBtn" hidden>跳过片头</button>
   </div>
 
   <script src="hls.min.js"></script>
@@ -224,9 +226,11 @@
   <script src="api.js"></script>
   <script src="qrcodegen.js"></script>
   <script src="player.js"></script>
+  <script src="auto-skip.js"></script>
   <script src="platform.js"></script>
   <script src="subtitles.js"></script>
   <script src="catalog.js"></script>
+  <script src="plugins.js"></script>
   <script src="friends.js"></script>
   <script src="app.js"></script>
 </body>

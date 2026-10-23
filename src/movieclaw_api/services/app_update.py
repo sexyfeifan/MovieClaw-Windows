@@ -30,12 +30,14 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import errno
 import hashlib
 import json
 import logging
 import os
 import re
 import shutil
+import subprocess
 import tarfile
 import threading
 import time
@@ -432,17 +434,14 @@ def _parse_manifest(raw: bytes) -> dict:
     return {"version": version, "requires_runtime": requires, "files": files, "raw": raw}
 
 
-# GitHub 条件请求缓存（ETag → 上次的 Release 列表）：命中 304 时 GitHub
+# GitHub 条件请求缓存（请求地址 → 上次的 ETag 与响应）：命中 304 时 GitHub
 # **不计入**未认证配额（60 次/小时/IP），这是每小时轮询不挤兑同出口 IP
 # 用户配额的关键——绝大多数轮询都是 304，只有真发了新版才付一次完整请求。
-_releases_etag: str | None = None
-_releases_cached: list[dict] | None = None
+_etag_cache: dict[str, tuple[str, object]] = {}
 
 
 def reset_release_cache_for_tests() -> None:
-    global _releases_etag, _releases_cached
-    _releases_etag = None
-    _releases_cached = None
+    _etag_cache.clear()
 
 
 # 网络级失败的退避重试节奏。只重试「线路抖动」：代理链路（尤其 socks5）
@@ -564,24 +563,26 @@ async def save_github_token(token: str) -> GithubTokenView:
     return GithubTokenView(configured=bool(token), masked=_mask_token(token))
 
 
-async def _fetch_releases(what: str) -> list[dict]:
-    """拉全部 Release 列表（应用与模型的 Release 混在同一个仓库里，
-    必须列表过滤，绝不能用 /releases/latest——模型发布会把 latest 顶掉）。"""
-    global _releases_etag, _releases_cached
+async def _github_get(path: str, what: str, *, missing_ok: bool = False) -> object:
+    """GET 更新仓库下的一个 API 路径（如 ``/releases/tags/v0.38.0``），返回解析后的 JSON。
+
+    missing_ok 时 404 返回 None：按 tag 取发布时，tag 已推送、Release 还是草稿
+    （或反代不认这个路径）都会 404，交给调用方跳过或退回整页列表。"""
     settings = get_settings()
     # 反代地址常被写成带尾斜杠的形式，不去掉会拼出 //repos/... ——不少反代
     # 对双斜杠直接 404，而「设置 → 网络」的连通性测试是 rstrip 过的，
     # 于是测试通过、检查更新却失败，两处必须同口径
     base_url = settings.update_api_base_url.rstrip("/")
-    api_url = f"{base_url}/repos/{settings.update_repo}/releases?per_page=100"
+    api_url = f"{base_url}/repos/{settings.update_repo}{path}"
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "movieclaw-updater"}
     # 令牌只加在这一处 API 调用上：清单/产物走 github.com 的下载地址，不需要也不该带；
     # httpx 跨域重定向时会自动丢弃 Authorization，不会泄漏给 CDN
     token = await _read_github_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    if _releases_etag and _releases_cached is not None:
-        headers["If-None-Match"] = _releases_etag
+    cached = _etag_cache.get(api_url)
+    if cached:
+        headers["If-None-Match"] = cached[0]
     async with httpx.AsyncClient(
         # 走统一网络出口（服务标签 github）：设置页可为更新流量单独开关代理。
         # 但**不上熔断**：熔断是为「用户正等着结果的高频请求」（发现页曾拖满
@@ -598,8 +599,10 @@ async def _fetch_releases(what: str) -> list[dict]:
         for attempt in range(len(_RETRY_BACKOFF_SECONDS) + 1):
             try:
                 resp = await client.get(api_url)
-                if resp.status_code == 304 and _releases_cached is not None:
-                    return _releases_cached
+                if resp.status_code == 304 and cached:
+                    return cached[1]
+                if resp.status_code == 404 and missing_ok:
+                    return None
                 resp.raise_for_status()
             except _RETRYABLE_NETWORK_ERRORS as exc:
                 if attempt == len(_RETRY_BACKOFF_SECONDS):
@@ -623,15 +626,51 @@ async def _fetch_releases(what: str) -> list[dict]:
                         _describe_github_error(exc, what, has_token=bool(token))
                     ) from exc
             break
-        releases = resp.json()
+        data = resp.json()
         etag = resp.headers.get("etag")
         if etag:
-            _releases_etag = etag
-            _releases_cached = releases
-        return releases
+            _etag_cache[api_url] = (etag, data)
+        return data
+
+
+async def _fetch_releases(what: str) -> list[dict]:
+    """拉 Release 列表第一页（应用、各客户端与模型的 Release 混在同一个仓库里，
+    必须列表过滤，绝不能用 /releases/latest——别的发布会把 latest 顶掉）。
+    只作按 tag 查找失败时的兜底，见 _find_release。"""
+    return await _github_get("/releases?per_page=100", what)
+
+
+# 按 tag 查找时最多取几个发布：只有「tag 已推送、Release 还在草稿」时才会跳过，
+# 留几个余量即可，配额有上限（未认证 60 次/小时）。
+_TAG_LOOKUP_LIMIT = 5
+
+
+async def _find_release(prefix: str, pattern: re.Pattern, order, what: str) -> dict | None:
+    """按 tag 前缀找最新的正式发布：先列出该前缀的全部 tag（体积小、不分页），
+    再从高到低逐个取发布，跳过草稿与预发布。
+
+    仓库里还有各客户端单独发的 Release，拉整页列表时不常发的模型会被挤出
+    第一页，列表也越拉越大，所以不再靠列表。找不到时返回 None，由调用方退回
+    整页列表——自建反代可能只放行 /releases，不认 matching-refs 等路径。"""
+    refs = await _github_get(f"/git/matching-refs/tags/{prefix}", what, missing_ok=True)
+    if not isinstance(refs, list):
+        return None
+    tags = [
+        tag
+        for ref in refs
+        if isinstance(ref, dict)
+        and pattern.match(tag := str(ref.get("ref", "")).removeprefix("refs/tags/"))
+    ]
+    for tag in sorted(tags, key=order, reverse=True)[:_TAG_LOOKUP_LIMIT]:
+        release = await _github_get(f"/releases/tags/{tag}", what, missing_ok=True)
+        if isinstance(release, dict) and not release.get("draft") and not release.get("prerelease"):
+            return release
+    return None
 
 
 _APP_TAG_RE = re.compile(r"^v\d+(?:\.\d+)*(?:[-+].*)?$")
+# 按 tag 查找时只看正式版：带后缀的（v0.3.0-beta.1）由发版流水线标成预发布
+_STABLE_APP_TAG_RE = re.compile(r"^v\d+(?:\.\d+)*$")
 
 
 def _latest_app_release(releases: list[dict]) -> dict | None:
@@ -651,8 +690,9 @@ def _latest_app_release(releases: list[dict]) -> dict | None:
 
 async def _fetch_latest_release() -> tuple[dict, dict]:
     """取最新应用 Release 与其 manifest。返回 (release_json, manifest_dict)。"""
-    releases = await _fetch_releases("更新")
-    release = _latest_app_release(releases)
+    release = await _find_release(
+        "v", _STABLE_APP_TAG_RE, lambda tag: tuple(int(p) for p in tag[1:].split(".")), "更新"
+    ) or _latest_app_release(await _fetch_releases("更新"))
     if release is None:
         raise BadRequestException("未找到任何应用发布（vX.Y.Z 的 Release），暂无可用更新")
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "movieclaw-updater"}
@@ -697,12 +737,43 @@ async def check_update() -> UpdateCheckView:
 
 
 def _atomic_symlink(target: Path, link: Path) -> None:
-    """原子地把 link 指向 target：先建临时链接再 rename 替换。"""
+    """原子地把 link 指向 target：先建临时链接再 rename 替换。
+
+    飞牛 NAS 等 ZFS 部署下，``os.replace()`` 替换符号链接会抛
+    ``OSError: [Errno 18] Invalid cross-device link``（ZFS 的 rename 对
+    symlink 走了跨设备路径）。data 卷挂在 ZFS 上时，应用内更新会在最后
+    「切换 current/previous 指针」这一步失败（回退与 NER 模型更新同理）。
+
+    这里在 EXDEV 时改用 coreutils 的 ``mv -T`` 兜底：它对 symlink 走
+    「先删后建」的路径，在 ZFS 上可以正确完成替换；遇到目标是普通目录时
+    会拒绝覆盖，不会误删目录内容。
+
+    不用 ``shutil.move()``：它在 rename 失败后会退化为 ``os.symlink()``，
+    目标已存在时不但没换掉旧链接，还会把目标本身改成指向新目录的链接
+    ——比直接失败更危险。
+    """
     tmp = link.with_name(link.name + ".tmp")
     if tmp.is_symlink() or tmp.exists():
         tmp.unlink()
     tmp.symlink_to(target)
-    os.replace(tmp, link)
+    try:
+        os.replace(tmp, link)
+        return
+    except OSError as exc:
+        # EXDEV(18)：ZFS 上 rename 符号链接的跨设备错误
+        if exc.errno != errno.EXDEV:
+            raise
+        logger.warning(
+            "检测到文件系统不支持原子替换符号链接（EXDEV），改用 mv 兜底：%s", link
+        )
+    result = subprocess.run(
+        ["mv", "-T", "--", str(tmp), str(link)], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"符号链接替换失败：{tmp} -> {link}（mv rc={result.returncode}）："
+            f"{result.stderr.strip()}"
+        )
 
 
 def _verify_sha256(path: Path, expected: str) -> None:
@@ -1202,7 +1273,9 @@ def _parse_model_manifest(raw: bytes) -> dict:
 
 
 async def _fetch_latest_model_release() -> dict:
-    release = _latest_model_release(await _fetch_releases("模型更新"))
+    release = await _find_release(
+        "torrent-ner-v", _MODEL_TAG_RE, _model_tag_num, "模型更新"
+    ) or _latest_model_release(await _fetch_releases("模型更新"))
     if release is None:
         raise BadRequestException("未找到任何模型发布（torrent-ner-v* 的 Release）")
     return release

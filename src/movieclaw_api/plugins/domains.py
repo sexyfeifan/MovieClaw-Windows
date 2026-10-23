@@ -41,6 +41,10 @@ async def downloads(ctx: Context) -> None:
     ctx.contribute(
         LIBRARY_DELETE_PARTICIPANTS, remove_source.PARTICIPANT_ID, remove_source.PARTICIPANT
     )
+    # 网盘库腾空了本地：做完使命的下载任务删掉，空间才真正回来（cloud-storage.md §6.3）
+    from movieclaw_sdk.events import LIBRARY_FILE_LOCAL_RELEASED
+
+    ctx.on(LIBRARY_FILE_LOCAL_RELEASED, remove_source.after_local_released, id="local-released")
 
 
 @plugin("boost", title="自动刷分享率", inject=(SITE_ACCESS,), disableable=True, reloadable=True)
@@ -66,6 +70,19 @@ async def subscription(ctx: Context) -> None:
 
     contribute_tasks(ctx, smart_scheduler, wanted_search, upgrade)
     contribute_job_handlers(ctx, cleanup)  # 取消订阅联动清理
+
+
+@plugin("tracker.search-runs", title="站点搜索后台运行", inject=(SITE_ACCESS,), reloadable=True)
+async def search_runs(ctx: Context) -> None:
+    """站点资源搜索在后台跑完：离开搜索页、刷新再回来，进度接着看，不必重新搜。"""
+    from movieclaw_api.services.search_runs import (
+        close_search_run_registry,
+        init_search_run_registry,
+    )
+
+    # 在跑的搜索持有站点请求：停机时先于站点客户端关闭取消掉
+    init_search_run_registry()
+    ctx.effect(close_search_run_registry, label="close-search-runs")
 
 
 @plugin("library.core", title="媒体库", inject=(DB,), reloadable=True)

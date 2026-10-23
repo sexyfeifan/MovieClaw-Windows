@@ -1,6 +1,18 @@
+## MovieClaw Windows 1.0.3: Device and friends viewing activity
+
+Browse your MovieClaw libraries and play movies and episodes on Windows.
+
+- Viewing activity shows your own devices and explicitly shared friends, with resume and start-over actions.
+- Sharing is opt-in per account and library. New libraries remain private.
+- This release uses hosted CI verification. Physical Windows/macOS parity, GPU output and NAS acceptance remain outstanding; packages are unsigned.
+
 <!-- desktop-release-policy: ci-verified -->
 
-# MovieClaw Windows 1.0.3
+---
+
+## 简体中文
+
+## MovieClaw Windows 1.0.3：设备与好友观看动态
 
 连接自己的 MovieClaw 服务器，在 Windows 上浏览媒体库、播放电影与剧集。
 

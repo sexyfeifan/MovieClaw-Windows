@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 import threading
 import time
 
@@ -113,6 +114,8 @@ async def apply(ctx):
 
 #: 假大模型的闸门：清掉后流式回复卡在半路（会话保持「运行中」），置位放行
 gate = threading.Event()
+#: 每次模型调用收到的系统提示词
+system_prompts: list[str] = []
 
 
 class _EchoProtocol(_StreamProtocol):
@@ -122,6 +125,7 @@ class _EchoProtocol(_StreamProtocol):
         # 轮询而不是在线程里等：取消（停止、插件卸下、应用关闭）能立即生效
         while not gate.is_set():
             await asyncio.sleep(0.02)
+        system_prompts.append(request.messages[0].content)
         last = request.messages[-1].content
         text = last if isinstance(last, str) else "?"
         snap = ChatResponse(model=model_id, provider=self.config.name)
@@ -193,6 +197,12 @@ def bridge(request, tmp_path, monkeypatch):
         get_settings.cache_clear()
         reset_agent_session_store()
         reset_agent_attachment_store()
+        # 进程内运行的那组参数把本地插件模块导进了主进程：清掉，免得同一进程里后面的用例
+        # （如「插件代码只在子进程里导入」）看见它们
+        from movieclaw_api.plugins.local import PACKAGE
+
+        for name in [m for m in sys.modules if m == PACKAGE or m.startswith(PACKAGE + ".")]:
+            del sys.modules[name]
 
 
 def url(path: str, entry: str = ENTRY) -> str:
@@ -227,6 +237,10 @@ def test_ask_streams_and_continues_a_session(bridge, caplog) -> None:
     assert first["status"] == "done"
     assert first["text"] == "回声：沙丘 2 订阅到哪了"
     assert "档位=mclaw" in caplog.text
+    # 插件驱动的会话没有真人在说话：不写昵称；mclaw 档没有 bash/read，不写源码位置
+    assert "当前用户的昵称" not in system_prompts[-1]
+    assert "后端源码" not in system_prompts[-1]
+    assert "<mclaw_service>" in system_prompts[-1]
     # 流式（SSE）：续写同一个会话，事件按序到达、以终态结束
     with client.stream(
         "POST", url("/stream"), json={"text": "继续", "session_id": first["session_id"]}

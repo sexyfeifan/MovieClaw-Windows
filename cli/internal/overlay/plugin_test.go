@@ -112,6 +112,57 @@ func TestPluginManifestErrorsAreActionable(t *testing.T) {
 	}
 }
 
+func TestWebOnlyPluginNeedsNoEntry(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "movieclaw-plugin.toml"),
+		[]byte("[plugin]\nid = \"weekly-board\"\ntitle = \"看板\"\nversion = \"1.0.0\"\n"), 0o644)
+	if _, err := readPluginManifest(dir); err == nil || !strings.Contains(err.Error(), "entry") {
+		t.Fatalf("既没有 entry 也没有 web/index.html 要报缺 entry，实际：%v", err)
+	}
+	os.MkdirAll(filepath.Join(dir, "web"), 0o755)
+	os.WriteFile(filepath.Join(dir, "web", "index.html"), []byte("<title>看板</title>"), 0o644)
+	manifest, err := readPluginManifest(dir)
+	if err != nil || manifest.ID != "weekly-board" {
+		t.Fatalf("只带网页的插件不需要入口模块，实际：%+v %v", manifest, err)
+	}
+	data, _, err := buildPluginPackage(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, _ := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	found := false
+	for _, f := range archive.File {
+		found = found || f.Name == "web/index.html"
+	}
+	if !found {
+		t.Fatal("web/ 要打进包里")
+	}
+}
+
+func TestThemeOnlyPluginNeedsNoEntry(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "movieclaw-plugin.toml"),
+		[]byte("[plugin]\nid = \"ocean\"\nversion = \"1.0.0\"\n\n[theme]\nlabel = \"海蓝\"\n"), 0o644)
+	os.MkdirAll(filepath.Join(dir, "theme"), 0o755)
+	os.WriteFile(filepath.Join(dir, "theme", "theme.css"), []byte(`html[data-theme="ocean"] {}`), 0o644)
+	manifest, err := readPluginManifest(dir)
+	if err != nil || manifest.ID != "ocean" {
+		t.Fatalf("只带主题的插件不需要入口模块，实际：%+v %v", manifest, err)
+	}
+	data, _, err := buildPluginPackage(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, _ := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	found := false
+	for _, f := range archive.File {
+		found = found || f.Name == "theme/theme.css"
+	}
+	if !found {
+		t.Fatal("theme/ 要打进包里")
+	}
+}
+
 func TestDirFingerprintChangesWithContent(t *testing.T) {
 	dir := writePluginDir(t)
 	first, err := dirFingerprint(dir)

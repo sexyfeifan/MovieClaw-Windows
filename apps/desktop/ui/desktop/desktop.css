@@ -3098,3 +3098,8 @@ button:disabled { cursor: default; opacity: .4; }
 .detail-hero { width: 100%; height: calc(clamp(420px, calc((100vw - var(--sidebar-width)) * .5625), 82vh) + 40px); aspect-ratio: auto; min-height: 460px; }
 .detail-stage { padding-left: 40px; padding-right: 40px; }
 .continue-card.selected .poster-art { border-color: #e6eaf0; box-shadow: 0 0 0 1px #e6eaf0; }
+
+.player-skip-feedback { position:absolute; right:32px; bottom:160px; z-index:45; display:flex; align-items:center; gap:16px; max-width:calc(100% - 64px); padding:12px 16px; border-radius:12px; background:rgba(25,25,28,.94); color:white; }
+.player-skip-feedback[hidden] { display:none; }
+.player-skip-feedback button { color:white; background:transparent; border:1px solid #777; border-radius:6px; padding:6px 10px; cursor:pointer; }
+.player-auto-skip-setting { display:flex; gap:10px; align-items:center; padding:14px; font-size:13px; }

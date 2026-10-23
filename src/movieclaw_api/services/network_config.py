@@ -55,6 +55,7 @@ from movieclaw_net import (
     get_breaker,
     reset_all_breakers,
 )
+from movieclaw_sdk import deps
 from movieclaw_tracker import get_site_config
 from movieclaw_tracker.exceptions import SiteNotFoundError
 
@@ -95,12 +96,15 @@ async def build_config_view(session: AsyncSession) -> NetworkConfigView:
         tmdb_api_base_url=setting.tmdb_api_base_url,
         tmdb_image_base_url=setting.tmdb_image_base_url,
         douban_api_base_url=setting.douban_api_base_url,
+        pypi_index_url=setting.pypi_index_url,
         services=await _service_catalog(session),
         mirror_defaults={
             "tmdb_api_base_url": env_settings.tmdb_api_base_url,
             "tmdb_image_base_url": env_settings.tmdb_image_base_url,
             "douban_api_base_url": env_settings.douban_api_base_url,
+            "pypi_index_url": deps.DEFAULT_INDEX,
         },
+        pypi_index_presets={"PyPI": deps.DEFAULT_INDEX, "清华镜像": deps.TSINGHUA_INDEX},
         env_proxy_detected=env_proxy_url() or "",
     )
 
@@ -120,6 +124,7 @@ def _validate_payload(payload: NetworkConfigPayload) -> None:
         ("TMDB 接口镜像", payload.tmdb_api_base_url),
         ("TMDB 图床镜像", payload.tmdb_image_base_url),
         ("豆瓣接口地址", payload.douban_api_base_url),
+        ("插件依赖包索引", payload.pypi_index_url or ""),
     ):
         value = value.strip()
         if value and urlsplit(value).scheme not in ("http", "https"):
@@ -155,6 +160,11 @@ async def save_config(session: AsyncSession, payload: NetworkConfigPayload) -> N
             tmdb_api_base_url=payload.tmdb_api_base_url.strip(),
             tmdb_image_base_url=payload.tmdb_image_base_url.strip(),
             douban_api_base_url=payload.douban_api_base_url.strip(),
+            pypi_index_url=(
+                current_network_setting().pypi_index_url
+                if payload.pypi_index_url is None
+                else payload.pypi_index_url.strip().rstrip("/")
+            ),
         )
     )
     # 代理路由靠 transport 的 epoch 热切换，不需要重建；但镜像地址绑死在
@@ -204,6 +214,14 @@ async def _probe_target(service: str, session: AsyncSession) -> tuple[str, dict[
 
         key = current_fanart_setting().api_key
         return "https://webservice.fanart.tv/v3/movies/550", ({"api-key": key} if key else {})
+    if service == "web_search":
+        # 只探测线路，不带密钥、不消耗搜索配额。GET 搜索端点通常是 401/405，
+        # 只要有 HTTP 响应就说明出口通了；Key 是否有效去 AI 设定里测试。
+        from movieclaw_agent.web_search import probe_url_for
+        from movieclaw_api.settings import WebSearchSetting
+
+        setting = await get_setting_store().get(WebSearchSetting)
+        return probe_url_for(setting.provider), {}
     if service == "llm":
         # 端点与密钥的解析复用 llm_config（唯一判据来源）；这里只做
         # 轻量连通性探测（/models），完整有效性验证仍归 verify_llm_provider
@@ -224,12 +242,51 @@ async def _probe_target(service: str, session: AsyncSession) -> tuple[str, dict[
         try:
             token = ChannelAccountRepository.credentials(accounts[0])["token"]
         except Exception as exc:  # noqa: BLE001 -- 凭据损坏时返回可操作的中文错误
-            raise BadRequestException(
-                f"{channel_name} bot 凭据不可用，请重新绑定"
-            ) from exc
+            raise BadRequestException(f"{channel_name} bot 凭据不可用，请重新绑定") from exc
         if service == "telegram":
             return f"https://api.telegram.org/bot{token}/getMe", {}
         return "https://discord.com/api/v10/users/@me", {"Authorization": f"Bot {token}"}
+    if service == "feishu":
+        # 只探测线路：不 POST、不带 hook 令牌——往 Webhook 发请求就是往群里发消息。
+        # 接入了机器人就测它所在的主机（国际版 Lark 是 open.larksuite.com），
+        # 没接入测默认的 open.feishu.cn
+        host = "open.feishu.cn"
+        accounts = await ChannelAccountRepository(session).list_by_channel("feishu")
+        if accounts:
+            try:
+                creds = ChannelAccountRepository.credentials(accounts[0])
+            except Exception as exc:  # noqa: BLE001 -- 凭据损坏时返回可操作的中文错误
+                raise BadRequestException("飞书机器人凭据不可用，请重新接入") from exc
+            # 旧行的裸 URL 落在 token 里（见 feishu_channel.client.parse_credentials）
+            webhook_url = creds.get("webhook_url") or creds.get("token") or ""
+            host = urlsplit(webhook_url).hostname or host
+        return f"https://{host}/", {}
+    if service == "movieclaw_cloud":
+        # 用户点测试就是明确要发请求；探测连接第一步读的公开发现文档，不带任何凭据
+        from movieclaw_api.services.cloud import get_cloud_service
+
+        return f"{get_cloud_service().cloud_url()}/.well-known/movieclaw-cloud", {}
+    if service == "movieclaw_push":
+        # 测这个开关管得着的中继：官方中继（启用时），否则第一个公网上的自建中继。
+        # 局域网里的自建中继真实推送时总是直连、不受这个开关影响，不拿来测。
+        # 只读公开的 /v1/info，不带凭证（带凭证会被官方中继记作一次连接）
+        from movieclaw_api.services.cloud import get_cloud_service
+        from movieclaw_api.services.push.relay import is_lan_url
+        from movieclaw_api.settings.cloud import CloudSetting, PushChannelsSetting
+
+        store = get_setting_store()
+        channels = await store.get(PushChannelsSetting)
+        urls = (
+            get_cloud_service().push_endpoints(await store.get(CloudSetting))
+            if channels.official_enabled
+            else []
+        )
+        urls += [r.url for r in channels.relays if r.enabled and r.url and not is_lan_url(r.url)]
+        if not urls:
+            raise BadRequestException(
+                "没有走这个出口的推送中继（局域网里的自建中继总是直连，不受此开关影响），无法测试"
+            )
+        return f"{urls[0]}/v1/info", {}
     if service == "webhook":
         setting = await get_setting_store().get(WebhookSetting)
         endpoint = next(
@@ -256,6 +313,10 @@ async def _probe_target(service: str, session: AsyncSession) -> tuple[str, dict[
         if token:
             headers["Authorization"] = f"Bearer {token}"
         return url, headers
+    if service == "pypi":
+        from movieclaw_api.services.plugin_deps import index_url
+
+        return deps.index_page_url(index_url(), "pip"), {"Accept": deps.INDEX_ACCEPT}
     if service.startswith("site:"):
         site_id = service.removeprefix("site:")
         try:
@@ -295,6 +356,13 @@ def _classify_probe(service: str, status_code: int) -> NetworkTestResult:
         else:
             message = f"网络连通（HTTP {status_code}）"
         return NetworkTestResult(ok=True, message=message)
+    if service == "web_search":
+        return NetworkTestResult(
+            ok=True,
+            message=(
+                f"网络连通（HTTP {status_code}）。密钥是否有效请到「设置 → AI 设定」里测试连接"
+            ),
+        )
     if service == "github":
         if status_code == 200:
             message = "网络连通，可正常检查更新"
@@ -303,11 +371,13 @@ def _classify_probe(service: str, status_code: int) -> NetworkTestResult:
         else:
             message = f"网络连通（HTTP {status_code}）"
         return NetworkTestResult(ok=True, message=message)
+    if service == "movieclaw_cloud" and status_code == 200:
+        return NetworkTestResult(ok=True, message="网络连通，可正常访问 MovieClaw Cloud")
+    if service == "movieclaw_push" and status_code == 200:
+        return NetworkTestResult(ok=True, message="网络连通，可正常访问推送中继")
     if service in ("telegram", "discord") and status_code in (401, 403, 404):
         channel_name = "Telegram" if service == "telegram" else "Discord"
-        return NetworkTestResult(
-            ok=True, message=f"网络连通，但 {channel_name} bot Token 无效"
-        )
+        return NetworkTestResult(ok=True, message=f"网络连通，但 {channel_name} bot Token 无效")
     return NetworkTestResult(ok=True, message=f"网络连通（HTTP {status_code}）")
 
 

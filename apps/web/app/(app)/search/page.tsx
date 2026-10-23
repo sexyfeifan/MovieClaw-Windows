@@ -24,7 +24,7 @@ import { usePageChrome } from "@/lib/page-chrome";
 import { useSearchPrefs } from "@/lib/search-prefs";
 import { useSearchAccess } from "@/lib/search-access";
 import { buildSearchPath, parseSearchQuery } from "@/lib/search-url";
-import { useTheme } from "@/lib/ui-prefs";
+import { useLayout } from "@/lib/ui-prefs";
 import { useIsMobile } from "@/lib/use-media-query";
 import { usePageTitle } from "@/lib/use-page-title";
 
@@ -57,13 +57,17 @@ export default function SearchPage() {
   const torrentKey = useMemo(() => {
     const p = new URLSearchParams(key);
     p.delete("tab");
+    // fresh 是一次性指令（结果页取走即从地址栏抹掉），不是搜索身份的一部分
+    p.delete("fresh");
     return p.toString();
   }, [key]);
   const query = useMemo(
     () => parseSearchQuery(new URLSearchParams(torrentKey)),
     [torrentKey],
   );
-  // 手动选种模式（订阅详情页「手动选种」跳入）：for_sub = 目标订阅 id
+  // 一次性「要新结果」（快照条「重新搜索」带来，结果页发起搜索后即从地址栏抹掉）
+  const fresh = params.get("fresh") === "1";
+    // 手动选种模式（订阅详情页「手动选种」跳入）：for_sub = 目标订阅 id
   const forSubRaw = params.get("for_sub");
   const grabForSubscriptionId =
     forSubRaw != null && /^\d+$/.test(forSubRaw) ? Number(forSubRaw) : null;
@@ -93,9 +97,10 @@ export default function SearchPage() {
     router.push(`/search?${p.toString()}` as Route);
   };
 
-  // 快照提示条的「重新搜索」：切回实时搜索（丢掉 snapshot 参数）
+  // 快照提示条的「重新搜索」：切回实时搜索（丢掉 snapshot 参数）。带 fresh=1：
+  // 服务端可能还留着刚跑完的同一个搜索（正是这份快照），「重新搜索」要的是新结果
   const handleResearch = (keyword: string, scope: SearchScope, also?: string[]) => {
-    router.push(buildSearchPath({ keyword, also, scope }) as Route);
+    router.push(`${buildSearchPath({ keyword, also, scope })}&fresh=1` as Route);
   };
 
   /**
@@ -118,6 +123,7 @@ export default function SearchPage() {
       // 浏览模式没有关键词，影视/媒体库两个垂直无从谈起，强制落在站点资源上
       vertical={query.keyword ? vertical : "torrent"}
       grabForSubscriptionId={grabForSubscriptionId}
+      fresh={fresh}
       onSwitch={switchVertical}
       onScopeSwitch={switchScope}
       onResearch={handleResearch}
@@ -136,6 +142,7 @@ function SearchVerticals({
   query,
   vertical,
   grabForSubscriptionId,
+  fresh,
   onSwitch,
   onScopeSwitch,
   onResearch,
@@ -143,6 +150,7 @@ function SearchVerticals({
   query: SearchQuery;
   vertical: SearchVertical;
   grabForSubscriptionId: number | null;
+  fresh: boolean;
   onSwitch: (target: SearchVertical) => void;
   onScopeSwitch: (scope: SearchScope) => void;
   onResearch: (keyword: string, scope: SearchScope, also?: string[]) => void;
@@ -153,8 +161,8 @@ function SearchVerticals({
   const browsing = !query.keyword;
   // 银玻璃手机端：关键词胶囊 + 范围菜单挂进外壳顶栏（Netflix 主题与桌面维持原样）
   const chrome = usePageChrome();
-  const isNf = useTheme().structural;
-  const silverMobile = useIsMobile() && !isNf;
+  const cinema = useLayout() === "cinema";
+  const panelMobile = useIsMobile() && !cinema;
   // 各垂直是否已被访问过：访问过才挂载、之后保活
   const [visited, setVisited] = useState<Record<SearchVertical, boolean>>(() => ({
     media: vertical === "media",
@@ -190,7 +198,7 @@ function SearchVerticals({
   const setTopBarLeading = chrome?.setTopBarLeading;
   const keywordCapsule = useMemo(
     () =>
-      silverMobile ? (
+      panelMobile ? (
         <KeywordCapsule
           keyword={query.keyword}
           onClick={() =>
@@ -202,7 +210,7 @@ function SearchVerticals({
           }
         />
       ) : null,
-    [query, silverMobile, vertical],
+    [query, panelMobile, vertical],
   );
   useEffect(() => {
     if (!keywordCapsule || !setTopBarLeading) return;
@@ -218,7 +226,7 @@ function SearchVerticals({
   const switchScope = useCallback((scope: SearchScope) => scopeSwitchRef.current(scope), []);
   const setTopBarActions = chrome?.setTopBarActions;
   const showsScopeMenu =
-    silverMobile && vertical === "torrent" && visibleVerticalTabs.some((t) => t.id === "torrent");
+    panelMobile && vertical === "torrent" && visibleVerticalTabs.some((t) => t.id === "torrent");
   const scopeMenu = useMemo(
     () =>
       showsScopeMenu ? (
@@ -278,7 +286,7 @@ function SearchVerticals({
           </div>
 
           {/* 分类是真实搜索范围而非结果筛选：点击后更新 URL，并按该配置重新请求站点。 */}
-          {vertical === "torrent" && !silverMobile && (
+          {vertical === "torrent" && !panelMobile && (
             <div
               role="radiogroup"
               aria-label="站点资源搜索分类"
@@ -321,6 +329,7 @@ function SearchVerticals({
         <div className={vertical === "torrent" ? "min-h-0 flex-1" : "hidden"}>
           <SearchResults
             query={query}
+            fresh={fresh}
             onResearch={onResearch}
             grabForSubscriptionId={grabForSubscriptionId}
           />

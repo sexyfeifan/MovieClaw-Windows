@@ -16,6 +16,7 @@ import { ArtworkPickerDialog } from "@/components/artwork-picker-dialog";
 import { BrandLoader } from "@/components/brand-loader";
 import { CastRow } from "@/components/cast-row";
 import { ChapterStrip } from "@/components/chapter-strip";
+import { LibraryRelatedRows } from "@/components/library-related-rows";
 import { MediaTrackRows } from "@/components/media-track-rows";
 import { PAGE_NAV_BUTTON_CLASS } from "@/components/page-nav";
 import { useResolvedTheme } from "@/themes/registry";
@@ -24,6 +25,7 @@ import {
   CheckIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
+  CloudDriveIcon,
   FolderIcon,
   HeartIcon,
   MoreIcon,
@@ -33,13 +35,19 @@ import {
 import { useConfirm, useToast } from "@/components/feedback";
 import { Modal } from "@/components/modal";
 import { PosterImage } from "@/components/poster-image";
-import { markPlayIntent, playHref, rememberPlayerReturnPath } from "@/lib/player/play-links";
+import {
+  markPlayIntent,
+  pickedVersionFileId,
+  playHref,
+  rememberPlayerReturnPath,
+} from "@/lib/player/play-links";
 import { preloadHlsEngine } from "@/lib/player/engine";
 import { getCapabilitySnapshot } from "@/lib/player/capability";
 import { ReidentifyDialog } from "@/components/reidentify-dialog";
 import { ShareDialog } from "@/components/share-dialog";
 import { Tooltip } from "@/components/tooltip";
 import {
+  type FileCloudCopy,
   type ItemDeleteResult,
   type LibraryChapter,
   type LibraryEpisode,
@@ -99,7 +107,7 @@ import {
   rangeEntry,
   seasonAnchor,
 } from "@/lib/episode-ranges";
-import { useTheme } from "@/lib/ui-prefs";
+import { useLayout } from "@/lib/ui-prefs";
 import { usePageTitle } from "@/lib/use-page-title";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
 
@@ -358,29 +366,29 @@ export function LibraryItemDetailView({
   // 的 setOverrideBackdrop。没有横幅剧照时退回海报，覆盖层自己会铺满作氛围色。
   const { setOverrideBackdrop } = useBackdrop();
   const isMobile = useIsMobile();
-  const isNf = useTheme().structural;
-  const isNfDesktop = isNf && !isMobile;
-  // Netflix 桌面的滚动退场（与发现详情页同一套）：挂 html.nf-hero-live 标记类，
-  // 把滚动进度写进 --nf-hero-recede，globals.css 据此给沉浸覆盖层加渐暗 + 模糊、
+  const cinema = useLayout() === "cinema";
+  const cinemaDesktop = cinema && !isMobile;
+  // Netflix 桌面的滚动退场（与发现详情页同一套）：挂 html.hero-live 标记类，
+  // 把滚动进度写进 --hero-recede，globals.css 据此给沉浸覆盖层加渐暗 + 模糊、
   // 左侧纯黑遮罩护住上移后的标题。仅桌面启用——手机的剧照是页内 Hero
   // （showMobileHero），滚动容器铺黑已把全站背景层整个挡住，标记类无处生效。
   const scrollRef = useRef<HTMLDivElement>(null);
   const hasDetail = detail !== null;
   useEffect(() => {
-    if (!isNfDesktop) return;
+    if (!cinemaDesktop) return;
     const root = document.documentElement;
-    root.classList.add("nf-hero-live");
+    root.classList.add("hero-live");
     const el = scrollRef.current;
     if (!el) return () => {
-      root.classList.remove("nf-hero-live");
-      root.style.removeProperty("--nf-hero-recede");
+      root.classList.remove("hero-live");
+      root.style.removeProperty("--hero-recede");
     };
     let frame = 0;
     const sync = () => {
       frame = 0;
       const range = Math.max(320, el.clientHeight * 0.75);
       const progress = Math.min(1, Math.max(0, el.scrollTop / range));
-      root.style.setProperty("--nf-hero-recede", progress.toFixed(3));
+      root.style.setProperty("--hero-recede", progress.toFixed(3));
     };
     const onScroll = () => {
       if (!frame) frame = window.requestAnimationFrame(sync);
@@ -390,10 +398,10 @@ export function LibraryItemDetailView({
     return () => {
       el.removeEventListener("scroll", onScroll);
       if (frame) window.cancelAnimationFrame(frame);
-      root.classList.remove("nf-hero-live");
-      root.style.removeProperty("--nf-hero-recede");
+      root.classList.remove("hero-live");
+      root.style.removeProperty("--hero-recede");
     };
-  }, [isNfDesktop, hasDetail]);
+  }, [cinemaDesktop, hasDetail]);
   // 大图宽度按公式算（桌面整窗铺满、手机按页内 Hero 框铺满，见 useDetailHeroImageWidth）；
   // 量到之前先不取图，免得白拉一张错档的
   const heroWidth = useDetailHeroImageWidth(
@@ -408,7 +416,7 @@ export function LibraryItemDetailView({
   // Logo 靠固有尺寸撑开（max-w 420 / 手机 260、高 120 / 96 封顶），不能用 srcset
   // （w 描述符会改它的固有尺寸），按最大显示宽 × 屏幕倍率拼一个固定 w
   const logoSrc =
-    detail?.logo_url && !isNf && detail.logo_url !== failedLogo
+    detail?.logo_url && !cinema && detail.logo_url !== failedLogo
       ? imageUrl(detail.logo_url, { width: screenImageWidth(isMobile ? 260 : 420) })
       : "";
   // 手机也换全站背景，但页面本身不靠它显示：横版剧照铺满又高又窄的整屏只能按高度放大、
@@ -431,9 +439,9 @@ export function LibraryItemDetailView({
   const showMobileHero = isMobile && mobileHeroSrc !== "";
   // 银玻璃手机：整页底色取大图露出部分的底边色，Hero 底部渐变到同一个颜色
   // （lib/hero-edge-color.ts，与影片详情页、原生 App 同一套）；Netflix 维持纯黑
-  const silverHero = showMobileHero && !isNf;
+  const panelHero = showMobileHero && !cinema;
   const [heroEl, setHeroEl] = useState<HTMLDivElement | null>(null);
-  const edgeColor = useHeroEdgeColor(silverHero ? mobileHeroSrc : undefined, heroEl);
+  const edgeColor = useHeroEdgeColor(panelHero ? mobileHeroSrc : undefined, heroEl);
 
   // 待回收行的恢复 / 立即清理（library-file-recycle.md §7）。
   // 恢复是可逆动作直接执行；清理真删磁盘，原地待回收的额外讲清断种风险
@@ -777,7 +785,7 @@ export function LibraryItemDetailView({
       className={`detail-ambient scroll-thin scroll-safe relative isolate h-full overflow-y-auto rounded-2xl max-md:rounded-none ${
         showMobileHero ? "detail-ambient--hero" : ""
       }`}
-      style={silverHero && edgeColor ? ({ "--detail-page-color": edgeColor } as CSSProperties) : undefined}
+      style={panelHero && edgeColor ? ({ "--detail-page-color": edgeColor } as CSSProperties) : undefined}
     >
       {/* 没有任何 Hero 图层：全站背景此刻就是本片剧照（沉浸覆盖 + 本页豁免
           全局蒙版，见 app-shell 的 isHome），大图直出、零边界；.detail-ambient
@@ -798,7 +806,7 @@ export function LibraryItemDetailView({
         >
           <img src={mobileHeroSrc} alt="" decoding="async" className="size-full object-cover object-center" />
           <div className="absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-black/45 to-transparent" />
-          {silverHero ? (
+          {panelHero ? (
             <div className="detail-hero-fade absolute inset-x-0 bottom-0 h-[260px]" />
           ) : (
             <div className="absolute inset-x-0 bottom-0 h-[55%] bg-gradient-to-b from-transparent via-black/55 to-black" />
@@ -972,6 +980,13 @@ export function LibraryItemDetailView({
                       !isMovie && selectedSeriesEpisode
                         ? selectedSeriesEpisode.episode.episode_number
                         : undefined,
+                    // 用户在版本选择器里明确选过：播放页锁定这个文件起播，
+                    // 不做多版本自动择优（否则 720p 测试直出会压过 4K 转码）。
+                    // 没碰过选择器（默认高亮的第一个）不锁：交给服务端按观看场景择优
+                    fileId: pickedVersionFileId(
+                      selectedTrackFileId,
+                      availableTrackFiles.map((file) => file.id),
+                    ),
                   }) as Route,
                 );
               }}
@@ -1070,6 +1085,14 @@ export function LibraryItemDetailView({
             ]}
           />
         )}
+
+        {/* —— 相似推荐 → 作品系列：相似推荐只在自己库里挑（同主创、类型相近），有系列一行时排除同系列的片；
+            系列一行按上映顺序列全（缺的压暗、可订阅）。没有就整行不出 —— */}
+        <LibraryRelatedRows
+          libraryId={libraryId}
+          mediaItemId={detail.media_item_id}
+          seriesCollectionId={isMovie ? (detail.series_collection_id ?? null) : null}
+        />
 
         {/* 文件区固定收尾：电影列全部版本；剧集只列当前选中集的全部版本。
             两者共用同一套弱化、默认折叠样式，未入库集自然不渲染。 */}
@@ -1324,7 +1347,7 @@ export function PlayAction({
         onClick={onPlay}
         aria-label={progressText ? `${label}，${progressText}` : label}
         // media-cta 钩子类：媒体主行动键的主题换皮入口，Netflix 主题下
-        // 白底黑字 → 品牌红（见 themes/netflix/tokens.css）；银玻璃维持白键
+        // 白底黑字 → 品牌红（见 plugins/netflix/src/theme.css）；银玻璃维持白键
         className="media-cta inline-flex h-12 shrink-0 items-center justify-center gap-2.5 rounded-full bg-white px-8 text-body font-semibold text-black shadow-[0_10px_30px_rgba(0,0,0,0.35)] transition duration-200 hover:bg-white/90 active:scale-[0.985] max-md:h-11 max-md:w-full max-md:px-6"
       >
         <PlayIcon className="size-5" />
@@ -2415,6 +2438,15 @@ function FileSection({
 }
 
 /** 待回收行的倒计时文案：直读 purge_after，展示精度与清理周期无关。 */
+/** 文件位置标签：在哪、传到哪一步了（cloud-storage.md §2「界面一律陈述事实」） */
+function cloudLocationLabel(cloud: FileCloudCopy): string {
+  const where = cloud.backend_title;
+  if (cloud.state === "uploading") return `上传到 ${where} 中`;
+  if (cloud.state === "failed") return `没传上 ${where}`;
+  if (cloud.state === "lost") return cloud.local ? "本地" : `${where} 上不见了`;
+  return cloud.local ? `本地 + ${where}` : where;
+}
+
 function purgeCountdown(purgeAfter: string | null): string {
   if (!purgeAfter) return "不自动清理";
   const ms = new Date(purgeAfter).getTime() - Date.now();
@@ -2468,7 +2500,10 @@ function FileRow({
           <Tooltip
             content={
               <span className="tnum break-all font-mono text-caption leading-5">
-                {file.file_path}
+                {/* 只在网盘上的文件本地路径是虚拟位置，悬浮给网盘上的路径 */}
+                {file.cloud && !file.cloud.local && file.cloud.remote_path
+                  ? `${file.cloud.account_name} › ${file.cloud.remote_path}`
+                  : file.file_path}
               </span>
             }
             maxWidth={520}
@@ -2482,6 +2517,20 @@ function FileRow({
             </span>
           </Tooltip>
         </button>
+        {/* 位置标签：只有网盘副本的文件才标（纯本地的保持原样） */}
+        {file.cloud && (
+          <span
+            title={file.cloud.state === "failed" ? (file.cloud.error ?? undefined) : undefined}
+            className={`flex shrink-0 items-center gap-1 rounded border px-1.5 py-px text-micro ${
+              file.cloud.state === "failed"
+                ? "border-[var(--warn)]/30 text-[var(--warn)]/80"
+                : "border-white/15 text-[var(--text-muted)]"
+            }`}
+          >
+            <CloudDriveIcon className="size-3" />
+            {cloudLocationLabel(file.cloud)}
+          </span>
+        )}
         {file.missing && (
           <span className="shrink-0 rounded border border-[var(--warn)]/30 px-1.5 py-px text-micro text-[var(--warn)]/80">
             文件缺失
