@@ -256,3 +256,13 @@ commands.allow = ["install_downloaded_update"]
 identifier = "allow-open-downloaded-update"
 description = "Reveal a verified portable update for manual installation"
 commands.allow = ["open_downloaded_update"]
+
+[[permission]]
+identifier = "allow-open-plugin-page"
+description = "Opens a server-advertised plugin in an isolated browser without native permissions"
+commands.allow = ["open_plugin_page"]
+
+[[permission]]
+identifier = "allow-refresh-server-routes"
+description = "Refresh authenticated server addresses and anonymously verify transport aliases"
+commands.allow = ["refresh_server_routes"]

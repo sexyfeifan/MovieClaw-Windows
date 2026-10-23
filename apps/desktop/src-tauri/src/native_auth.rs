@@ -107,6 +107,10 @@ pub(crate) fn with_context_read<T>(operation: impl FnOnce() -> T) -> T {
     let _context = CONTEXT_CANCEL.lock().unwrap();
     operation()
 }
+#[cfg(test)]
+pub(crate) fn test_context(server: String) -> Context {
+    Context {namespace:server.clone(),server,generation:generation(),cancellation:CancellationToken::new()}
+}
 pub(crate) fn with_current<T>(
     context: &Context,
     operation: impl FnOnce() -> Result<T, String>,
@@ -290,21 +294,22 @@ async fn request(
     cancellation: Option<&CancellationToken>,
 ) -> Result<(u16, Value), String> {
     ensure_current(context)?;
+    let base = crate::connect::validate_http_url(&context.server)?;
+    let logical = url::Url::parse(&format!("{}/api/v1{path}",context.server)).map_err(|_|"服务器地址无效")?;
+    let operation = async {
+    let mut response = crate::server_routes::send(&base,&logical,&method,|wire| {
     let mut req = CLIENT
-        .request(method, format!("{}/api/v1{path}", context.server))
+        .request(method.clone(), wire)
         .header("User-Agent", concat!("MovieClaw-Windows/", env!("CARGO_PKG_VERSION"), " (Windows)"))
         .header("Accept", "application/json");
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }
-    if let Some(body) = body {
-        req = req.json(&body);
+    if let Some(body) = &body {
+        req = req.json(body);
     }
-    let operation = async {
-        let mut response = req
-            .send()
-            .await
-            .map_err(|_| fail(0, "NETWORK", "服务器暂时无法连接，请重试"))?;
+    Ok(req)
+    }).await.map_err(|_| fail(0,"NETWORK","服务器暂时无法连接，请重试"))?;
         let status = response.status().as_u16();
         if (300..400).contains(&status) {
             return Err(fail(

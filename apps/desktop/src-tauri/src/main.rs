@@ -10,6 +10,8 @@ mod mpv_ipc;
 mod native_auth;
 mod native_playback_platform;
 mod player_embedded;
+mod plugin_window;
+mod server_routes;
 mod updater;
 
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -117,7 +119,8 @@ fn native_ready(app: tauri::AppHandle) -> Result<&'static str, String> {
         )
         .map_err(|_| "无法写入启动诊断")?;
     }
-    native_playback_platform::diagnostic_probe(app);
+    native_playback_platform::diagnostic_probe(app.clone());
+    plugin_window::diagnostic_probe(app);
     Ok(env!("CARGO_PKG_VERSION"))
 }
 
@@ -283,6 +286,7 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if window.label() != "main" { return; }
             if matches!(event, tauri::WindowEvent::ScaleFactorChanged { .. } | tauri::WindowEvent::Resized(_)) {
                 native_playback_platform::window_changed(window);
             }
@@ -295,6 +299,8 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            plugin_window::open_plugin_page,
+            server_routes::refresh_server_routes,
             native_auth::native_auth_status,
             native_auth::native_password_login,
             native_auth::native_select_account,

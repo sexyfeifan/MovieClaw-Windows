@@ -169,6 +169,14 @@ public static class MovieClawSmokeWindow {
         }
         $measurement.platform = Get-Content $platformPath -Raw | ConvertFrom-Json -AsHashtable
         if ($measurement.platform.passed -ne $true) { throw 'Native platform lifecycle probe failed' }
+        $pluginPath = Join-Path $env:MOVIECLAW_DATA_DIR 'plugin-smoke.json'
+        $pluginDeadline = [DateTime]::UtcNow.AddSeconds(15)
+        while (-not (Test-Path $pluginPath)) {
+            if ($script:app.HasExited -or [DateTime]::UtcNow -gt $pluginDeadline) { throw 'Plugin WebView2 isolation probe did not finish' }
+            Start-Sleep -Milliseconds 100
+        }
+        $measurement.pluginIsolation = Get-Content $pluginPath -Raw | ConvertFrom-Json -AsHashtable
+        if ($measurement.pluginIsolation.passed -ne $true) { throw 'Remote plugin page could access native commands or failed to load' }
         $measurement.status = 'closing'
         $shutdownTimer = [System.Diagnostics.Stopwatch]::StartNew()
         $posted = [MovieClawSmokeWindow]::PostMessage($window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)

@@ -117,8 +117,9 @@ test('revoked entry fails closed before switching player and account change reje
  await page.locator('#friendsClose').click();await patch(request,{friendsRevoked:false,friendsDelay:600});await page.locator('#btnPlayerFriends').click();await page.evaluate(()=>{App.session.username='other';DesktopFriends.dispose();});await page.waitForTimeout(800);await expect(page.locator('#playerFriendsPanel')).toBeHidden();await expect(page.locator('.friends-member')).toHaveCount(0);
 });
 test('unsupported plugin and failed privacy save show truthful state without disabling playback',async({page,request})=>{
- await settings(page,request,{friendsUnsupported:true});await expect(page.locator('#friendsPrivacyState')).toContainText('尚未安装');await expect(page.locator('#setFriendsShare')).toBeDisabled();
- await patch(request,{friendsUnsupported:false,friendsSaveError:true});await page.locator('[data-page="home"]').click();await page.locator('[data-page="settings"]').click();await expect(page.locator('#setFriendsShare')).toBeEnabled();
+ await openDesktop(page,request,{friends:true,friendsUnsupported:true});await expect.poll(()=>page.evaluate(()=>!!App.session && !App._authPending)).toBe(true);
+ await page.locator('[data-page="settings"]').click();await expect(page.locator('.friends-settings')).toContainText('服务器未提供当前账号可用');await expect(page.locator('#setFriendsShare')).toHaveCount(0);
+ await patch(request,{friendsUnsupported:false,friendsSaveError:true});await page.evaluate(()=>DesktopPlugins.refresh(true));await page.locator('[data-page="home"]').click();await page.locator('[data-page="settings"]').click();await expect(page.locator('#setFriendsShare')).toBeEnabled();
  await page.locator('#friendsLibraries input[value="1"]').check();await page.locator('#setFriendsShare').check();await page.locator('#saveFriendsPrivacy').click();await expect(page.locator('#friendsPrivacyState')).toContainText('未保存');await expect(page.locator('#setFriendsShare')).not.toBeChecked();
 });
 test('drawer fits narrow windows, names are escaped and closing stops polling and restores auto-hide',async({page,request})=>{

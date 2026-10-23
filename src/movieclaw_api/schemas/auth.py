@@ -14,6 +14,7 @@ class BootstrapStatus(BaseModel):
     """首次初始化状态：前端据此决定进引导页（/setup）还是登录页（/login）。"""
 
     initialized: bool
+    native_device_kinds: list[str] = Field(default_factory=list)
 
 
 class BootstrapRequest(BaseModel):
@@ -224,7 +225,9 @@ class DeviceRequestView(BaseModel):
 class DeviceClientInfo(BaseModel):
     """原生 App 登录时自报的设备信息。"""
 
-    kind: Literal["ios", "tvos", "macos", "android", "androidtv"] = Field(description="App 平台")
+    kind: Literal["ios", "tvos", "macos", "android", "androidtv", "windows"] = Field(
+        description="App 平台"
+    )
     installation_id: str = Field(
         min_length=8,
         max_length=128,

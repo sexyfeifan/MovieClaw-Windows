@@ -425,6 +425,7 @@ const App = {
       await (pairing.cancelPromise ||= API.cancelPairing(pairing.id));
     }
     window.DesktopCatalog?.reset();
+    window.DesktopPlugins?.reset();
     document.getElementById('accountPanel')?.remove();
     document.getElementById('cardMenu')?.remove();
     this._changingContext = true;
@@ -875,6 +876,10 @@ const App = {
       this.libraries = (libs?.data || libs || []).filter(lib => lib.viewer_access !== false && lib.kind !== 'photo');
       this.collections = colls?.data || colls || [];
       this.uiPreferences = prefs?.data || prefs || {};
+      await window.DesktopPlugins?.load(api, api.defaultSignal);
+      await window.DesktopFriends?.discover(api, api.defaultSignal);
+      if (epoch !== API.contextEpoch) return;
+      API.nativeCall('refresh_server_routes').catch(() => {});
       this.homeRows = HomeRows.build(this.uiPreferences.home?.rows || [], this.libraries, this.collections);
       console.log('Libraries:', this.libraries.length, 'Collections:', this.collections.length);
       this.renderSidebar();
@@ -905,6 +910,8 @@ const App = {
     });
 
     window.DesktopCatalog?.nav();
+    window.DesktopPlugins?.nav();
+    window.DesktopFriends?.refreshButton();
     const account = document.getElementById('accountButton');
     if (account) {
       const name = this.session?.nickname || this.session?.username || '账号';

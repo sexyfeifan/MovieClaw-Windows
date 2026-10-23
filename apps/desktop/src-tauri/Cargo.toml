@@ -1,6 +1,6 @@
 [package]
 name = "movieclaw-desktop"
-version = "0.1.1"
+version = "1.1.0"
 edition = "2021"
 description = "MovieClaw for Windows — 桌面客户端（WebView2 + mpv）"
 
@@ -20,6 +20,12 @@ tokio-util = { version = "0.7", features = ["rt"] }
 base64 = "0.22"
 cookie = "0.18"
 sha2 = "0.10.9"
+ring = "0.17.14"
+bytes = "1.12.1"
+hyper = { version = "1.12.0", features = ["server", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+http-body-util = "0.1.5"
+futures-util = "0.3.34"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = ["Foundation", "Media", "Storage_Streams", "Win32_Foundation", "Win32_System_Power", "Win32_System_WinRT", "Win32_UI_WindowsAndMessaging", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }

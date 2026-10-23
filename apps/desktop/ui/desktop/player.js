@@ -1401,6 +1401,7 @@ const Player = {
       ].map(([mode, label, detail]) => `<button type="button" class="player-settings-item stacked ${this.fullscreenFit === mode ? 'active' : ''}" data-player-action="frame" data-fit="${mode}" aria-pressed="${this.fullscreenFit === mode}">
         <span class="item-text"><span class="item-label">${label}</span><span class="item-info">${detail}</span></span>${check}</button>`).join('');
     }
+    window.DesktopAutoSkip?.controls(content);
     // Server metadata is text/data only. Do not embed track refs in executable attributes.
     for (const row of content.querySelectorAll('[data-player-action]')) {
       row.addEventListener('click', () => {
@@ -1728,6 +1729,7 @@ const Player = {
   currentSkipIndex: -1,
 
   initSegments(segments) {
+    window.DesktopAutoSkip?.attach(this, this.sessionData);
     this.currentSegments = segments || [];
     this.currentSkipIndex = -1;
     const btn = document.getElementById('playerSkipBtn');
@@ -1736,6 +1738,7 @@ const Player = {
 
   checkSegments() {
     if (!this.activeEngine) return;
+    if (window.DesktopAutoSkip?.check(this)) return;
     const curMs = this.engPos() * 1000;
     const btn = document.getElementById('playerSkipBtn');
     const index = this.currentSegments.findIndex(seg => !(seg.type === 'outro' && seg.to_end) &&
@@ -1754,6 +1757,7 @@ const Player = {
 
   skipSegment() {
     const seg = this.currentSegments[this.currentSkipIndex];
+    if (seg) window.DesktopAutoSkip?.manual(this, seg);
     if (seg && this.activeEngine && !(seg.type === 'outro' && seg.to_end)) this.engSeekTo(seg.end_ms / 1000);
     const btn = document.getElementById('playerSkipBtn');
     if (btn) btn.hidden = true;
@@ -1993,6 +1997,7 @@ const Player = {
   close(options = {}) {
     window.DesktopFriends?.dispose();
     if (options.invalidate !== false && typeof App !== 'undefined') App._playbackSeq = (App._playbackSeq || 0) + 1;
+    window.DesktopAutoSkip?.reset();
     if (typeof App !== 'undefined') { App.cancelAutoNext(); clearTimeout(App._networkRetryTimer); App._networkRetryTimer = null; }
     const nativeFullscreenRestore = options.hide !== false ? this.restoreNativeFullscreen() : Promise.resolve();
     if (!this.activeEngine && this._closePromise) {
@@ -2688,7 +2693,7 @@ const Player = {
     const box = (r) => [r.left, r.top, r.width, r.height].map((v) => Math.round(v * scale));
     // 视频始终占满容器，控件只保留网页绘制区域，不改变 mpv 的画幅。
     // opacity 过渡结束后再挖掉隐藏的控件，避免全屏留下上下黑带。
-    const overlays = ['playerTopbar', 'playerFriendsPanel', 'playerCenterBtn', 'playerSpeedBadge', 'playerLoading', 'playerInfoPanel', 'playerSettingsPanel', 'playerSpeedPanel', 'playerSkipBtn', 'playerDialog', 'autoNextCard']
+    const overlays = ['playerTopbar', 'playerFriendsPanel', 'playerCenterBtn', 'playerSpeedBadge', 'playerLoading', 'playerInfoPanel', 'playerSettingsPanel', 'playerSpeedPanel', 'playerSkipBtn', 'autoSkipFeedback', 'playerDialog', 'autoNextCard']
       .map((id) => document.getElementById(id))
       .concat(controls.querySelector('.player-transport'));
     const visibleOverlays = overlays

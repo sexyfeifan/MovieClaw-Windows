@@ -27,7 +27,7 @@ const session = body => {
   return { session_id: sid, stream_url: state.hls ? '/test-media/index.m3u8' : '/fixture.mp4', timeline: 'session', start_ms: body.start_ms ?? 300000,
     decision: { outcome: 'plan', tier: 1, audio_tracks: [], subtitles: [], source_duration_ms: 3600000 },
     source: { file_id: body.file_id || body.media_item_id, container: 'mkv', video_codec: 'hevc', duration_ms: 3600000 },
-    subtitle_urls: [], chapters: [], segments: [], watch: { position_ms: 300000, duration_ms: 3600000 } };
+    subtitle_urls: [], chapters: [], segments: state.segments || [], auto_skip: state.autoSkip || {enabled:true,intro:false}, watch: { position_ms: 300000, duration_ms: 3600000 } };
 };
 async function bodyOf(req) {
   const chunks = []; for await (const chunk of req) chunks.push(chunk);
@@ -223,7 +223,15 @@ http.createServer(async (req, res) => {
       }
       return json(res, {}, state.libraryCovers === 'protected' ? 401 : 404);
     }
-    if (route === '/ui/preferences') return json(res, ok({ home: { rows: state.homeRows || [] } }));
+    if (route === '/ui/apps') return json(res, ok(state.pluginApps || []));
+    if (route === '/playback/auto-skip' || route.startsWith('/playback/auto-skip/intro/')) {
+      if (state.autoSkipDelay) await new Promise(resolve=>setTimeout(resolve,state.autoSkipDelay));
+      if (state.autoSkipError) return json(res,{code:'SAVE_FAILED',message:'设置保存失败'},503);
+      state.autoSkip ||= {enabled:true,intro:false};
+      state.autoSkip[route.includes('/intro/') ? 'intro' : 'enabled']=!!body.enabled;
+      return json(res,ok(null));
+    }
+    if (route === '/ui/preferences') return json(res, ok({ home: { rows: state.homeRows || [] },nav:state.nav || {} }));
     if (/^\/libraries\/kinds\/\w+\/genres$/.test(route)) return json(res, ok([{ value: '28', label: '动作', count: 120, cover_url: null }, { value: '18', label: '剧情', count: 125, cover_url: null }]));
     if (route === '/collections') return json(res, ok([{ id: 8, name: '测试合集', library_id: 1, hidden: false, item_count: state.itemCount || 245 }]));
     if (/^\/(libraries\/1|libraries\/kinds\/\w+|collections\/8)\/items$/.test(route) || route === '/playback/favorites') {
